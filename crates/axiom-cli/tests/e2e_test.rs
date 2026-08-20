@@ -825,3 +825,59 @@ public class Phase1DetectorSetTest {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// An index written before the side tables existed is a bare `{symbol: node}`
+/// map. Those files are already on disk in working trees, so loading one must
+/// keep working rather than failing the server at startup; it simply carries no
+/// accessor resolution until the next scan rewrites it.
+#[tokio::test]
+async fn test_e2e_legacy_bare_map_index_still_loads() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_legacy_index_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let index_file = temp_dir.join("index.json");
+
+    // Exactly the shape the old save_to_disk produced: nodes, nothing else.
+    let legacy = r#"{
+  "se.deversity.asynctest.Widget": {
+    "id": "node_legacy01",
+    "symbol_path": "se.deversity.asynctest.Widget",
+    "kind": "class",
+    "hash": "abc123",
+    "source_range": [0, 20],
+    "signature": "public class Widget",
+    "docstring": null,
+    "dependencies": []
+  },
+  "se.deversity.asynctest.WidgetTest": {
+    "id": "node_legacy02",
+    "symbol_path": "se.deversity.asynctest.WidgetTest",
+    "kind": "test",
+    "hash": "def456",
+    "source_range": [0, 30],
+    "signature": "public class WidgetTest",
+    "docstring": null,
+    "dependencies": ["se.deversity.asynctest.Widget"]
+  }
+}"#;
+    std::fs::write(&index_file, legacy)?;
+
+    let loaded = axiom_ast::AstIndex::load_from_disk(&index_file)?;
+    assert_eq!(loaded.total_symbols_count(), 2, "both legacy nodes must load");
+
+    // Reverse dependencies are rebuilt from the nodes, so the plain
+    // import-derived path still resolves without any side tables.
+    let br = loaded
+        .compute_blast_radius("se.deversity.asynctest.Widget", 1)
+        .expect("legacy index must still answer blast radius");
+    assert!(
+        br.impacted_tests.iter().any(|t| t.contains("WidgetTest")),
+        "dependent test must resolve from a legacy index; got {:?}",
+        br.impacted_tests
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

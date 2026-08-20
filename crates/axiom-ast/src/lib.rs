@@ -996,9 +996,16 @@ fn strip_comments_and_strings(content: &str) -> String {
         let payload: PersistedIndex = match serde_json::from_str::<PersistedIndex>(&content) {
             Ok(p) => p,
             Err(struct_err) => {
-                let nodes: HashMap<String, AstNode> = serde_json::from_str(&content).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::Other, struct_err.to_string())
-                })?;
+                let nodes: HashMap<String, AstNode> =
+                    serde_json::from_str(&content).map_err(|bare_err| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!(
+                                "{:?} parses as neither the current index format ({})                                  nor a legacy bare node map ({})",
+                                abs_path, struct_err, bare_err
+                            ),
+                        )
+                    })?;
                 PersistedIndex {
                     format_version: 1,
                     nodes,
