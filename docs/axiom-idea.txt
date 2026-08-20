@@ -1,0 +1,619 @@
+Reimagining GitHub for the agentic age requires abandoning the core assumption of traditional version control: that a repository is a passive, text-based ledger meant for human eyes. An agent-native platform must shift from line-based text collaboration to machine-addressable intent, instantaneous execution feedback, and strict Zero-Trust boundaries.
+
+Goal; super-fast feedback loop built for AI agentic workflow  - not that when codebase grows build, tests, compiling or creating distributables takes so long time
+
+The Problem
+GitHub was built for humans who read lines of text and can wait five minutes for CI tests to run. AI coding agents don’t work that way—they need to navigate code like a graph, test hypotheses instantly, and iterate in tight feedback loops without breaking things.
+
+The Solution (The One-Liner)
+A living, agent-native code platform that turns repositories into high-speed MCP servers with built-in sub-15ms test execution sandboxes.
+
+How It Works in 4 Steps
+Connect via MCP (No Local Clones):
+Instead of an agent downloading gigabytes of source code to a local machine, the repository acts as an always-on Model Context Protocol (MCP) server. The agent simply asks: "Where is this function used?" or "Give me the definition of class X," and gets immediate, structured graph data.
+
+
+Semantic Edits (AST Over Text):
+The agent submits proposed changes as structural edits to the Abstract Syntax Tree (AST), not blind line diffs. The platform automatically prevents syntax-breaking hallucinations and checks architectural rules before anything touches the code tree.
+
+
+Sub-15ms Instant Feedback:
+The moment an edit is proposed, the platform forks a frozen, pre-warmed microVM snapshot in under 2 milliseconds. It runs the affected tests inside isolated memory, returns a clean JSON summary of what passed or failed, and vanishes.
+
+
+Self-Correction & Provenance:
+The agent sees the deterministic test failure instantly, fixes its logic within seconds, and re-tests. Once all invariants pass, the change is committed alongside the agent's full cryptographic reasoning trace for human review.
+
+
+The Takeaway
+Traditional version control is a passive text warehouse. This platform is an active, executable environment where AI agents can write, test, and prove code safely at machine speed.
+
+It should be written in real, existing programming languages—not pseudo-code.
+
+Pseudo-code sounds appealing because it’s flexible, but an agent-native repository relies on unforgiving, deterministic execution.
+
+Why Pseudo-Code Breaks the Model
+You Can't Execute Pseudo-Code at 15ms: The entire engine depends on instant execution in pre-warmed microVMs. Pseudo-code lacks an exact machine specification, meaning you can't run concrete unit tests, measure memory, or verify binary invariants.
+
+
+Ambiguity Kills Determinism: LLMs naturally hallucinate when semantics are loose. Real compilers and type systems (Rust, Java, TypeScript, Go) act as hard, mathematical rails. The compiler error is the agent's best guidance signal.
+
+
+Ecosystem Isolation: Software doesn't live in a vacuum. It needs real package managers, battle-tested standard libraries, optimized drivers, and hardware primitives. Pseudo-code throws away 40 years of open-source ecosystems.
+
+
+What Actually Replaces the "Need" for Pseudo-Code
+Instead of inventing a new language, the platform handles the polyglot problem at the infrastructure and representation layers:
+
+Layer
+How It Solves the Polyglot Problem
+1. Universal Syntax (Tree-sitter)
+The platform treats all code—Java, Rust, Python, Go—as normalized Abstract Syntax Tree (AST) nodes. The agent interacts with symbols, nodes, and scopes rather than parsing arbitrary text quirks.
+2. Universal Semantics (SCIP / LSIF)
+Symbol graphs, type hierarchies, and cross-file references are indexed into a uniform graph format across every major language.
+3. Interface Definitions (Protobuf / OpenAPI)
+When systems need to talk across language boundaries, they use strict, language-agnostic interface schemas—not pseudo-code.
+4. Polyglot MicroVM Sandboxes
+The microVM snapshot engine doesn't care whether the byte array in guest RAM is running a JVM, a Node V8 isolate, or a native ELF binary. It simply boots the pre-warmed runtime and runs the task.
+
+The Reality for the Agent
+To an AI agent querying the platform via MCP, every language feels like structured data:
+
+Agent Intent ──> MCP Request (AST/Symbol Query) ──> Language-Neutral Graph (SCIP)
+                                                           │
+                                                           ▼
+Deterministic Result <── MicroVM Test Loop (<15ms) <── Concrete Language Execution
+
+
+The source code stays in real, high-performance languages (Java, TypeScript, Python, Rust, etc.), but the agent interfaces with it through universal AST tools and instant execution feedback.
+
+
+In the AI age, building and distributing software must move away from centralized CI servers compiling static tarballs. When thousands of autonomous agent runs happen every minute, the build and distribution pipeline must become content-addressed, predictive, and edge-distributed at the sub-AST level.
+
+1. The AI-Native Build Engine
+Traditional builds recompile files and run entire test directories. An agentic build engine operates at the granularity of individual AST nodes and function blocks.
+
+AST-Node Content Addressing (Merkle Graphs): Every function, struct, and test is hashed based on its normalized AST (ignoring whitespace and variable renames). If an agent alters calculateTax(), only that node's hash changes.
+
+
+Global Pre-Compiled CAS (Content-Addressable Storage): Because LLMs often generate similar boilerplate, patterns, or utility functions across different agents, compiled binary artifacts (WASM bytecode, .class files, object files) are cached in a global, distributed CAS. If another agent or repo has compiled that exact AST node before, compilation is instant (0ms).
+
+
+Predictive Test Selection (Blast-Radius Pruning): Instead of running a test suite, the static graph maps direct caller-callee dependencies. When an agent changes AST node X, the platform executes only the k tests that have execution paths touching node X, shrinking test execution scope by 95%+.
+
+
+2. Global Distribution Architecture (Edge Snapshot Clusters)
+Agents run locally on developer machines, in the cloud, or across distributed swarms. The platform cannot rely on a single central datacenter without incurring 150ms round-trip network penalties.
+
+                 +-----------------------------------+
+                  |      Anycast MCP Gateway          |
+                  +-----------------+-----------------+
+                                    |
+          +-------------------------+-------------------------+
+          v                                                   v
++-----------------------+                           +-----------------------+
+| Edge POP (e.g. EU)    |                           | Edge POP (e.g. US)    |
+|                       |                           |                       |
+| [P2P Snapshot Pool]   |                           | [P2P Snapshot Pool]   |
+| [MicroVM Warm Slots]  |                           | [MicroVM Warm Slots]  |
+| [AST Graph Replica]   |                           | [AST Graph Replica]   |
++-----------+-----------+                           +-----------+-----------+
+            | (AF_VSOCK / <2ms)                                 |
+            v                                                   v
+   [Local Agent Worker]                                [Local Agent Worker]
+
+
+Anycast MCP Edge Gateways: Agents connect to a single globally routed endpoint. The connection terminates at the nearest edge Point of Presence (POP) within 5–10ms of the agent's LLM inference runner.
+
+
+Pre-Positioned Snapshot Pools: Base snapshot memory dumps (rootfs + initialized VM memory) are replicated across edge clusters. When an agent hits the edge POP, a pre-warmed snapshot is already residing in local host RAM.
+
+
+Snapshot Layer Streaming over P2P: Instead of sending gigabyte VM images across regions, base VM layers are distributed using high-speed P2P chunking (similar to DragonFly or BitTorrent protocol layers). Edge nodes pull only dirty page deltas.
+
+
+3. Agent Swarm Synchronization (CRDTs on ASTs)
+In the agentic age, 50 specialized agents might work on the same codebase simultaneously (one refactoring a database layer, another writing unit tests, a third fixing security issues). Standard git merge conflicts would paralyze the system.
+
+Tree-Based CRDTs (Conflict-Free Replicated Data Types): Code changes are treated as commutative tree operations (insert node, replace branch, delete node). Independent agents modifying adjacent functions in the same module merge automatically without human-style textual merge conflicts.
+
+
+Continuous Semantic Validation: As CRDT operations merge in real time, background microVMs continuously run verification passes against the combined AST, rolling back any agent operation that introduces type or invariant errors.
+
+
+4. Zero-Trust Binary Attestation & Provenance
+When code is generated autonomously by non-deterministic models, the distribution pipeline must prove cryptographic authenticity before deploying to production.
+
+Hermetic Attestation Chains: Every distributed artifact (container image, binary, library) is built inside a network-isolated microVM and tagged with a cryptographic signature containing:
+
+
+
+The exact prompt and tool-call sequence that generated the code.
+
+
+The deterministic AST input hash.
+
+
+The verified compiler and test-pass execution trace.
+
+
+Automated Binary Policy Gates: Production deployment pipelines don't just verify that a human signed a PR—they verify the zero-trust attestation chain proving that the code was generated within an isolated microVM sandbox and passed all deterministic boundary invariants.
+
+
+
+
+To build an agent-native code platform from the ground up, you need five architectural pillars:
+
+1. Semantic VCS Over Text-Based Git
+Agents struggle with massive raw text dumps but excel with structured data.
+
+AST-Level Tracking: The underlying version control tracks changes to the Abstract Syntax Tree (AST) and module boundaries rather than just text lines.
+
+
+Graph-Indexed Storage: Every commit automatically updates a vector and graph index of the codebase, allowing agents to instantly resolve call graphs, dependencies, and symbolic references without parsing regex.
+
+
+2. Repositories as Native MCP Servers
+Instead of agents pulling code to local file systems, the repository itself operates as an always-on Model Context Protocol (MCP) server.
+
+It exposes standardized tools directly to the agent (read_symbol, find_references, execute_test_method).
+
+
+Agents query the repo for context rather than maintaining brittle local clones.
+
+
+3. The Instantaneous Sandbox (Synchronous CI/CD)
+Agent-native workflows operate in multi-step task loops (write, execute, evaluate, correct). They cannot wait five minutes for a traditional async GitHub Action to spin up.
+
+MicroVM execution: The platform provides Firecracker or WebAssembly microVMs directly attached to the repository.
+
+
+When an agent makes a change, it receives deterministic REPL-like feedback—compilation errors, test failures, or type-checker results—in milliseconds, allowing it to self-correct before a human ever sees the pull request.
+
+
+4. Machine-Addressable Intent & Guardrails
+Where traditional repos have a README.md and CONTRIBUTING.md, an agent-native repo requires declarative rulesets.
+
+Intent Artifacts: Files like AGENTS.md or RULES.md define subsystem responsibilities, context, and structural invariants.
+
+
+Compile-Time Guardrails: Instead of relying purely on prompts, the platform enforces boundaries locally. (e.g., compile-time annotation processors that generate platform-specific guardrail configurations, strictly blocking the LLM from hallucinating unauthorized architectural dependencies).
+
+
+5. Zero Trust Agent Identity & Sandboxing
+Because agents generate high volumes of executable code, the threat model flips. Rogue or hallucinating agents must be contained.
+
+Strict Chroot/Jail Networking: Agents run in isolated environments with explicit, pre-authorized data exchanges. Network egress is blocked by default.
+
+
+Local Proxy Firewalls: All traffic between the agent, the LLM API, and the repository tools passes through an intercepting proxy firewall that sanitizes inputs and blocks prompt-injected execution commands before they hit the host OS.
+
+
+The human interface fundamentally changes. Instead of reviewing 5,000-line diffs, humans review the agent's reasoning trace, the guaranteed invariant test results, and the cryptographic provenance of the commit.
+Making the platform language-agnostic requires shifting the core abstraction away from language-specific compilers and runtimes. The system must interact with code exclusively through universal intermediate representations, language-neutral protocols, and containerized runtimes.
+
+Four universal layers enable true language agnosticism across an agent-native repository:
+
+1. Universal Syntax Trees via Tree-sitter & LSIF/SCIP
+Instead of building custom parsers for every language:
+
+Tree-sitter Grammars: The repository uses Tree-sitter parsers (supporting 100+ languages) to generate concrete syntax trees uniformly. Changes are diffed and validated at the node level (functions, classes, blocks) rather than raw text lines.
+
+
+SCIP (Source Code Intelligence Protocol): Indexing relies on SCIP/LSIF emitted by standard language toolchains. This creates a unified symbol graph across Java, Rust, Python, Go, or TypeScript, allowing the platform’s MCP server to expose identical semantic tools (get_symbol_definition, get_callers, find_references) regardless of the underlying syntax.
+
+
+2. Polyglot Execution via WASM & OCI MicroVMs
+To provide instant test feedback without maintaining bespoke runners:
+
+WebAssembly (WASI): For languages targeting WASM, code execution and invariant checking happen inside millisecond-startup WASI sandboxes.
+
+
+Snapshotting MicroVMs (Firecracker / Cloud-Hypervisor): For languages requiring full operating system runtimes, the repo stores base rootfs snapshots with pre-warmed runtimes. Agents trigger ephemeral, copy-on-write VM forks that boot in under 15 milliseconds, run test commands, return structured JSON exit reports, and discard state.
+
+
+3. Standardized Verification & Test Harnesses
+To avoid agent confusion over varying test runners (JUnit, pytest, cargo test, vitest):
+
+Common Test Output Protocol: Test runners pipe output through language-specific adapters into a standardized schema:
+
+
+
+JSON
+{
+  "status": "FAILED",
+  "failed_checks": [
+    {
+      "symbol": "auth.service.validateToken",
+      "expected": "ValidTokenResponse",
+      "actual": "NullPointer / Panic",
+      "stack_trace_nodes": ["auth.service:42", "gateway.filter:18"]
+    }
+  ]
+}
+
+
+
+
+Agents interact with one uniform feedback format, removing the need to learn different regex patterns for each language's compiler output.
+
+
+4. Language-Neutral Guardrails & Invariants
+Architectural boundaries must not depend on language-specific static analyzers.
+
+Declarative Graph Constraints: Architectural rules are defined as structural queries over the dependency graph (e.g., FORBID layer.presentation -> layer.database). The engine evaluates these graphs at commit time regardless of whether the edges represent Java imports, Python modules, or C includes.
+
+
+Contract-First Testing: Interfaces between modules are validated using declarative protocols (Protobuf, OpenAPI, JSON Schema). The repo tests compatibility against the contract, treating individual language implementations as black boxes.
+
+To achieve deterministic, language-agnostic sub-15ms test execution, you cannot afford cold boots, standard container startup overhead (100–500ms), or file system duplication. The architecture relies on pre-warmed microVM state snapshots, copy-on-write (CoW) memory mapping via userfaultfd, and a high-speed AF_VSOCK host-guest protocol.
+
+End-to-End System Architecture
++-------------------------------------------------------------------------------+
+| HOST ORCHESTRATION LAYER (Rust / Tokio)                                       |
+|                                                                               |
+|  Agent Request   +-------------------+    Acquire Snapshot Slot               |
+|  [Diff + Target] | Execution Manager | ------------------------+              |
+|         |        +-------------------+                         |              |
+|         v                  |                                   v              |
+|  +-------------+           | Dispatch Task             +-------------------+  |
+|  | Diff Inject |           v                           | Pre-warmed Pool   |  |
+|  | (Over vhost)|     +-------------+                   | (Base VM Memory & |  |
+|  +-------------+     | Task Worker |                   |  Vhost-user Root) |  |
+|         |            +-------------+                   +-------------------+  |
++---------|-------------------|------------------------------------|------------+
+          |                   |                                    |
+          |                   v (fork / resume < 2ms)              |
++---------|--------------------------------------------------------|------------+
+| RUNTIME HYPERVISOR (Firecracker / Cloud-Hypervisor with KVM)     v            |
+|                                                                               |
+|   +-----------------------------------------------------------------------+   |
+|   | MicroVM Worker Instance                                               |   |
+|   |                                                                       |   |
+|   |   +------------------+     +-------------------+     +------------+   |   |
+|   |   | Linux Guest (CoW)|     | Workspace Overlay |     | Micro-Init |   |   |
+|   |   | (uffd-backed RAM)|     | (virtio-fs / CoW) |     | (Daemon)   |   |   |
+|   |   +------------------+     +-------------------+     +------------+   |   |
+|   |            ^                         ^                      ^         |   |
+|   +------------|-------------------------|----------------------|---------+   |
++----------------|-------------------------|----------------------|-------------+
+                 |                         |                      |
+                 | Host virtio-blk/fs      | Shared Memory / Page | AF_VSOCK
+                 | (Overlayfs Delta)       | Fault via userfaultfd| Protocol
+
+
+Core Architectural Components
+1. Snapshot Generation (Base Warm State)
+The snapshot process pre-initializes runtimes up to the exact moment before test execution:
+
+Boot a minimal guest Linux kernel (vmlinux stripped of unneeded drivers, < 2MB).
+
+
+The runtime environment (e.g., JVM, Node.js, Python VM, or Cargo test binary) boots inside the guest and loads core project dependencies into memory.
+
+
+The guest daemon signals readiness and pauses the VM.
+
+
+The hypervisor dumps:
+
+
+
+CPU & Device State: Register state, virtio device states (~200 KB).
+
+
+Base Memory Dump: Full RAM snapshot mapped to a read-only backing file.
+
+
+2. Sub-2ms Resumption via userfaultfd
+Standard memory restoration (memcpy of a 512MB–2GB heap) takes 50–200ms. To bypass this:
+
+The host process creates an anonymous mmap region for the guest RAM and registers it with the Linux kernel's userfaultfd.
+
+
+Zero Initial Copy: The VM is resumed immediately with its saved CPU registers.
+
+
+On-Demand Paging: When the guest CPU accesses a page not yet in physical memory, the host kernel traps the fault. A host background thread resolves the missing page directly from the read-only snapshot file in $\approx 10\ \mu\text{s}$.
+
+
+Copy-on-Write (CoW): Modified pages are written only to ephemeral worker memory, never mutating the base template.
+
+
+3. Ephemeral Filesystem Diffing via virtio-fs
+Injecting agent code changes into the VM cannot rely on disk re-writes:
+
+The guest root filesystem is mounted read-only from a shared base image.
+
+
+Agent workspace diffs are written to an ephemeral memory ring or mapped via virtio-fs backed by DAX (Direct Access / Zero-Copy Memory).
+
+
+Guest-side write operations hit an in-memory overlayfs layer, ensuring pristine workspace state on every task run.
+
+
+4. Host-Guest Communication over AF_VSOCK
+To eliminate network stack overhead (TCP/IP handshake, ARP, packet filtering):
+
+The agent test harness speaks directly to the in-guest worker daemon via AF_VSOCK (virtual socket device).
+
+
+Low-latency byte-stream messaging carries task metadata:
+
+
+
+[Frame Header: 16 bytes] -> [Payload: JSON / Binary Protocol Buffers]
+
+
+
+
+Execution Lifecycle & Latency Budget
+Task Dispatched
+ │
+ ├── 1. Hypervisor Fork & Register Restore ─── 1.5ms  (KVM ioctl snapshot restore)
+ ├── 2. Workspace Diff Sync (virtio-fs) ────── 2.0ms  (Zero-copy DAX page update)
+ ├── 3. VSOCK Task Handshake ───────────────── 0.5ms  (Direct memory-bus IPC)
+ ├── 4. Incremental Compile / Fast-Test Exec ── 8.0ms  (Warmed runtime, on-demand RAM faults)
+ ├── 5. Structured JSON Output Emit ────────── 0.5ms  (VSOCK push)
+ └── 6. MicroVM Teardown / Discard ─────────── 0.5ms  (Process kill & mem page drop)
+ │
+Total Latency: ~13.0ms
+
+
+Standardized Guest Agent Interface
+Every runtime image includes an identical statically-linked Rust binary acting as PID 1 (micro-init). This daemon abstracts language specifics and interfaces over AF_VSOCK:
+
+Rust
+// micro-init: Running as PID 1 in Guest
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_vsock::{VsockListener, VsockStream};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut listener = VsockListener::bind(3, 5200)?; // CID: VMADDR_CID_ANY, Port: 5200
+
+    while let Ok((mut stream, _addr)) = listener.accept().await {
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            
+            let task: ExecutionTask = serde_json::from_slice(&buf[..n]).unwrap();
+            
+            // Execute in-process runner (e.g., pre-loaded JVM test runner via JNI or Python ctypes)
+            let result = run_target_test(&task.target_symbol).await;
+            
+            let response = serde_json::to_vec(&result).unwrap();
+            stream.write_all(&response).await.unwrap();
+        });
+    }
+    Ok(())
+}
+
+
+Failure Modes & Sandboxing Guarantees
+Infinite Loops / Resource Exhaustion: The host hypervisor runs with strict hardware timers (e.g., setitimer or hardware TSC deadlines). If an execution exceeds 2000ms, the host immediately destroys the KVM vCPU without waiting for guest cooperative scheduling.
+
+
+Kernel Escape Mitigation: MicroVMs run inside isolated Linux user namespaces (cgroups v2, non-root uid, seccomp filters dropping all unneeded syscalls to KVM only). Network egress is physically disconnected (no virtual bridge interface attached).
+
+Yes, it is entirely technically feasible. The fundamental building blocks exist in production at scale today; the challenge lies in where the engineering complexity concentrates.
+
+What Makes It Feasible
+The hypervisor and memory technology are proven: AWS Lambda and Fly.io run Firecracker microVMs with snapshot/restore mechanisms in production. Cloudflare Workers, v8-isolate runtimes, and tools like Modal prove sub-50ms ephemeral workload orchestration is viable.
+
+
+Semantic tooling is mature: Tree-sitter is used across major editors and code hosts (GitHub, Neovim, Zed). Sourcegraph’s SCIP and LSIF protocols already provide language-agnostic code graphs for major ecosystems (Java, TypeScript, Go, Python, Rust, C++).
+
+
+Protocol standardization exists: The Model Context Protocol (MCP) provides an off-the-shelf standard for exposing repository tools to agents without having to invent a proprietary transport protocol.
+
+
+The Real Engineering Bottlenecks
+Layer
+Feasibility Verdict
+Key Hurdle
+MicroVM Sub-15ms Snapshot Engine
+Solvable
+Complex systems programming (KVM, userfaultfd, Rust). High Linux kernel expertise required, but no fundamental technical blockers.
+Language-Agnostic Symbol Graph (SCIP/AST)
+Solvable
+High data-pipeline engineering. Emitting and keeping SCIP graphs synchronized across rapid agent edit iterations requires efficient incremental indexing.
+In-Guest Test Fast-Paths
+Hardest Problem
+Pre-warmed VM snapshots capture process memory before code updates. For compiled or JIT-heavy runtimes (JVM, Rust, Go), you must design in-memory hot-patching (e.g., custom classloaders, dynamic symbol reloading) or rely on lightning-fast incremental linking inside the VM.
+Host Resource Density & Cost
+Manageable
+Page deduplication (KSM / shared backing files) keeps RAM usage reasonable, but multi-tenant isolation and noisy-neighbor prevention require strict cgroup/seccomp tuning.
+
+Pragmatic Phased Implementation Strategy
+Phase 1 (Proof of Concept - Host Engine): Build the Rust host orchestrator using Firecracker, userfaultfd, and a simple AF_VSOCK protocol running tests for a single dynamic runtime (e.g., Node.js or Python) to hit the 15ms target.
+
+
+Phase 2 (AST & Semantic Graph): Integrate Tree-sitter and SCIP indexing to expose read/write tools via a local MCP server over standard I/O.
+
+
+Phase 3 (Compiled Runtime Optimizations): Implement in-process daemon execution for heavy runtimes (e.g., custom JVM agent / classloader reloaders, Go test daemon) to avoid full compiler startup penalties inside the guest.
+
+
+Phase 4 (Security & Multi-Tenancy): Harden network namespaces, inject Zero-Trust proxy inspection on all host-guest channels, and apply strict storage quotas.
+
+
+The project is ambitious, but it builds on proven primitives rather than unverified computer science theory.
+
+Here is a phased, high-impact MVP roadmap designed to take you from a raw systems-level execution core to a fully functional, agent-native code engine.
+
++-------------------------------------------------------------------------------+
+| PHASE 1: Ephemeral MicroVM Sandbox Core                                       |
+| Target: Sub-20ms isolated task execution loop for a dynamic runtime (Python)  |
++---------------------------------------+---------------------------------------+
+                                        |
+                                        v
++-------------------------------------------------------------------------------+
+| PHASE 2: Language-Neutral Semantic & MCP Server Layer                         |
+| Target: Uniform AST navigation and test triggering via standardized MCP tools |
++---------------------------------------+---------------------------------------+
+                                        |
+                                        v
++-------------------------------------------------------------------------------+
+| PHASE 3: Compiled Runtime Fast-Paths & Zero-Trust Hardening                   |
+| Target: In-memory JVM/Go reloaders and strict sandboxed proxy security        |
++-------------------------------------------------------------------------------+
+
+
+Phase 1: Ephemeral MicroVM Sandbox Core (Weeks 1–4)
+Goal: Prove the sub-20ms deterministic execution loop using Firecracker and low-level Linux primitives before building developer-facing APIs.
+
+1.1 Minimal Guest Environment:
+
+
+
+Build a stripped-down Linux kernel (vmlinux, < 3MB, minimal drivers) and a lightweight rootfs image with Python pre-installed.
+
+
+Implement the guest micro-init daemon in Rust to listen over AF_VSOCK port 5200 as PID 1.
+
+
+1.2 Snapshot & Resumption Pipeline:
+
+
+
+Write the host VM manager in Rust using the kvm-ioctls / Firecracker snapshot APIs.
+
+
+Implement on-demand page fault resolution via userfaultfd to back the resumed guest memory directly from the base RAM snapshot file.
+
+
+1.3 Task Dispatch Loop:
+
+
+
+Implement an ephemeral overlay layer (or in-memory buffer via virtio-fs) to inject agent code diffs into the guest workspace without writing to the host disk.
+
+
+Dispatch a JSON test task over AF_VSOCK, execute pytest in-guest, collect the structured output, and discard the VM instance.
+
+
+Success Criteria / Deliverable:
+
+
+
+End-to-end execution latency (from snapshot resume $\to$ task execution $\to$ JSON response $\to$ teardown) averages <20ms for single-file Python test runs.
+
+
+Phase 2: Universal Semantic Layer & Native MCP Interface (Weeks 5–8)
+Goal: Expose the execution sandbox and repository state to AI agents through a standardized Model Context Protocol (MCP) server.
+
+2.1 AST & SCIP Indexing Engine:
+
+
+
+Integrate Tree-sitter parsers to generate syntax graphs and resolve node-level diffs across commits.
+
+
+Ingest SCIP/LSIF index artifacts to build an in-memory symbol and call graph.
+
+
+2.2 Core MCP Tool Suite:
+
+
+
+Expose standardized semantic MCP tools:
+
+
+
+get_symbol_definition(symbol_path) $\to$ returns target file, range, and signature.
+
+
+find_references(symbol_path) $\to$ returns caller references across the workspace.
+
+
+apply_patch(patch_diff) $\to$ validates patch against the Tree-sitter AST before committing.
+
+
+run_test_target(symbol_path) $\to$ spins up a Phase 1 microVM instance and returns structured test status.
+
+
+2.3 Standardized Result Normalization:
+
+
+
+Implement an output transformer that maps test results and compiler diagnostics into a language-neutral JSON format (status, failures, expected vs. actual, AST node traces).
+
+
+Success Criteria / Deliverable:
+
+
+
+An AI coding agent (e.g., Claude Code, Cursor, or a local agent) connects via MCP, queries symbol references, applies an edit, triggers a test, and iterates based on structured feedback without local filesystem clones.
+
+
+Phase 3: Compiled Runtime Fast-Paths & Zero-Trust Hardening (Weeks 9–12)
+Goal: Expand execution support to heavy compiled/JIT runtimes and lock down the sandbox against prompt injection and escape vectors.
+
+3.1 In-Process Test Reloading (JVM / Go):
+
+
+
+Implement an in-memory test runner daemon inside the microVM snapshot:
+
+
+
+JVM: Pre-warm the JVM process with project dependencies loaded; use dynamic bytecode injection / custom ClassLoader swapping to load patched class files in <10ms.
+
+
+Go / Rust: Leverage pre-compiled test binaries with shared library hooks (dlopen) or lightning-fast incremental mold linking to bypass standard rebuild times.
+
+
+3.2 Zero-Trust Proxy & Egress Isolation:
+
+
+
+Disconnect all virtual bridge network interfaces from the microVM guests (strict zero-egress by default).
+
+
+Insert an inspecting proxy between the agent, the LLM API, and the MCP server to validate tool inputs, sanitize system paths, and prevent prompt-injected command chaining.
+
+
+3.3 Concurrency & Snapshot Pooling:
+
+
+
+Implement a host-level pre-warmed snapshot pool that maintains hot slot instances ready for immediate reservation, reducing tail latency under concurrent agent loops.
+
+
+Success Criteria / Deliverable:
+
+
+
+Sub-30ms test execution loops for Java (JUnit) and Go test suites inside ephemeral snapshots with fully isolated networking and locked-down syscall profiles (seccomp + cgroups v2).
+MVP Architecture Matrix
+Layer
+Component
+Technology Choice
+Target Performance
+Orchestrator
+Host Task Engine
+Rust + Tokio + userfaultfd
+<2ms snapshot fork
+Virtualization
+Ephemeral MicroVM
+Firecracker / Custom KVM
+Stripped vmlinux (<3MB)
+Guest Daemon
+micro-init (PID 1)
+Rust (AF_VSOCK listener)
+<0.5ms IPC latency
+Code Intelligence
+Universal Parser & Index
+Tree-sitter + SCIP
+In-memory AST queries
+Agent Interface
+Control Plane
+Model Context Protocol (MCP)
+JSON-RPC over stdio/HTTP
+Security
+Isolation & Proxy
+Seccomp + Egress Drop + Proxy
+Zero host escape / Zero egress
+
+

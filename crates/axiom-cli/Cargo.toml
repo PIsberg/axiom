@@ -1,0 +1,21 @@
+[package]
+name = "axiom-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "axiom"
+path = "src/main.rs"
+
+[dependencies]
+axiom-proto = { path = "../axiom-proto" }
+axiom-vmm = { path = "../axiom-vmm" }
+axiom-ast = { path = "../axiom-ast" }
+axiom-core = { path = "../axiom-core" }
+axiom-crdt = { path = "../axiom-crdt" }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

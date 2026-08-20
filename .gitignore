@@ -1,0 +1,41 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+
+# Axiom runtime cache & index store (generated; contains machine-absolute paths)
+.axiom/
+*.axiom
+axiom_index_*.json
+
+# Temporary sandbox & test runs
+axiom_eval_*
+axiom_e2e_*
+axiom_persist_*
+axiom_java_test_*
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# Logs & diagnostic dumps
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

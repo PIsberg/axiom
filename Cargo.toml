@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/axiom-proto",
+    "crates/axiom-vmm",
+    "crates/axiom-ast",
+    "crates/axiom-core",
+    "crates/axiom-crdt",
+    "crates/axiom-cli",
+]
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+blake3 = "1.5"
+wasmtime = { version = "20.0", features = ["wat"] }
+wasmtime-wasi = "20.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4.5", features = ["derive"] }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }

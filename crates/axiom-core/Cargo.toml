@@ -1,0 +1,17 @@
+[package]
+name = "axiom-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axiom-proto = { path = "../axiom-proto" }
+axiom-vmm = { path = "../axiom-vmm" }
+axiom-ast = { path = "../axiom-ast" }
+axiom-crdt = { path = "../axiom-crdt" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+chrono.workspace = true
