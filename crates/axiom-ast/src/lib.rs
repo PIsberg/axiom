@@ -383,8 +383,17 @@ impl AstIndex {
     pub fn scan_directory(&self, root: &Path) -> std::io::Result<ScanSummary> {
         let mut files_scanned = 0;
         let mut nodes_extracted = 0;
+        let mut visited: HashSet<String> = HashSet::new();
 
-        self.walk_dir(root, &mut files_scanned, &mut nodes_extracted)?;
+        self.walk_dir(root, &mut files_scanned, &mut nodes_extracted, &mut visited)?;
+
+        // A scan is a statement about what the tree contains now, so anything
+        // recorded from a file that has since disappeared has to go. Without
+        // this the index only ever grows: a deleted class stays answerable and
+        // a renamed method keeps its old name alongside the new one, and the
+        // blast radius then names tests that no longer exist.
+        self.forget_missing_files(root, &visited);
+        self.rebuild_reverse_deps();
 
         Ok(ScanSummary {
             files_scanned,
@@ -393,7 +402,86 @@ impl AstIndex {
         })
     }
 
-    fn walk_dir(&self, dir: &Path, files_count: &mut usize, nodes_count: &mut usize) -> std::io::Result<()> {
+
+/// One canonical spelling for a file, so the same file scanned as "." and as
+    /// an absolute root produces the same key. Without this the index holds two
+    /// records for one file, and a purge keyed on the root prefix matches
+    /// neither.
+    fn canonical_key(path: &Path) -> String {
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        resolved
+            .to_string_lossy()
+            .replace("\\", "/")
+            .trim_start_matches("//?/")
+            .to_string()
+    }
+
+    /// Remove everything a single file contributed to the index.
+    fn forget_file(&self, file_path: &str) {
+        let previous = self.file_to_symbols.write().unwrap().remove(file_path);
+        self.file_call_names.write().unwrap().remove(file_path);
+
+        if let Some(symbols) = previous {
+            let mut nodes = self.nodes.write().unwrap();
+            for symbol in symbols {
+                nodes.remove(&symbol);
+            }
+        }
+    }
+
+    /// Forget files recorded under this root by an earlier scan that this one did
+    /// not see and that are no longer on disk.
+    ///
+    /// Scoped to the root on purpose. A scan is a statement about the tree it was
+    /// pointed at and says nothing about anything else, so records from other
+    /// roots are left alone whether or not their files still exist. Widening this
+    /// to every recorded path makes one scan able to empty an unrelated project's
+    /// entries out of a shared index.
+    fn forget_missing_files(&self, root: &Path, visited: &HashSet<String>) {
+        let root_prefix = Self::canonical_key(root);
+
+        let recorded: Vec<String> = self
+            .file_to_symbols
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+
+        for file_path in recorded {
+            if visited.contains(&file_path) {
+                continue;
+            }
+            if !file_path.starts_with(&root_prefix) {
+                continue;
+            }
+            if !Path::new(&file_path).exists() {
+                self.forget_file(&file_path);
+            }
+        }
+    }
+
+    /// Rebuild the reverse graph from the nodes that remain. Purging by file
+    /// leaves dangling entries otherwise, and a stale caller list is how a
+    /// deleted test keeps showing up in a blast radius.
+    fn rebuild_reverse_deps(&self) {
+        let nodes = self.nodes.read().unwrap();
+        let mut rebuilt: HashMap<String, Vec<String>> = HashMap::new();
+        for (symbol, node) in nodes.iter() {
+            for dep in &node.dependencies {
+                rebuilt.entry(dep.clone()).or_default().push(symbol.clone());
+            }
+        }
+        *self.reverse_deps.write().unwrap() = rebuilt;
+    }
+
+    fn walk_dir(
+        &self,
+        dir: &Path,
+        files_count: &mut usize,
+        nodes_count: &mut usize,
+        visited: &mut HashSet<String>,
+    ) -> std::io::Result<()> {
         if !dir.exists() || !dir.is_dir() {
             return Ok(());
         }
@@ -406,7 +494,7 @@ impl AstIndex {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 // Skip hidden folders and build directories
                 if !dir_name.starts_with('.') && dir_name != "target" && dir_name != "node_modules" && dir_name != "build" && dir_name != "dist" {
-                    self.walk_dir(&path, files_count, nodes_count)?;
+                    self.walk_dir(&path, files_count, nodes_count, visited)?;
                 }
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -414,8 +502,14 @@ impl AstIndex {
                         "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c" | "cpp" | "h" | "json" | "toml" => {
                             if let Ok(content) = std::fs::read_to_string(&path) {
                                 *files_count += 1;
-                                let rel = path.to_string_lossy().replace("\\", "/");
-                                
+                                let rel = Self::canonical_key(&path);
+                                visited.insert(rel.clone());
+
+                                // Drop what this file contributed last time before
+                                // re-reading it, so a renamed or removed symbol does
+                                // not survive alongside its replacement.
+                                self.forget_file(&rel);
+
                                 // Index into Zoekt Trigram store
                                 self.zoekt_index.write().unwrap().add_document(&rel, &content);
 

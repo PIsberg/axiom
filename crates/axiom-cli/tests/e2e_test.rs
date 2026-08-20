@@ -1026,3 +1026,64 @@ public class Knobs {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// A scan describes what the tree contains now. Re-scanning used to only ever
+/// add, so a deleted class stayed answerable and a renamed method kept its old
+/// name beside the new one. For a tool whose whole output is "run exactly these
+/// tests", naming a test that no longer exists is the expensive direction.
+#[tokio::test]
+async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_rescan_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    std::fs::create_dir_all(&pkg)?;
+
+    let alpha = pkg.join("Alpha.java");
+    let beta = pkg.join("Beta.java");
+    std::fs::write(&alpha, "package se.deversity.asynctest;\npublic class Alpha {\n    public void alphaMethod() {}\n}\n")?;
+    std::fs::write(&beta, "package se.deversity.asynctest;\npublic class Beta {\n    public void betaMethod() {}\n}\n")?;
+
+    let idx = axiom_ast::AstIndex::new();
+    idx.scan_directory(&temp_dir)?;
+    assert!(idx.get_symbol("se.deversity.asynctest.Beta").is_some());
+    assert!(idx.get_symbol("se.deversity.asynctest.Alpha::alphaMethod").is_some());
+
+    // Beta is deleted outright; Alpha's method is renamed in place.
+    std::fs::remove_file(&beta)?;
+    std::fs::write(&alpha, "package se.deversity.asynctest;\npublic class Alpha {\n    public void renamedMethod() {}\n}\n")?;
+    idx.scan_directory(&temp_dir)?;
+
+    assert!(
+        idx.get_symbol("se.deversity.asynctest.Beta").is_none(),
+        "a class whose file was deleted must not survive a re-scan"
+    );
+    assert!(
+        idx.get_symbol("se.deversity.asynctest.Beta::betaMethod").is_none(),
+        "the deleted class's methods must go with it"
+    );
+    assert!(
+        idx.get_symbol("se.deversity.asynctest.Alpha::alphaMethod").is_none(),
+        "a renamed method must not linger under its old name"
+    );
+    assert!(
+        idx.get_symbol("se.deversity.asynctest.Alpha::renamedMethod").is_some(),
+        "the new name must be indexed"
+    );
+
+    // Purging is scoped to files that are gone, not to everything outside the
+    // root being scanned: scanning one project must not empty another.
+    let other = temp_dir.join("other").join("src");
+    std::fs::create_dir_all(&other)?;
+    std::fs::write(other.join("Gamma.java"), "package other;\npublic class Gamma {\n    public void mg() {}\n}\n")?;
+    idx.scan_directory(&other)?;
+    idx.scan_directory(&pkg)?;
+    assert!(
+        idx.get_symbol("other.Gamma").is_some(),
+        "scanning one subtree must not forget a different one that still exists"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
