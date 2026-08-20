@@ -258,8 +258,11 @@ fn test_token_validation() {
     };
     let attest_resp = server.handle_request(attest_req).await;
     let attest_res = extract_tool_result(&attest_resp);
-    let signature = attest_res.get("signature").and_then(|v| v.as_str()).expect("Expected signature");
-    assert!(signature.starts_with("ed25519_seal_"));
+    let seal = attest_res.get("seal").and_then(|v| v.as_str()).expect("Expected a seal");
+    assert!(
+        seal.starts_with("blake3_seal_"),
+        "the seal is a BLAKE3 integrity tag and must not claim to be a signature; got {seal}"
+    );
 
     // Clean up temp dir
     let _ = std::fs::remove_dir_all(&temp_root);

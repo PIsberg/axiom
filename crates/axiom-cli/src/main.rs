@@ -355,7 +355,9 @@ async fn main() -> Result<()> {
                     println!("   Symbol:        {}", a.symbol_path);
                     println!("   Sandbox task:  {}", a.ctop_proof_hash);
                     println!("   Issued:        {}", a.timestamp);
-                    println!("   Signature:     {}", a.signature);
+                    println!("   Seal:          {}", a.seal);
+                    println!("   (BLAKE3 integrity tag over the record, not a signature: it shows the
+    record is unaltered, not who issued it.)");
                     println!("   This seal was issued after sandbox task {} passed.", a.ctop_proof_hash);
                 }
                 None => {

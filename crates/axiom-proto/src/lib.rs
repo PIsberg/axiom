@@ -75,7 +75,11 @@ pub struct ProvenanceAttestation {
     pub sandbox_trace_hash: String,
     pub ctop_proof_hash: String,
     pub timestamp: String,
-    pub signature: String,
+    /// Integrity tag over this attestation's own fields plus the symbol and
+    /// prompt it was issued for. It is a BLAKE3 digest, not a signature: there
+    /// is no private key, so anyone holding the same inputs can recompute it.
+    /// That detects an altered record; it does not establish who wrote one.
+    pub seal: String,
 }
 
 impl ProvenanceAttestation {
@@ -105,7 +109,7 @@ impl ProvenanceAttestation {
             sandbox_trace_hash: format!("trace:{}", &digest[16..32]),
             ctop_proof_hash: ctop_task_id.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
-            signature: format!("ed25519_seal_{}", &digest[32..]),
+            seal: format!("blake3_seal_{}", &digest[32..]),
         }
     }
 
@@ -126,8 +130,8 @@ impl ProvenanceAttestation {
         hasher.update(self.ctop_proof_hash.as_bytes());
         let digest = hasher.finalize().to_hex().to_string();
 
-        let expected_sig = format!("ed25519_seal_{}", &digest[32..]);
-        self.signature == expected_sig
+        let expected = format!("blake3_seal_{}", &digest[32..]);
+        self.seal == expected
     }
 }
 

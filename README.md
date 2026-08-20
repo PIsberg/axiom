@@ -27,7 +27,7 @@ agent pays on every iteration.
 * **Predictive Blast-Radius Test Pruning**: Transitive reverse dependency reachability prunes $\ge 99.9\%$ of irrelevant tests across 5,000+ test repositories.
 * **Ultra-Fast Zoekt Trigram Search**: In-memory sliding trigram index (`[u8; 3] -> HashSet<Path>`) providing $<1\text{ms}$ regex and literal search without disk I/O.
 * **Tree-CRDT Multi-Agent Swarm Concurrency**: Commutative LWW-Lamport tree operations enabling 50+ concurrent AI agents to mutate code without merge conflicts.
-* **Zero-Trust SLSA Level 4+ Cryptographic Provenance**: Ed25519 commit sealing over prompt digests, AST diffs, and sandbox trace proofs.
+* **Recorded Provenance**: every attested change ties a prompt, a symbol, the sandbox run that checked it, and the Merkle roots either side into a record you can read back later. Issued only after the run it names has passed.
 
 ---
 
@@ -54,8 +54,8 @@ Run `axiom demo` to see the autonomous agent self-healing loop in action:
 🔹 [Step 4/5] Agent automatically self-heals using the diagnostic hint & re-tests...
    ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: 0.003 ms)
 
-🔹 [Step 5/5] Generating SLSA L4+ Cryptographic Attestation Proof...
-   ↳ Hermetic commit sealed with Ed25519 signature in 0.030 ms
+🔹 [Step 5/5] Recording the provenance of the change...
+   ↳ Provenance record written, tying the prompt, symbol and sandbox result together
 
 ================================================================================
                          📊 PERFORMANCE BENCHMARK MATRIX
@@ -66,7 +66,7 @@ Run `axiom demo` to see the autonomous agent self-healing loop in action:
  Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)
  Sandbox Feedback Loop     300,000 ms (5 minutes)        0.00 ms (Tier-1 WASI / MicroVM)
  Self-Correction Total     600,000 ms (10 minutes)       0.87 ms (End-to-End)
- Provenance Security       Unsigned text commit          SLSA L4+ Merkle Proof & Ed25519
+ Provenance Security       Unsigned text commit          Prompt, symbol and sandbox result recorded together
  Speedup Multiplier        1.0x (Baseline)               686656x FASTER
 ================================================================================
 
@@ -198,7 +198,7 @@ Copy the generated configuration into your AI client's settings:
 | `axiom symbol --path <SYM>` | Queries AST node metadata, signatures, and imports |
 | `axiom demo` | Runs live end-to-end self-healing agent demonstration |
 | `axiom swarm --agents <N> --ops <M>` | Runs multi-agent Tree-CRDT swarm concurrency simulation |
-| `axiom verify --symbol <SYM> --prompt <P>` | Cryptographically audits SLSA L4+ commit seal |
+| `axiom verify --symbol <SYM> --prompt <P>` | Looks up the provenance record for a symbol and prompt, and checks it is unaltered |
 | `axiom mcp-config` | Outputs ready-to-copy JSON configuration for AI IDEs |
 | `axiom watch --path <DIR>` | Watches filesystem for live incremental AST Merkle updates |
 | `axiom git-export` | Exports current Merkle state to a Git-compatible commit summary |
@@ -214,7 +214,7 @@ cargo test
 ```
 
 ### Verified Test Suites:
-* `test_e2e_agent_full_loop_over_mcp`: Full multi-language scan, symbol query, sandbox error trap, self-healing, Tree-CRDT mutation, and SLSA L4+ seal.
+* `test_e2e_agent_full_loop_over_mcp`: Full multi-language scan, symbol query, sandbox error trap, self-healing, Tree-CRDT mutation, and provenance record.
 * `test_e2e_disk_persistence_cross_instance`: Cross-process `.axiom/index.json` save and load verification.
 * `test_e2e_truth_preserving_assertions`: Real compiler execution catching panics and invariant failures with zero false-positives.
 * `test_e2e_java_production_vs_test_classification`: Exact JUnit `@Test` vs. production class filtering.
@@ -240,17 +240,42 @@ the repository has held stays reachable.
 The reasoning behind each layer, and the threats each one is meant to stop, are
 in [docs/axiom_security_framework.md](docs/axiom_security_framework.md).
 
-Every commit applied via `axiom_apply_mutation` produces an Ed25519-signed provenance receipt linking:
-* Parent Merkle Root
-* Commit Merkle Root
-* Agent Identity
-* Task ID & Sandbox Trace Hash
-* Prompt Digest
+### The provenance record
 
-Verify seals at any time using:
-```bash
-axiom verify --symbol "auth::service::validate_token" --prompt "Upgrade ConcurrencyRunner"
+`axiom_attest_commit` writes a record to `.axiom/attestations.json` tying five
+things together: the prompt that asked for the change, the symbol it touched, the
+sandbox task that checked it, the Merkle root before and after, and when it
+happened.
+
+The record is only issued when the sandbox run it names actually happened and
+passed. Naming a task the server never ran, or one that failed, is refused:
+
 ```
+no sandbox run recorded for task "task_probe_01"; call axiom_eval_patch first
+and attest against the task_id it returns
+```
+
+Read a record back with:
+
+```bash
+axiom verify --symbol "auth::service::validate_token" --prompt "Tighten the guard"
+```
+
+This looks the record up. A symbol nothing was attested for, or the right symbol
+with a prompt that record was not issued for, exits non-zero and says which.
+
+**What this is not.** The `seal` field is a BLAKE3 digest over the record's own
+fields. It is an integrity tag, not a signature: no private key is involved, so
+anyone holding the same inputs can recompute it. It will tell you a stored record
+has been altered. It will not tell you who wrote one, and it does not stop
+someone who can write the ledger from adding a record that looks genuine. Making
+that a real signature needs a keypair and somewhere to keep it, which this does
+not yet have.
+
+Nor is any of this a reproducible-build attestation in the SLSA sense. Nothing
+here rebuilds your artifact independently or proves the build was hermetic. It
+records that a particular prompt, symbol and sandbox result were seen together on
+one machine, which is worth having and is a smaller claim than the phrase implies.
 
 ---
 
