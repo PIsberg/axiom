@@ -3,6 +3,27 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+/// On-disk index format version. Bumped when the shape below changes in a way
+/// an older reader could misinterpret.
+const INDEX_FORMAT_VERSION: u32 = 2;
+
+/// What `.axiom/index.json` holds. The nodes alone are not enough: blast radius
+/// resolves accessor calls through `method_return_types` and `file_call_names`,
+/// so an index that persists only nodes silently loses that resolution the
+/// moment it crosses a process boundary.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedIndex {
+    #[serde(default)]
+    format_version: u32,
+    nodes: HashMap<String, AstNode>,
+    #[serde(default)]
+    method_return_types: HashMap<String, String>,
+    #[serde(default)]
+    file_call_names: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    file_to_symbols: HashMap<String, Vec<String>>,
+}
+
 /// Merkle AST Content-Addressable Store (CAS), Symbol Graph & Zoekt Trigram Index
 pub struct AstIndex {
     nodes: RwLock<HashMap<String, AstNode>>,
@@ -14,8 +35,10 @@ pub struct AstIndex {
     zoekt_index: RwLock<ZoektIndex>,
     /// Accessor method return-type map: method_name -> declared return type
     method_return_types: RwLock<HashMap<String, String>>,
-    /// Stripped clean source text per file for zero-noise callsite matching
-    clean_file_texts: RwLock<HashMap<String, String>>,
+    /// Method names invoked in each file, taken from comment- and string-stripped
+    /// source. Persisted in place of the raw text: only membership is ever tested,
+    /// and the vocabulary is a small fraction of the source it is derived from.
+    file_call_names: RwLock<HashMap<String, Vec<String>>>,
     /// File path to indexed symbols mapping
     file_to_symbols: RwLock<HashMap<String, Vec<String>>>,
 }
@@ -28,7 +51,7 @@ impl AstIndex {
             cas_cache: RwLock::new(HashMap::new()),
             zoekt_index: RwLock::new(ZoektIndex::new()),
             method_return_types: RwLock::new(HashMap::new()),
-            clean_file_texts: RwLock::new(HashMap::new()),
+            file_call_names: RwLock::new(HashMap::new()),
             file_to_symbols: RwLock::new(HashMap::new()),
         }
     }
@@ -165,7 +188,7 @@ impl AstIndex {
         let rev = self.reverse_deps.read().unwrap();
         let nodes = self.nodes.read().unwrap();
         let mrt = self.method_return_types.read().unwrap();
-        let clean_files = self.clean_file_texts.read().unwrap();
+        let file_calls = self.file_call_names.read().unwrap();
 
         let mut visited = HashSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
@@ -219,10 +242,9 @@ impl AstIndex {
 
         if !accessor_names.is_empty() {
             let file_syms = self.file_to_symbols.read().unwrap();
-            for (file_path, clean_code) in clean_files.iter() {
+            for (file_path, calls) in file_calls.iter() {
                 for acc in &accessor_names {
-                    let call_pat = format!("{}(", acc);
-                    if clean_code.contains(&call_pat) {
+                    if calls.iter().any(|c| c == acc) {
                         if let Some(syms) = file_syms.get(file_path) {
                             for sym in syms {
                                 if let Some(node) = nodes.get(sym) {
@@ -538,8 +560,11 @@ fn strip_comments_and_strings(content: &str) -> String {
             }
         }
 
-        // Store clean code text for accessor resolution
-        self.clean_file_texts.write().unwrap().insert(file_path.to_string(), clean_code.clone());
+        // Record which methods this file calls, for accessor resolution.
+        self.file_call_names
+            .write()
+            .unwrap()
+            .insert(file_path.to_string(), Self::extract_call_names(&clean_code));
 
         let lines: Vec<&str> = content.lines().collect();
         let mut i = 0;
@@ -886,6 +911,40 @@ fn strip_comments_and_strings(content: &str) -> String {
         }
     }
 
+
+    /// Identifiers appearing immediately before an opening parenthesis, i.e. the
+    /// methods a file calls. Derived from already comment- and string-stripped
+    /// source, so a name mentioned only in prose never reaches this set.
+    fn extract_call_names(clean_code: &str) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let bytes = clean_code.as_bytes();
+        let mut start: Option<usize> = None;
+
+        for (i, &b) in bytes.iter().enumerate() {
+            let c = b as char;
+            if c.is_alphanumeric() || c == '_' || c == '$' {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                continue;
+            }
+
+            if let Some(s0) = start.take() {
+                if c == '(' {
+                    let name = &clean_code[s0..i];
+                    if !name.is_empty()
+                        && !name.chars().next().unwrap().is_ascii_digit()
+                        && !names.iter().any(|n| n == name)
+                    {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        names
+    }
+
     /// Persist the Merkle AST CAS index to disk (.axiom/index.json)
     pub fn save_to_disk(&self, file_path: &Path) -> std::io::Result<PathBuf> {
         let abs_path = if file_path.is_absolute() {
@@ -898,8 +957,14 @@ fn strip_comments_and_strings(content: &str) -> String {
             std::fs::create_dir_all(parent)?;
         }
 
-        let nodes = self.nodes.read().unwrap();
-        let json = serde_json::to_string_pretty(&*nodes)
+        let payload = PersistedIndex {
+            format_version: INDEX_FORMAT_VERSION,
+            nodes: self.nodes.read().unwrap().clone(),
+            method_return_types: self.method_return_types.read().unwrap().clone(),
+            file_call_names: self.file_call_names.read().unwrap().clone(),
+            file_to_symbols: self.file_to_symbols.read().unwrap().clone(),
+        };
+        let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         
         std::fs::write(&abs_path, json.as_bytes())?;
@@ -924,24 +989,41 @@ fn strip_comments_and_strings(content: &str) -> String {
         };
 
         let content = std::fs::read_to_string(&abs_path)?;
-        let nodes: HashMap<String, AstNode> = serde_json::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        // Current format carries the resolution side tables alongside the nodes.
+        // Indexes written before those tables existed are a bare node map; they
+        // still load, only without accessor resolution until the next scan.
+        let payload: PersistedIndex = match serde_json::from_str::<PersistedIndex>(&content) {
+            Ok(p) => p,
+            Err(struct_err) => {
+                let nodes: HashMap<String, AstNode> = serde_json::from_str(&content).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::Other, struct_err.to_string())
+                })?;
+                PersistedIndex {
+                    format_version: 1,
+                    nodes,
+                    method_return_types: HashMap::new(),
+                    file_call_names: HashMap::new(),
+                    file_to_symbols: HashMap::new(),
+                }
+            }
+        };
 
         let mut reverse_deps = HashMap::new();
-        for (symbol, node) in &nodes {
+        for (symbol, node) in &payload.nodes {
             for dep in &node.dependencies {
                 reverse_deps.entry(dep.clone()).or_insert_with(Vec::new).push(symbol.clone());
             }
         }
 
         Ok(Self {
-            nodes: RwLock::new(nodes),
+            nodes: RwLock::new(payload.nodes),
             reverse_deps: RwLock::new(reverse_deps),
             cas_cache: RwLock::new(HashMap::new()),
             zoekt_index: RwLock::new(ZoektIndex::new()),
-            method_return_types: RwLock::new(HashMap::new()),
-            clean_file_texts: RwLock::new(HashMap::new()),
-            file_to_symbols: RwLock::new(HashMap::new()),
+            method_return_types: RwLock::new(payload.method_return_types),
+            file_call_names: RwLock::new(payload.file_call_names),
+            file_to_symbols: RwLock::new(payload.file_to_symbols),
         })
     }
 }

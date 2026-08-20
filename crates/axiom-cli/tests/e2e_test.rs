@@ -739,3 +739,89 @@ async fn test_e2e_swarm_50_agents_concurrency() -> Result<()> {
 
     Ok(())
 }
+
+/// Accessor resolution has to survive `.axiom/index.json`, not just live in the
+/// index that did the scanning. `scan` and `serve` are separate processes, so an
+/// index that persists only its nodes loses `method_return_types` and
+/// `file_call_names` on the way to disk, and every test that reaches a class
+/// through an accessor silently drops out of the blast radius. An in-process
+/// scan-then-query assertion passes throughout that failure, which is why this
+/// one reloads from disk before asking.
+#[tokio::test]
+async fn test_e2e_accessor_resolution_survives_disk_round_trip() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_persist_accessor_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let main_pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    let test_pkg = temp_dir.join("src").join("test").join("java").join("se").join("deversity").join("asynctest");
+    std::fs::create_dir_all(&main_pkg)?;
+    std::fs::create_dir_all(&test_pkg)?;
+
+    std::fs::write(
+        main_pkg.join("RaceConditionDetector.java"),
+        r#"
+package se.deversity.asynctest;
+
+public class RaceConditionDetector {
+    public void recordFieldWrite() {}
+}
+"#,
+    )?;
+
+    std::fs::write(
+        main_pkg.join("AsyncTestContext.java"),
+        r#"
+package se.deversity.asynctest;
+
+public class AsyncTestContext {
+    private RaceConditionDetector detector = new RaceConditionDetector();
+
+    public RaceConditionDetector sharedRaceConditionDetector() {
+        return this.detector;
+    }
+}
+"#,
+    )?;
+
+    // Reaches the detector only through the accessor: the type name appears nowhere.
+    std::fs::write(
+        test_pkg.join("Phase1DetectorSetTest.java"),
+        r#"
+package se.deversity.asynctest;
+
+import org.junit.jupiter.api.Test;
+
+public class Phase1DetectorSetTest {
+    @Test
+    public void testDetectorUsageViaContext() {
+        AsyncTestContext ctx = new AsyncTestContext();
+        ctx.sharedRaceConditionDetector().recordFieldWrite();
+    }
+}
+"#,
+    )?;
+
+    // Instance 1 scans and persists, exactly as `axiom scan` does.
+    let scanner = axiom_ast::AstIndex::new();
+    scanner.scan_directory(&temp_dir)?;
+    let index_file = temp_dir.join(".axiom").join("index.json");
+    let saved_path = scanner.save_to_disk(&index_file)?;
+
+    // Instance 2 loads from disk, exactly as `axiom serve` does.
+    let served = axiom_ast::AstIndex::load_from_disk(&saved_path)?;
+
+    let br = served
+        .compute_blast_radius("se.deversity.asynctest.RaceConditionDetector", 1)
+        .expect("reloaded index must still resolve the symbol");
+
+    assert!(
+        br.impacted_tests.iter().any(|t| t.contains("Phase1DetectorSetTest")),
+        "a test reaching the class only through sharedRaceConditionDetector() must survive \
+         the disk round trip; got {:?}",
+        br.impacted_tests
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
