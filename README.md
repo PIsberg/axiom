@@ -4,6 +4,22 @@
 
 ---
 
+## 🎬 Watch It Run
+
+[![AXIOM Agent Native Engine (23 000 times faster workflow)](https://i.ytimg.com/vi/44XF6IimE1I/hqdefault.jpg)](https://www.youtube.com/watch?v=44XF6IimE1I)
+
+**[AXIOM Agent Native Engine (23 000 times faster workflow)](https://www.youtube.com/watch?v=44XF6IimE1I)**, by Anonymous Claudeholics
+
+A walkthrough of the engine end to end: the repository answering queries as a
+running MCP server, the blast radius narrowing a change down to the tests it can
+actually reach, and the sandbox returning a verdict inside the same loop rather
+than minutes later in CI. The number in the title is the projected speedup for
+the test round trip from
+[the speed report](docs/axiom_speed_comparison_report.md), which is the stage an
+agent pays on every iteration.
+
+---
+
 ## 🚀 Key Features
 
 * **Repository as an Active MCP Server**: Direct structured AST and semantic graph navigation over JSON-RPC 2.0 (`stdio`), eliminating local file clones.
