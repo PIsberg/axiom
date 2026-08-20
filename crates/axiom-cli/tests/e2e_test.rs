@@ -917,7 +917,9 @@ public class Gate {
     let saved_path = scanner.save_to_disk(&temp_dir.join(".axiom").join("index.json"))?;
 
     let served = axiom_ast::AstIndex::load_from_disk(&saved_path)?;
-    let hits = served.search_regex("barrier.await", 10);
+    let (_, hits) = served
+        .search("barrier.await", axiom_ast::SearchMode::Literal, 10)
+        .expect("search must succeed");
 
     let text_hit = hits
         .iter()
@@ -937,10 +939,89 @@ public class Gate {
     assert!(text_hit.line_content.contains("barrier.await"));
 
     // A symbol-name hit has no line, and must not invent one.
-    let sym_hits = served.search_regex("Gate", 10);
+    let (_, sym_hits) = served
+        .search("Gate", axiom_ast::SearchMode::Literal, 10)
+        .expect("search must succeed");
     for m in sym_hits.iter().filter(|m| m.match_kind == "symbol") {
         assert_eq!(m.line_number, None, "symbol hits must not report a line number");
     }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// Search mode has to be the caller's choice, not a guess. A query like
+/// `config.threads` is ordinary code punctuation that an agent means literally,
+/// and reading it as a pattern quietly returns rows it never asked for. So the
+/// default is literal, regex is opt-in, auto switches only on constructs that
+/// are meaningless as text, and a pattern that will not compile is refused
+/// rather than retried as a literal.
+#[tokio::test]
+async fn test_e2e_search_modes_are_explicit_and_honest() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_search_modes_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    std::fs::create_dir_all(&pkg)?;
+
+    // `configXthreads` exists only to be matched by `config.threads` as a regex
+    // and missed by it as a literal.
+    std::fs::write(
+        pkg.join("Knobs.java"),
+        r#"
+package se.deversity.asynctest;
+
+public class Knobs {
+    int a = config.threads;
+    int b = configXthreads;
+    int c = sharedRandomDetector;
+}
+"#,
+    )?;
+
+    let idx = axiom_ast::AstIndex::new();
+    idx.scan_directory(&temp_dir)?;
+
+    let count = |q: &str, m: axiom_ast::SearchMode| -> (axiom_ast::SearchMode, usize) {
+        let (applied, hits) = idx.search(q, m, 50).expect("search must succeed");
+        (applied, hits.iter().filter(|h| h.match_kind == "text").count())
+    };
+
+    // Literal is the default reading and matches the dot as a dot.
+    let (applied, literal_hits) = count("config.threads", axiom_ast::SearchMode::Literal);
+    assert_eq!(applied, axiom_ast::SearchMode::Literal);
+    assert_eq!(literal_hits, 1, "literal must match only the real occurrence");
+
+    // The same query as a pattern reaches further, which is exactly why it must
+    // be asked for rather than inferred.
+    let (applied, regex_hits) = count("config.threads", axiom_ast::SearchMode::Regex);
+    assert_eq!(applied, axiom_ast::SearchMode::Regex);
+    assert_eq!(regex_hits, 2, "as a pattern the dot also matches configXthreads");
+
+    // Auto keeps code punctuation literal ...
+    let (applied, _) = count("config.threads", axiom_ast::SearchMode::Auto);
+    assert_eq!(
+        applied,
+        axiom_ast::SearchMode::Literal,
+        "auto must not reinterpret ordinary code punctuation as a pattern"
+    );
+
+    // ... and only switches on a construct that cannot be meant as text.
+    let (applied, auto_hits) = count("shared[A-Z][a-z]+Detector", axiom_ast::SearchMode::Auto);
+    assert_eq!(applied, axiom_ast::SearchMode::Regex);
+    assert_eq!(auto_hits, 1, "the character class must find sharedRandomDetector");
+
+    // A pattern that does not compile is an error, never a quiet literal search.
+    let err = idx
+        .search("foo(", axiom_ast::SearchMode::Regex, 10)
+        .expect_err("an unparseable pattern must be refused");
+    assert!(err.contains("not a valid regular expression"), "got {err}");
+
+    // An unrecognised mode is rejected rather than silently defaulted.
+    assert!(axiom_ast::SearchMode::parse("regexp").is_err());
+    assert_eq!(axiom_ast::SearchMode::parse("REGEX").unwrap(), axiom_ast::SearchMode::Regex);
+    assert_eq!(axiom_ast::SearchMode::parse("").unwrap(), axiom_ast::SearchMode::Literal);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())

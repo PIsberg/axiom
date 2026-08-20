@@ -1,4 +1,5 @@
 use anyhow::Result;
+use axiom_ast::SearchMode;
 use axiom_core::{mcp::JsonRpcRequest, AxiomMcpServer};
 use axiom_vmm::SandboxEngine;
 use clap::{Parser, Subcommand};
@@ -77,6 +78,9 @@ enum Commands {
     Search {
         #[arg(short, long)]
         query: String,
+        /// How to read the query: literal (default), regex, or auto
+        #[arg(long, default_value = "literal")]
+        mode: String,
         #[arg(short, long, default_value_t = 20)]
         max: usize,
     },
@@ -417,9 +421,27 @@ async fn main() -> Result<()> {
             println!("================================================================================");
         }
 
-        Commands::Search { query, max } => {
-            let matches = server.ast_index.search_regex(&query, max);
-            println!("🔍 Zoekt Trigram Search for '{}' (Found {} matches):", query, matches.len());
+        Commands::Search { query, mode, max } => {
+            let parsed = match SearchMode::parse(&mode) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            let (applied, matches) = match server.ast_index.search(&query, parsed, max) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            println!(
+                "🔍 Search for '{}' [{}] (Found {} matches):",
+                query,
+                applied.as_str(),
+                matches.len()
+            );
             for m in matches {
                 match m.line_number {
                     Some(line) => println!("  {}:{} | {}", m.file_path, line, m.line_content),

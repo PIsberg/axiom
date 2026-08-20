@@ -1,5 +1,5 @@
 use anyhow::Result;
-use axiom_ast::AstIndex;
+use axiom_ast::{AstIndex, SearchMode};
 use axiom_crdt::TreeCrdt;
 use axiom_proto::ProvenanceAttestation;
 use axiom_vmm::{SandboxEngine, WasiEngine};
@@ -179,11 +179,17 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_search_regex",
-                            "description": "Ultra-fast Zoekt trigram regex and literal text search across entire repository CAS",
+                            "description": "Search repository source text, falling back to symbol names. Literal by default; set mode=regex for a pattern.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "query": { "type": "string", "description": "Regex or substring query" },
+                                    "query": { "type": "string", "description": "Text to find, or a regular expression when mode is regex" },
+                                    "mode": {
+                                        "type": "string",
+                                        "enum": ["literal", "regex", "auto"],
+                                        "default": "literal",
+                                        "description": "How to read the query. literal (default) treats it as plain text, so characters like . ( ) < > match themselves. regex compiles it as a pattern. auto uses regex only when the query contains a construct that is meaningless as literal text. The mode actually applied comes back in the response."
+                                    },
                                     "max_results": { "type": "integer", "default": 20 }
                                 },
                                 "required": ["query"]
@@ -317,12 +323,25 @@ impl AxiomMcpServer {
             "axiom_search_regex" => {
                 let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 let max = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                let matches = self.ast_index.search_regex(query, max);
-                Ok(json!({
-                    "query": query,
-                    "matches_count": matches.len(),
-                    "matches": matches
-                }))
+                let requested = args.get("mode").and_then(|v| v.as_str()).unwrap_or("literal");
+
+                let mode = match SearchMode::parse(requested) {
+                    Ok(m) => m,
+                    Err(e) => return Ok(json!({ "error": e, "query": query })),
+                };
+
+                // A pattern that does not compile is reported as such. Retrying it
+                // as a literal would answer a question the caller did not ask.
+                match self.ast_index.search(query, mode, max) {
+                    Ok((applied, matches)) => Ok(json!({
+                        "query": query,
+                        "mode_requested": requested,
+                        "mode_applied": applied.as_str(),
+                        "matches_count": matches.len(),
+                        "matches": matches
+                    })),
+                    Err(e) => Ok(json!({ "error": e, "query": query, "mode_requested": requested })),
+                }
             }
 
             _ => anyhow::bail!("Unknown tool: {}", tool_name),

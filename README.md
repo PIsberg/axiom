@@ -192,7 +192,7 @@ Copy the generated configuration into your AI client's settings:
 |---|---|
 | `axiom serve` | Starts the native MCP server over `stdio` (JSON-RPC 2.0) |
 | `axiom scan --path <DIR>` | Scans and indexes a codebase into the Merkle AST CAS & `.axiom/index.json` |
-| `axiom search --query <STR>` | Fast Zoekt trigram regex and literal text search across repository |
+| `axiom search --query <STR> [--mode literal\|regex\|auto]` | Text search across the repository. Literal by default, so `.` and `(` match themselves; `--mode regex` compiles the query as a pattern, `--mode auto` picks regex only for queries that cannot be meant as literal text |
 | `axiom eval --symbol <SYM> -c <CODE>` | Runs an isolated sandbox evaluation with compiler verification |
 | `axiom blast-radius --symbol <SYM>` | Computes impacted tests and pruned percentage |
 | `axiom symbol --path <SYM>` | Queries AST node metadata, signatures, and imports |

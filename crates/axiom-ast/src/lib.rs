@@ -1,4 +1,5 @@
 use axiom_proto::AstNode;
+use regex::Regex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -151,13 +152,47 @@ impl AstIndex {
     /// Trigram / Text search across indexed codebase
     pub fn search_symbols_and_text(&self, query: &str, max_results: usize) -> Vec<ZoektMatch> {
         let zoekt = self.zoekt_index.read().unwrap();
-        zoekt.search(query, max_results)
+        zoekt.search(query, None, max_results)
     }
 
-    /// Search codebase using Zoekt-style trigram regex index
-    pub fn search_regex(&self, query: &str, max_results: usize) -> Vec<ZoektMatch> {
+    /// Search source text, falling back to symbol names when the text yields
+    /// nothing. An invalid pattern is an error, never a silent literal search:
+    /// answering a different question than the one asked is worse than refusing.
+    pub fn search(
+        &self,
+        query: &str,
+        mode: SearchMode,
+        max_results: usize,
+    ) -> Result<(SearchMode, Vec<ZoektMatch>), String> {
+        let effective = match mode {
+            SearchMode::Auto => {
+                if looks_like_a_pattern(query) && Regex::new(query).is_ok() {
+                    SearchMode::Regex
+                } else {
+                    SearchMode::Literal
+                }
+            }
+            explicit => explicit,
+        };
+
+        let compiled = match effective {
+            SearchMode::Regex => Some(Regex::new(query).map_err(|e| {
+                format!("{:?} is not a valid regular expression: {}", query, e)
+            })?),
+            _ => None,
+        };
+
+        Ok((effective, self.run_search(query, compiled.as_ref(), max_results)))
+    }
+
+    fn run_search(
+        &self,
+        query: &str,
+        compiled: Option<&Regex>,
+        max_results: usize,
+    ) -> Vec<ZoektMatch> {
         let zoekt = self.zoekt_index.read().unwrap();
-        let matches = zoekt.search(query, max_results);
+        let matches = zoekt.search(query, compiled, max_results);
         if !matches.is_empty() {
             return matches;
         }
@@ -165,7 +200,12 @@ impl AstIndex {
         let nodes = self.nodes.read().unwrap();
         let mut results = Vec::new();
         for (sym, node) in nodes.iter() {
-            if sym.contains(query) || node.signature.as_deref().unwrap_or("").contains(query) {
+            let signature = node.signature.as_deref().unwrap_or("");
+            let hit = match compiled {
+                Some(re) => re.is_match(sym) || re.is_match(signature),
+                None => sym.contains(query) || signature.contains(query),
+            };
+            if hit {
                 // No file or line to point at: this matched a symbol name, not a
                 // line of source. Reporting line 1 of the symbol path as though it
                 // were a file sends a caller looking somewhere that does not exist.
@@ -1075,12 +1115,16 @@ impl ZoektIndex {
         }
     }
 
-    pub fn search(&self, query: &str, max_results: usize) -> Vec<ZoektMatch> {
+    pub fn search(&self, query: &str, compiled: Option<&Regex>, max_results: usize) -> Vec<ZoektMatch> {
         let mut matches = Vec::new();
         let query_bytes = query.as_bytes();
 
-        // Candidates filtering via trigrams if query >= 3 chars
-        let candidates: Vec<&String> = if query_bytes.len() >= 3 {
+        // Trigram prefiltering only holds for a literal query: the trigrams of a
+        // pattern are not text that appears in any file. A regex search scans
+        // every document instead, trading speed for not missing matches.
+        let candidates: Vec<&String> = if compiled.is_some() {
+            self.files.keys().collect()
+        } else if query_bytes.len() >= 3 {
             let mut candidate_set: Option<HashSet<String>> = None;
             for i in 0..query_bytes.len() - 2 {
                 let tri = [query_bytes[i], query_bytes[i + 1], query_bytes[i + 2]];
@@ -1104,7 +1148,11 @@ impl ZoektIndex {
         for path in candidates {
             if let Some(content) = self.files.get(path) {
                 for (line_no, line) in content.lines().enumerate() {
-                    if line.contains(query) {
+                    let hit = match compiled {
+                        Some(re) => re.is_match(line),
+                        None => line.contains(query),
+                    };
+                    if hit {
                         matches.push(ZoektMatch {
                             match_kind: "text".to_string(),
                             file_path: path.clone(),
@@ -1121,6 +1169,57 @@ impl ZoektIndex {
 
         matches
     }
+}
+
+/// How a search query is interpreted.
+///
+/// The default is deliberately `Literal`. Real queries an agent sends are full
+/// of regex metacharacters that it means literally: `validate_token(`,
+/// `List<String>`, `config.threads`. Guessing regex from the presence of those
+/// characters would silently answer a different question than the one asked,
+/// so regex is opt-in and the mode actually used is reported back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Match the query as plain text.
+    Literal,
+    /// Compile the query as a regular expression.
+    Regex,
+    /// Use regex only if the query both parses as one and contains a construct
+    /// that is meaningless as literal text. Never silently reinterprets a query
+    /// that could plausibly be literal.
+    Auto,
+}
+
+impl SearchMode {
+    /// Parse a caller-supplied mode. Unknown values are rejected rather than
+    /// quietly treated as the default.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "literal" | "" => Ok(SearchMode::Literal),
+            "regex" => Ok(SearchMode::Regex),
+            "auto" => Ok(SearchMode::Auto),
+            other => Err(format!(
+                "unknown search mode {:?}; expected \"literal\", \"regex\" or \"auto\"",
+                other
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SearchMode::Literal => "literal",
+            SearchMode::Regex => "regex",
+            SearchMode::Auto => "auto",
+        }
+    }
+}
+
+/// Constructs that carry no meaning as literal source text, so a query holding
+/// one was almost certainly written as a pattern. Bare `.`, `(`, `)`, `<` and
+/// `>` are excluded on purpose: they are ordinary code punctuation.
+fn looks_like_a_pattern(query: &str) -> bool {
+    const PATTERN_TOKENS: [&str; 10] = [".*", ".+", "[", "]", "^", "$", "\\b", "\\d", "\\w", "\\s"];
+    PATTERN_TOKENS.iter().any(|t| query.contains(t))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
