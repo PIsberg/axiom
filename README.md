@@ -59,6 +59,29 @@ Run `axiom demo` to see the autonomous agent self-healing loop in action:
 
 ---
 
+## 📈 Where the Time Goes
+
+![Axiom versus Git plus CI across five workflow stages](docs/images/axiom_speed_comparison.png)
+
+The figure charts the five stages of an agent's edit loop against the same loop
+on Git plus a CI pipeline: workspace setup, symbol search, incremental
+compilation, the test round trip, and resolving concurrent edits. Each stage is
+attacked by a different mechanism rather than by making the old one faster. The
+repository answers queries as a running MCP server instead of being cloned; an
+in-memory trigram index replaces disk-bound search; identical AST hashes reuse
+already-compiled bytecode; blast-radius pruning selects the handful of tests a
+change can reach; and Tree-CRDTs converge concurrent edits instead of producing
+merge conflicts.
+
+The stage that dominates in practice is the test round trip, because it is the
+one an agent pays on every iteration. The numbers behind the chart, and the
+baselines they are measured against, are in
+[docs/axiom_speed_comparison_report.md](docs/axiom_speed_comparison_report.md).
+They describe the target architecture, so treat them as design goals rather than
+as measurements of the current build.
+
+---
+
 ## 🛠️ Prerequisites & System Requirements
 
 * **Rust**: `1.75+` (with `cargo` and `rustc` in your system `PATH`)
@@ -186,6 +209,21 @@ cargo test
 
 ## 🛡️ Security & Provenance
 
+![The three concentric containment layers around an agent's workspace](docs/images/axiom_security_architecture.png)
+
+The figure shows the containment model: an agent never touches the host or the
+codebase directly, but works from inside three nested boundaries. Tool calls
+first pass an intercepting proxy that sanitises paths and strips command
+chaining before anything reaches the workspace. Whatever survives executes in an
+ephemeral sandbox with no network egress and bounded CPU and memory, so a
+runaway or prompt-injected instruction has nowhere to escape to. At the centre
+sits the Merkle AST store, which is content-addressed and immutable, so a
+mutation produces a new root rather than overwriting the old one and every state
+the repository has held stays reachable.
+
+The reasoning behind each layer, and the threats each one is meant to stop, are
+in [docs/axiom_security_framework.md](docs/axiom_security_framework.md).
+
 Every commit applied via `axiom_apply_mutation` produces an Ed25519-signed provenance receipt linking:
 * Parent Merkle Root
 * Commit Merkle Root
@@ -201,4 +239,14 @@ axiom verify --symbol "auth::service::validate_token" --prompt "Upgrade Concurre
 ---
 
 ## 📄 License
-Apache-2.0 / MIT
+
+[PolyForm Noncommercial License 1.0.0](LICENSE). Any noncommercial purpose is
+permitted, which covers personal study, research, hobby projects, and use by
+charities, schools, public research bodies, and government institutions,
+whatever their funding. Commercial use needs a separate licence.
+
+For commercial licensing, contact peter.isberg@deversity.se
+(pricing: <https://deversity.se/pricing.html>).
+
+Note that PolyForm Noncommercial is a source-available licence, not an open
+source one under the OSI definition, because it restricts the field of use.
