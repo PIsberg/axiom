@@ -150,7 +150,7 @@ fn test_token_validation() {
         params: Some(json!({
             "name": "axiom_eval_patch",
             "arguments": {
-                "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+                "symbol_path": "auth::service::validate_token",
                 "code_snippet": "assert!(false); this is not valid rust @@@"
             }
         })),
@@ -160,6 +160,27 @@ fn test_token_validation() {
     assert_eq!(syntax_err_res.get("status").and_then(|v| v.as_str()), Some("COMPILATION_ERROR"));
     assert_eq!(syntax_err_res.get("passed_checks_count").and_then(|v| v.as_u64()), Some(0));
 
+    // 8b. A symbol from a language the sandbox cannot compile is named as such,
+    // rather than handed to rustc so the error blames the caller's syntax.
+    let wrong_lang_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(51)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_eval_patch",
+            "arguments": {
+                "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+                "code_snippet": "assert!(true);"
+            }
+        })),
+    };
+    let wrong_lang_res = extract_tool_result(&server.handle_request(wrong_lang_req).await);
+    assert_eq!(
+        wrong_lang_res.get("status").and_then(|v| v.as_str()),
+        Some("EVALUATOR_UNAVAILABLE"),
+        "a Java symbol must not be compiled as Rust, got {wrong_lang_res:?}"
+    );
+
     // 9. Probe failing assertion -> Must return FAILED
     let fail_req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
@@ -168,7 +189,7 @@ fn test_token_validation() {
         params: Some(json!({
             "name": "axiom_eval_patch",
             "arguments": {
-                "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+                "symbol_path": "auth::service::validate_token",
                 "code_snippet": "assert!(validate_token(\"\")); // BUGGY: empty token"
             }
         })),
@@ -185,7 +206,7 @@ fn test_token_validation() {
         params: Some(json!({
             "name": "axiom_eval_patch",
             "arguments": {
-                "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+                "symbol_path": "auth::service::validate_token",
                 "code_snippet": "assert!(validate_token(\"secret_token_12345\")); // FIXED"
             }
         })),
@@ -193,6 +214,13 @@ fn test_token_validation() {
     let pass_resp = server.handle_request(pass_req).await;
     let pass_res = extract_tool_result(&pass_resp);
     assert_eq!(pass_res.get("status").and_then(|v| v.as_str()), Some("PASSED"));
+    // The attestation below must name this run. A made-up task id is refused,
+    // because a seal that rests on a run nobody performed proves nothing.
+    let passing_task = pass_res
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .expect("a sandbox run must report its task id")
+        .to_string();
 
     // 11. Apply Tree-CRDT mutation
     let mutate_req = JsonRpcRequest {
@@ -224,7 +252,7 @@ fn test_token_validation() {
             "arguments": {
                 "prompt": "Upgrade ConcurrencyRunner to use CompletableFuture for async execution",
                 "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
-                "ctop_task_id": "eval_pass_001"
+                "ctop_task_id": passing_task
             }
         })),
     };
@@ -1082,6 +1110,143 @@ async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
     assert!(
         idx.get_symbol("other.Gamma").is_some(),
         "scanning one subtree must not forget a different one that still exists"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// An attestation claims a change was verified in the sandbox, so it may only
+/// be issued for a run that happened and passed, and verification has to look
+/// the seal up rather than re-derive one from whatever it was asked about.
+/// Re-deriving is a tautology: it reports every symbol and prompt as proven,
+/// including a symbol that does not exist and a prompt nobody ever issued.
+#[tokio::test]
+async fn test_e2e_attestation_requires_a_sandbox_run_that_passed() -> Result<()> {
+    let server = AxiomMcpServer::new()?;
+
+    let attest = |task: &str| JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(9)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_attest_commit",
+            "arguments": {
+                "prompt": "Tighten the guard",
+                "symbol_path": "auth::service::validate_token",
+                "ctop_task_id": task
+            }
+        })),
+    };
+
+    // A task id nobody ran cannot be attested.
+    let resp = server.handle_request(attest("task_never_ran")).await;
+    let res = extract_tool_result(&resp);
+    let err = res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("no sandbox run recorded"),
+        "attesting an unknown task must be refused, got {res:?}"
+    );
+
+    // A run that failed cannot be attested either.
+    let failing = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(10)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_eval_patch",
+            "arguments": { "symbol_path": "auth::service::validate_token", "code_snippet": "assert!(false);" }
+        })),
+    };
+    let failed = extract_tool_result(&server.handle_request(failing).await);
+    assert_eq!(failed.get("status").and_then(|v| v.as_str()), Some("FAILED"));
+    let failed_task = failed.get("task_id").and_then(|v| v.as_str()).unwrap().to_string();
+
+    let res = extract_tool_result(&server.handle_request(attest(&failed_task)).await);
+    let err = res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("did not pass"),
+        "attesting a failed run must be refused, got {res:?}"
+    );
+
+    Ok(())
+}
+
+/// The seal binds a symbol and a prompt, and the ledger is what makes it
+/// checkable later. A stored seal verifies for the pair it was issued for and
+/// for nothing else.
+#[tokio::test]
+async fn test_e2e_attestation_ledger_binds_symbol_and_prompt() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_ledger_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let ledger = temp_dir.join("attestations.json");
+
+    // Nothing attested yet: an empty ledger proves nothing.
+    assert!(axiom_core::mcp::load_attestations_from(&ledger)?.is_empty());
+
+    let seal = axiom_proto::ProvenanceAttestation::generate(
+        "root_parent",
+        "root_commit",
+        "agent_axiom_v1",
+        "Tighten the guard",
+        "auth::service::validate_token",
+        "eval_7",
+    );
+    axiom_core::mcp::append_attestation_to(&ledger, &seal)?;
+
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(stored.len(), 1);
+
+    let found = &stored[0];
+    assert!(
+        found.verify("auth::service::validate_token", "Tighten the guard"),
+        "the seal must verify for the pair it was issued for"
+    );
+    assert!(
+        !found.verify("auth::service::validate_token", "a prompt nobody issued"),
+        "a different prompt must not verify"
+    );
+    assert!(
+        !found.verify("totally::invented::symbol", "Tighten the guard"),
+        "a different symbol must not verify"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// The indexer reads Java, Kotlin, Python, TypeScript and Go; the sandbox
+/// compiles Rust. Handing a Java symbol to rustc produces a syntax error that
+/// blames the caller instead of naming the limit, so the mismatch is caught
+/// before the compiler is reached.
+#[tokio::test]
+async fn test_e2e_eval_refuses_symbols_it_cannot_compile() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_eval_lang_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    std::fs::create_dir_all(&pkg)?;
+    std::fs::write(
+        pkg.join("Gate.java"),
+        "package se.deversity.asynctest;\npublic class Gate {\n    public void open() {}\n}\n",
+    )?;
+
+    let idx = axiom_ast::AstIndex::new();
+    idx.scan_directory(&temp_dir)?;
+
+    assert_eq!(
+        idx.language_of_symbol("se.deversity.asynctest.Gate::open").as_deref(),
+        Some("java"),
+        "the index must know which language a symbol came from"
+    );
+    assert_eq!(
+        idx.language_of_symbol("nothing::indexed::here"),
+        None,
+        "an unknown symbol has no language rather than a guessed one"
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);

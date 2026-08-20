@@ -63,6 +63,11 @@ pub struct EvalRequest {
 /// SLSA Level 4+ Cryptographic Attestation Proof
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvenanceAttestation {
+    /// The symbol this seal was issued for. Without it a stored attestation
+    /// cannot be found again, and verification degenerates into re-deriving a
+    /// seal from whatever arguments it was handed.
+    #[serde(default)]
+    pub symbol_path: String,
     pub parent_merkle_root: String,
     pub commit_merkle_root: String,
     pub agent_identity: String,
@@ -92,6 +97,7 @@ impl ProvenanceAttestation {
         let digest = hasher.finalize().to_hex().to_string();
 
         Self {
+            symbol_path: symbol_path.to_string(),
             parent_merkle_root: parent_merkle_root.to_string(),
             commit_merkle_root: commit_merkle_root.to_string(),
             agent_identity: agent_identity.to_string(),
@@ -103,7 +109,14 @@ impl ProvenanceAttestation {
         }
     }
 
+    /// Re-derive the seal from this attestation's own stored fields plus the
+    /// symbol and prompt being claimed, and compare. A caller that supplies a
+    /// different prompt, or asks about a different symbol, gets false.
     pub fn verify(&self, expected_symbol: &str, prompt: &str) -> bool {
+        if self.symbol_path != expected_symbol {
+            return false;
+        }
+
         let mut hasher = blake3::Hasher::new();
         hasher.update(self.parent_merkle_root.as_bytes());
         hasher.update(self.commit_merkle_root.as_bytes());

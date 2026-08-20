@@ -329,24 +329,47 @@ async fn main() -> Result<()> {
         }
 
         Commands::Verify { symbol, prompt } => {
-            println!("🔍 Verifying cryptographic SLSA L4+ attestation seal for '{}'...", symbol);
-            let attestation = axiom_proto::ProvenanceAttestation::generate(
-                "merkle_root_prev_77a1",
-                "merkle_root_current_88b2",
-                "agent_axiom_v1",
-                &prompt,
-                &symbol,
-                "ctop_task_pass_001",
-            );
+            println!("🔍 Verifying attestation for '{}'...", symbol);
 
-            let is_valid = attestation.verify(&symbol, &prompt);
-            if is_valid {
-                println!("✅ ATTESTATION VALID");
-                println!("   Signature:  {}", attestation.signature);
-                println!("   Prompt Digest: {}", attestation.prompt_digest);
-                println!("   Audit Result: Commit is mathematically proven to have executed inside isolated sandbox.");
-            } else {
-                println!("❌ ATTESTATION INVALID: Signature mismatch or tampering detected.");
+            // Look the seal up. Re-deriving one from these same arguments and
+            // then checking it against itself is a tautology: it would report
+            // every symbol and prompt as proven, including ones nobody ever
+            // attested.
+            let ledger = match axiom_core::mcp::load_attestations() {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("❌ could not read {:?}: {}", axiom_core::mcp::attestation_ledger_path(), e);
+                    std::process::exit(2);
+                }
+            };
+
+            if ledger.is_empty() {
+                println!("❌ NO ATTESTATION: nothing has been attested in this workspace.");
+                println!("   Ledger: {:?}", axiom_core::mcp::attestation_ledger_path());
+                std::process::exit(1);
+            }
+
+            match ledger.iter().find(|a| a.verify(&symbol, &prompt)) {
+                Some(a) => {
+                    println!("✅ ATTESTATION VALID");
+                    println!("   Symbol:        {}", a.symbol_path);
+                    println!("   Sandbox task:  {}", a.ctop_proof_hash);
+                    println!("   Issued:        {}", a.timestamp);
+                    println!("   Signature:     {}", a.signature);
+                    println!("   This seal was issued after sandbox task {} passed.", a.ctop_proof_hash);
+                }
+                None => {
+                    let for_symbol = ledger.iter().filter(|a| a.symbol_path == symbol).count();
+                    if for_symbol == 0 {
+                        println!("❌ NO ATTESTATION: no seal has been issued for this symbol.");
+                    } else {
+                        println!(
+                            "❌ ATTESTATION INVALID: {} seal(s) exist for this symbol, none matches this prompt.",
+                            for_symbol
+                        );
+                    }
+                    std::process::exit(1);
+                }
             }
         }
 

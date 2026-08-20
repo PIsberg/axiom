@@ -1,11 +1,13 @@
 use anyhow::Result;
 use axiom_ast::{AstIndex, SearchMode};
 use axiom_crdt::TreeCrdt;
-use axiom_proto::ProvenanceAttestation;
+use axiom_proto::{CtopStatus, ProvenanceAttestation};
 use axiom_vmm::{SandboxEngine, WasiEngine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JsonRpcRequest {
@@ -25,7 +27,53 @@ pub struct JsonRpcResponse {
     pub error: Option<Value>,
 }
 
+/// Where issued attestations are recorded, beside the index they describe.
+pub fn attestation_ledger_path() -> PathBuf {
+    PathBuf::from(".axiom").join("attestations.json")
+}
+
+/// Every attestation issued so far. A missing ledger is an empty one: nothing
+/// has been attested yet, which is different from failing to read it.
+pub fn load_attestations() -> Result<Vec<ProvenanceAttestation>> {
+    load_attestations_from(&attestation_ledger_path())
+}
+
+/// As above, from an explicit ledger. Kept separate so a caller that must not
+/// touch the working directory, a test above all, can point somewhere else.
+pub fn load_attestations_from(path: &std::path::Path) -> Result<Vec<ProvenanceAttestation>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(path)?;
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_json::from_str(&raw)?)
+}
+
+/// Append one attestation to the ledger.
+pub fn append_attestation(attestation: &ProvenanceAttestation) -> Result<()> {
+    append_attestation_to(&attestation_ledger_path(), attestation)
+}
+
+pub fn append_attestation_to(
+    path: &std::path::Path,
+    attestation: &ProvenanceAttestation,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut all = load_attestations_from(path).unwrap_or_default();
+    all.push(attestation.clone());
+    std::fs::write(path, serde_json::to_string_pretty(&all)?)?;
+    Ok(())
+}
+
 pub struct AxiomMcpServer {
+    /// Sandbox runs this server has actually performed: task id to whether it
+    /// passed. An attestation may only be issued against an entry here, so a
+    /// caller cannot name a task that never ran.
+    pub sandbox_runs: Arc<RwLock<HashMap<String, bool>>>,
     pub ast_index: Arc<AstIndex>,
     pub wasi_engine: Arc<WasiEngine>,
     pub tree_crdt: Arc<TreeCrdt>,
@@ -85,6 +133,7 @@ impl AxiomMcpServer {
         }
 
         Ok(Self {
+            sandbox_runs: Arc::new(RwLock::new(HashMap::new())),
             ast_index,
             wasi_engine,
             tree_crdt,
@@ -276,14 +325,77 @@ impl AxiomMcpServer {
             "axiom_eval_patch" => {
                 let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("anonymous");
                 let snippet = args.get("code_snippet").and_then(|v| v.as_str()).unwrap_or("");
+
+                // The sandbox compiles Rust. The indexer does not: it reads Java,
+                // Kotlin, Python, TypeScript and Go too, so a symbol from any of
+                // those would be handed to rustc and come back with a syntax
+                // error that blames the caller instead of naming the real limit.
+                if let Some(lang) = self.ast_index.language_of_symbol(symbol) {
+                    if lang != "rs" {
+                        return Ok(json!({
+                            "task_id": "eval_unsupported_language",
+                            "status": "EVALUATOR_UNAVAILABLE",
+                            "engine": "tier1_wasi_cranelift",
+                            "passed_checks_count": 0,
+                            "failed_checks": [{
+                                "symbol": symbol,
+                                "error_type": "UnsupportedLanguage",
+                                "expected": "a Rust snippet",
+                                "actual": format!("{:?} is defined in a .{} file", symbol, lang),
+                                "hint": "The sandbox compiles Rust only. Run this symbol's own test suite instead; axiom_get_blast_radius will name the tests to run."
+                            }]
+                        }));
+                    }
+                }
+
                 let report = self.wasi_engine.execute_eval(symbol, snippet).await?;
+
+                // Record the outcome so an attestation can be checked against a
+                // run that genuinely happened, rather than against a task id the
+                // caller made up.
+                let passed = matches!(report.status, CtopStatus::Passed);
+                self.sandbox_runs
+                    .write()
+                    .unwrap()
+                    .insert(report.task_id.clone(), passed);
+
                 Ok(json!(report))
             }
 
             "axiom_attest_commit" => {
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
                 let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
-                let task_id = args.get("ctop_task_id").and_then(|v| v.as_str()).unwrap_or("task_00");
+                let task_id = match args.get("ctop_task_id").and_then(|v| v.as_str()) {
+                    Some(t) if !t.is_empty() => t,
+                    _ => {
+                        return Ok(json!({
+                            "error": "ctop_task_id is required: an attestation must name the sandbox run it rests on"
+                        }))
+                    }
+                };
+
+                // The seal claims the change was verified in the sandbox. Issuing
+                // one for a run this server never performed, or for one that
+                // failed, would make that claim false, so both are refused.
+                match self.sandbox_runs.read().unwrap().get(task_id) {
+                    None => {
+                        return Ok(json!({
+                            "error": format!(
+                                "no sandbox run recorded for task {:?}; call axiom_eval_patch first and attest against the task_id it returns",
+                                task_id
+                            )
+                        }))
+                    }
+                    Some(false) => {
+                        return Ok(json!({
+                            "error": format!(
+                                "sandbox run {:?} did not pass; an attestation may only be issued for a run that succeeded",
+                                task_id
+                            )
+                        }))
+                    }
+                    Some(true) => {}
+                }
 
                 let root = self.tree_crdt.compute_tree_merkle_root();
                 let attestation = ProvenanceAttestation::generate(
@@ -294,6 +406,13 @@ impl AxiomMcpServer {
                     symbol,
                     task_id,
                 );
+
+                // Persist it, or verification later has nothing to look up.
+                if let Err(e) = append_attestation(&attestation) {
+                    return Ok(json!({
+                        "error": format!("could not record the attestation: {}", e)
+                    }));
+                }
 
                 Ok(json!(attestation))
             }
