@@ -421,7 +421,12 @@ async fn main() -> Result<()> {
             let matches = server.ast_index.search_regex(&query, max);
             println!("🔍 Zoekt Trigram Search for '{}' (Found {} matches):", query, matches.len());
             for m in matches {
-                println!("  {}:{} | {}", m.file_path, m.line_number, m.line_content);
+                match m.line_number {
+                    Some(line) => println!("  {}:{} | {}", m.file_path, line, m.line_content),
+                    // A symbol-name hit has no line; printing one would invite a
+                    // caller to open a file that is not there.
+                    None => println!("  {} (symbol) | {}", m.file_path, m.line_content),
+                }
             }
         }
     }

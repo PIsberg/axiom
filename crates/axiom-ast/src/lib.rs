@@ -166,9 +166,13 @@ impl AstIndex {
         let mut results = Vec::new();
         for (sym, node) in nodes.iter() {
             if sym.contains(query) || node.signature.as_deref().unwrap_or("").contains(query) {
+                // No file or line to point at: this matched a symbol name, not a
+                // line of source. Reporting line 1 of the symbol path as though it
+                // were a file sends a caller looking somewhere that does not exist.
                 results.push(ZoektMatch {
+                    match_kind: "symbol".to_string(),
                     file_path: sym.clone(),
-                    line_number: 1,
+                    line_number: None,
                     line_content: node.signature.clone().unwrap_or_else(|| sym.clone()),
                 });
                 if results.len() >= max_results {
@@ -1023,11 +1027,22 @@ fn strip_comments_and_strings(content: &str) -> String {
             }
         }
 
+        // The searchable text is not stored in the index: it would duplicate the
+        // working tree and go stale against it. The scan recorded which files it
+        // read, so re-read them here. Files that have since moved or been deleted
+        // are skipped, which costs their text search rather than the whole load.
+        let mut zoekt = ZoektIndex::new();
+        for file_path in payload.file_call_names.keys() {
+            if let Ok(text) = std::fs::read_to_string(file_path) {
+                zoekt.add_document(file_path, &text);
+            }
+        }
+
         Ok(Self {
             nodes: RwLock::new(payload.nodes),
             reverse_deps: RwLock::new(reverse_deps),
             cas_cache: RwLock::new(HashMap::new()),
-            zoekt_index: RwLock::new(ZoektIndex::new()),
+            zoekt_index: RwLock::new(zoekt),
             method_return_types: RwLock::new(payload.method_return_types),
             file_call_names: RwLock::new(payload.file_call_names),
             file_to_symbols: RwLock::new(payload.file_to_symbols),
@@ -1091,8 +1106,9 @@ impl ZoektIndex {
                 for (line_no, line) in content.lines().enumerate() {
                     if line.contains(query) {
                         matches.push(ZoektMatch {
+                            match_kind: "text".to_string(),
                             file_path: path.clone(),
-                            line_number: line_no + 1,
+                            line_number: Some(line_no + 1),
                             line_content: line.trim().to_string(),
                         });
                         if matches.len() >= max_results {
@@ -1109,8 +1125,11 @@ impl ZoektIndex {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ZoektMatch {
+    /// "text" for a hit on a line of source, "symbol" for a hit on a symbol name.
+    /// A symbol hit has no line to point at, so `line_number` is None there.
+    pub match_kind: String,
     pub file_path: String,
-    pub line_number: usize,
+    pub line_number: Option<usize>,
     pub line_content: String,
 }
 

@@ -881,3 +881,67 @@ async fn test_e2e_legacy_bare_map_index_still_loads() -> Result<()> {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// Text search has to work in the process that serves, which is never the
+/// process that scanned. The searchable text lives in an in-memory index built
+/// during the walk; if loading does not rebuild it, every query silently falls
+/// through to matching symbol names, so a phrase that appears only inside a line
+/// of source returns nothing and no caller can tell the difference.
+#[tokio::test]
+async fn test_e2e_text_search_survives_disk_round_trip() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_search_persist_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    std::fs::create_dir_all(&pkg)?;
+
+    // "barrier.await" appears only in a statement: it is not any symbol's name,
+    // so a symbol-name fallback cannot find it.
+    std::fs::write(
+        pkg.join("Gate.java"),
+        r#"
+package se.deversity.asynctest;
+
+public class Gate {
+    public void open() throws Exception {
+        java.util.concurrent.CyclicBarrier barrier = new java.util.concurrent.CyclicBarrier(2);
+        barrier.await();
+    }
+}
+"#,
+    )?;
+
+    let scanner = axiom_ast::AstIndex::new();
+    scanner.scan_directory(&temp_dir)?;
+    let saved_path = scanner.save_to_disk(&temp_dir.join(".axiom").join("index.json"))?;
+
+    let served = axiom_ast::AstIndex::load_from_disk(&saved_path)?;
+    let hits = served.search_regex("barrier.await", 10);
+
+    let text_hit = hits
+        .iter()
+        .find(|m| m.match_kind == "text")
+        .unwrap_or_else(|| panic!("expected a source-text hit after reload; got {:?}", hits));
+
+    assert!(
+        text_hit.file_path.ends_with("Gate.java"),
+        "a text hit must name the file it came from, got {:?}",
+        text_hit.file_path
+    );
+    assert_eq!(
+        text_hit.line_number,
+        Some(7),
+        "a text hit must carry the real line it was found on"
+    );
+    assert!(text_hit.line_content.contains("barrier.await"));
+
+    // A symbol-name hit has no line, and must not invent one.
+    let sym_hits = served.search_regex("Gate", 10);
+    for m in sym_hits.iter().filter(|m| m.match_kind == "symbol") {
+        assert_eq!(m.line_number, None, "symbol hits must not report a line number");
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
