@@ -1,7 +1,99 @@
 use axiom_proto::AstNode;
+use regex::Regex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+
+/// Hold an exclusive lock beside the index while it is read and rewritten.
+///
+/// Two agents sharing one workspace both load the index, both write it whole,
+/// and the second write erases the first agent's node. That is not a merge
+/// conflict anyone can see: the work simply disappears. Serialising the
+/// read-modify-write is what stops it.
+///
+/// The lock is a file created exclusively, so acquiring it is atomic. A lock
+/// older than the timeout is taken over rather than waited on forever, since a
+/// crashed process cannot release its own.
+pub struct IndexLock {
+    path: PathBuf,
+}
+
+impl IndexLock {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+    pub fn acquire(index_path: &Path) -> std::io::Result<Self> {
+        let path = index_path.with_extension("lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let deadline = std::time::Instant::now() + Self::STALE_AFTER;
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().unwrap_or_default() > Self::STALE_AFTER)
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("timed out waiting for {:?}", path),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Write a file so a reader sees either the old contents or the new ones, never
+/// a half-written file: write beside the target, then rename over it.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// On-disk index format version. Bumped when the shape below changes in a way
+/// an older reader could misinterpret.
+const INDEX_FORMAT_VERSION: u32 = 2;
+
+/// What `.axiom/index.json` holds. The nodes alone are not enough: blast radius
+/// resolves accessor calls through `method_return_types` and `file_call_names`,
+/// so an index that persists only nodes silently loses that resolution the
+/// moment it crosses a process boundary.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedIndex {
+    #[serde(default)]
+    format_version: u32,
+    nodes: HashMap<String, AstNode>,
+    #[serde(default)]
+    method_return_types: HashMap<String, String>,
+    #[serde(default)]
+    file_call_names: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    file_to_symbols: HashMap<String, Vec<String>>,
+}
 
 /// Merkle AST Content-Addressable Store (CAS), Symbol Graph & Zoekt Trigram Index
 pub struct AstIndex {
@@ -14,10 +106,28 @@ pub struct AstIndex {
     zoekt_index: RwLock<ZoektIndex>,
     /// Accessor method return-type map: method_name -> declared return type
     method_return_types: RwLock<HashMap<String, String>>,
-    /// Stripped clean source text per file for zero-noise callsite matching
-    clean_file_texts: RwLock<HashMap<String, String>>,
+    /// Method names invoked in each file, taken from comment- and string-stripped
+    /// source. Persisted in place of the raw text: only membership is ever tested,
+    /// and the vocabulary is a small fraction of the source it is derived from.
+    file_call_names: RwLock<HashMap<String, Vec<String>>>,
     /// File path to indexed symbols mapping
     file_to_symbols: RwLock<HashMap<String, Vec<String>>>,
+    /// Symbols and files this process has deliberately forgotten since it loaded.
+    ///
+    /// Saving has to merge rather than overwrite, or a scan running beside
+    /// another agent writes back its own view and drops that agent's work. But a
+    /// plain union would also resurrect everything a re-scan just purged, so the
+    /// removals are recorded and subtracted from the merge.
+    forgotten_symbols: RwLock<HashSet<String>>,
+    forgotten_files: RwLock<HashSet<String>>,
+    /// The file currently being parsed, so every symbol it produces is attributed
+    /// to it whichever language parser produced it.
+    ///
+    /// Recording this inside each parser meant only the Java one did, so a
+    /// deleted .rs or .py file left its symbols behind for ever: the purge works
+    /// by looking up what a file owned, and for those languages the answer was
+    /// always nothing.
+    parsing_file: RwLock<Option<String>>,
 }
 
 impl AstIndex {
@@ -28,8 +138,11 @@ impl AstIndex {
             cas_cache: RwLock::new(HashMap::new()),
             zoekt_index: RwLock::new(ZoektIndex::new()),
             method_return_types: RwLock::new(HashMap::new()),
-            clean_file_texts: RwLock::new(HashMap::new()),
+            file_call_names: RwLock::new(HashMap::new()),
             file_to_symbols: RwLock::new(HashMap::new()),
+            forgotten_symbols: RwLock::new(HashSet::new()),
+            forgotten_files: RwLock::new(HashSet::new()),
+            parsing_file: RwLock::new(None),
         }
     }
 
@@ -62,6 +175,17 @@ impl AstIndex {
 
         let mut nodes = self.nodes.write().unwrap();
         nodes.insert(symbol.to_string(), node.clone());
+        drop(nodes);
+
+        // Attribution happens here rather than in each parser, so a language
+        // added later cannot forget to do it.
+        if let Some(file) = self.parsing_file.read().unwrap().as_ref() {
+            let mut owned = self.file_to_symbols.write().unwrap();
+            let entry = owned.entry(file.clone()).or_default();
+            if !entry.iter().any(|s| s == symbol) {
+                entry.push(symbol.to_string());
+            }
+        }
 
         node
     }
@@ -87,24 +211,69 @@ impl AstIndex {
     }
 
     /// Lookup a symbol in the AST index (supports exact match and class-level matching)
+    /// Look a symbol up, exactly if possible and by unique suffix otherwise.
+    ///
+    /// Returns nothing when the name is blank or matches more than one symbol.
+    /// The previous version returned the first match found while walking a
+    /// HashMap, which meant two different wrong answers: an empty name matched
+    /// everything, because every string ends with the empty string, so a request
+    /// that forgot its argument got a real-looking node for an arbitrary symbol;
+    /// and an ambiguous suffix like "execute" silently resolved to whichever
+    /// class the iteration order happened to reach first, differently between
+    /// runs.
     pub fn get_symbol(&self, symbol_path: &str) -> Option<AstNode> {
+        if symbol_path.trim().is_empty() {
+            return None;
+        }
+
         let nodes = self.nodes.read().unwrap();
         if let Some(node) = nodes.get(symbol_path) {
             return Some(node.clone());
         }
 
-        let prefix = format!("{}::", symbol_path);
-        for (k, v) in nodes.iter() {
-            if k.starts_with(&prefix)
-                || k.ends_with(symbol_path)
-                || k.ends_with(&format!(".{}", symbol_path))
-                || k.ends_with(&format!("::{}", symbol_path))
-            {
-                return Some(v.clone());
-            }
+        let mut matches: Vec<&String> = nodes
+            .keys()
+            .filter(|k| Self::is_suffix_match(k, symbol_path))
+            .collect();
+
+        if matches.len() == 1 {
+            return nodes.get(matches.pop().unwrap()).cloned();
         }
 
         None
+    }
+
+    /// Every symbol an ambiguous name could have meant, sorted so a caller can
+    /// show a stable list rather than an arbitrary one.
+    pub fn candidates_for(&self, symbol_path: &str) -> Vec<String> {
+        if symbol_path.trim().is_empty() {
+            return Vec::new();
+        }
+        let nodes = self.nodes.read().unwrap();
+        let mut out: Vec<String> = nodes
+            .keys()
+            .filter(|k| Self::is_suffix_match(k, symbol_path))
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Whether `key` names the same thing as `symbol_path` written in short.
+    ///
+    /// A shorter name has to end on a boundary in the key: `alpha` matches
+    /// `pkg.Class::alpha` and `src/lib.rs::alpha` matches the absolute path it
+    /// was recorded under, while `pha` matches neither. Requiring the boundary
+    /// is what keeps this from degenerating into "ends with", which is true of
+    /// every key when the name is empty.
+    fn is_suffix_match(key: &str, symbol_path: &str) -> bool {
+        if key == symbol_path || key.starts_with(&format!("{symbol_path}::")) {
+            return true;
+        }
+        match key.strip_suffix(symbol_path) {
+            Some(before) => before.ends_with('.') || before.ends_with('/') || before.ends_with(':'),
+            None => false,
+        }
     }
 
     /// List all symbols currently indexed
@@ -128,13 +297,47 @@ impl AstIndex {
     /// Trigram / Text search across indexed codebase
     pub fn search_symbols_and_text(&self, query: &str, max_results: usize) -> Vec<ZoektMatch> {
         let zoekt = self.zoekt_index.read().unwrap();
-        zoekt.search(query, max_results)
+        zoekt.search(query, None, max_results)
     }
 
-    /// Search codebase using Zoekt-style trigram regex index
-    pub fn search_regex(&self, query: &str, max_results: usize) -> Vec<ZoektMatch> {
+    /// Search source text, falling back to symbol names when the text yields
+    /// nothing. An invalid pattern is an error, never a silent literal search:
+    /// answering a different question than the one asked is worse than refusing.
+    pub fn search(
+        &self,
+        query: &str,
+        mode: SearchMode,
+        max_results: usize,
+    ) -> Result<(SearchMode, Vec<ZoektMatch>), String> {
+        let effective = match mode {
+            SearchMode::Auto => {
+                if looks_like_a_pattern(query) && Regex::new(query).is_ok() {
+                    SearchMode::Regex
+                } else {
+                    SearchMode::Literal
+                }
+            }
+            explicit => explicit,
+        };
+
+        let compiled = match effective {
+            SearchMode::Regex => Some(Regex::new(query).map_err(|e| {
+                format!("{:?} is not a valid regular expression: {}", query, e)
+            })?),
+            _ => None,
+        };
+
+        Ok((effective, self.run_search(query, compiled.as_ref(), max_results)))
+    }
+
+    fn run_search(
+        &self,
+        query: &str,
+        compiled: Option<&Regex>,
+        max_results: usize,
+    ) -> Vec<ZoektMatch> {
         let zoekt = self.zoekt_index.read().unwrap();
-        let matches = zoekt.search(query, max_results);
+        let matches = zoekt.search(query, compiled, max_results);
         if !matches.is_empty() {
             return matches;
         }
@@ -142,10 +345,19 @@ impl AstIndex {
         let nodes = self.nodes.read().unwrap();
         let mut results = Vec::new();
         for (sym, node) in nodes.iter() {
-            if sym.contains(query) || node.signature.as_deref().unwrap_or("").contains(query) {
+            let signature = node.signature.as_deref().unwrap_or("");
+            let hit = match compiled {
+                Some(re) => re.is_match(sym) || re.is_match(signature),
+                None => sym.contains(query) || signature.contains(query),
+            };
+            if hit {
+                // No file or line to point at: this matched a symbol name, not a
+                // line of source. Reporting line 1 of the symbol path as though it
+                // were a file sends a caller looking somewhere that does not exist.
                 results.push(ZoektMatch {
+                    match_kind: "symbol".to_string(),
                     file_path: sym.clone(),
-                    line_number: 1,
+                    line_number: None,
                     line_content: node.signature.clone().unwrap_or_else(|| sym.clone()),
                 });
                 if results.len() >= max_results {
@@ -154,6 +366,70 @@ impl AstIndex {
             }
         }
         results
+    }
+
+/// The file extension of the source a symbol came from, when the index knows
+    /// it. Used to keep language-specific tooling from being pointed at a
+    /// language it cannot handle.
+    pub fn language_of_symbol(&self, symbol_path: &str) -> Option<String> {
+        let file_syms = self.file_to_symbols.read().unwrap();
+        for (file, symbols) in file_syms.iter() {
+            if symbols.iter().any(|s| s == symbol_path) {
+                return Path::new(file)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_string());
+            }
+        }
+        None
+    }
+
+/// A cheap summary of every source file under `root`: path, size and
+    /// modification time. Comparing two of these says whether a re-scan is
+    /// worth doing, at the cost of a stat per file rather than a parse.
+    pub fn tree_fingerprint(&self, root: &Path) -> String {
+        let mut entries: Vec<String> = Vec::new();
+        Self::fingerprint_dir(root, &mut entries);
+        entries.sort();
+
+        let mut hasher = blake3::Hasher::new();
+        for e in &entries {
+            hasher.update(e.as_bytes());
+            hasher.update(b"
+");
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn fingerprint_dir(dir: &Path, out: &mut Vec<String>) {
+        let read = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with('.') || name == "target" || name == "node_modules" || name == "build" || name == "dist" {
+                    continue;
+                }
+                Self::fingerprint_dir(&path, out);
+            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if !matches!(ext, "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c" | "cpp" | "h" | "json" | "toml") {
+                    continue;
+                }
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                out.push(format!("{}|{}|{}", path.to_string_lossy(), meta.len(), modified));
+            }
+        }
     }
 
     /// Predictive Blast-Radius Calculation with Accessor Return-Type Resolution
@@ -165,7 +441,7 @@ impl AstIndex {
         let rev = self.reverse_deps.read().unwrap();
         let nodes = self.nodes.read().unwrap();
         let mrt = self.method_return_types.read().unwrap();
-        let clean_files = self.clean_file_texts.read().unwrap();
+        let file_calls = self.file_call_names.read().unwrap();
 
         let mut visited = HashSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
@@ -219,10 +495,9 @@ impl AstIndex {
 
         if !accessor_names.is_empty() {
             let file_syms = self.file_to_symbols.read().unwrap();
-            for (file_path, clean_code) in clean_files.iter() {
+            for (file_path, calls) in file_calls.iter() {
                 for acc in &accessor_names {
-                    let call_pat = format!("{}(", acc);
-                    if clean_code.contains(&call_pat) {
+                    if calls.iter().any(|c| c == acc) {
                         if let Some(syms) = file_syms.get(file_path) {
                             for sym in syms {
                                 if let Some(node) = nodes.get(sym) {
@@ -317,8 +592,21 @@ impl AstIndex {
     pub fn scan_directory(&self, root: &Path) -> std::io::Result<ScanSummary> {
         let mut files_scanned = 0;
         let mut nodes_extracted = 0;
+        let mut visited: HashSet<String> = HashSet::new();
 
-        self.walk_dir(root, &mut files_scanned, &mut nodes_extracted)?;
+        // Resolve the root once. Canonicalising every file instead costs a
+        // filesystem round trip per entry, measured at 24ms/file against
+        // 3.2ms/file over a 459-file tree.
+        let root_key = Self::canonical_key(root);
+        self.walk_dir(root, root, &root_key, &mut files_scanned, &mut nodes_extracted, &mut visited)?;
+
+        // A scan is a statement about what the tree contains now, so anything
+        // recorded from a file that has since disappeared has to go. Without
+        // this the index only ever grows: a deleted class stays answerable and
+        // a renamed method keeps its old name alongside the new one, and the
+        // blast radius then names tests that no longer exist.
+        self.forget_missing_files(&root_key, &visited);
+        self.rebuild_reverse_deps();
 
         Ok(ScanSummary {
             files_scanned,
@@ -327,7 +615,109 @@ impl AstIndex {
         })
     }
 
-    fn walk_dir(&self, dir: &Path, files_count: &mut usize, nodes_count: &mut usize) -> std::io::Result<()> {
+
+/// One canonical spelling for a file, so the same file scanned as "." and as
+    /// an absolute root produces the same key. Without this the index holds two
+    /// records for one file, and a purge keyed on the root prefix matches
+    /// neither.
+    /// A file's key, built by appending its path below the walk root to the
+    /// already-resolved root. Equivalent to canonicalising the file, without
+    /// asking the filesystem again for every entry.
+    fn key_under_root(root: &Path, root_key: &str, path: &Path) -> String {
+        match path.strip_prefix(root) {
+            Ok(rest) => {
+                let rest = rest.to_string_lossy().replace('\\', "/");
+                if rest.is_empty() {
+                    root_key.to_string()
+                } else {
+                    format!("{}/{}", root_key, rest)
+                }
+            }
+            // Not below the root, which the walk should make impossible; fall
+            // back to resolving the file itself rather than inventing a key.
+            Err(_) => Self::canonical_key(path),
+        }
+    }
+
+    fn canonical_key(path: &Path) -> String {
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        resolved
+            .to_string_lossy()
+            .replace("\\", "/")
+            .trim_start_matches("//?/")
+            .to_string()
+    }
+
+    /// Remove everything a single file contributed to the index.
+    fn forget_file(&self, file_path: &str) {
+        let previous = self.file_to_symbols.write().unwrap().remove(file_path);
+        self.file_call_names.write().unwrap().remove(file_path);
+        self.forgotten_files.write().unwrap().insert(file_path.to_string());
+
+        if let Some(symbols) = previous {
+            let mut nodes = self.nodes.write().unwrap();
+            let mut forgotten = self.forgotten_symbols.write().unwrap();
+            for symbol in symbols {
+                nodes.remove(&symbol);
+                forgotten.insert(symbol);
+            }
+        }
+    }
+
+    /// Forget files recorded under this root by an earlier scan that this one did
+    /// not see and that are no longer on disk.
+    ///
+    /// Scoped to the root on purpose. A scan is a statement about the tree it was
+    /// pointed at and says nothing about anything else, so records from other
+    /// roots are left alone whether or not their files still exist. Widening this
+    /// to every recorded path makes one scan able to empty an unrelated project's
+    /// entries out of a shared index.
+    fn forget_missing_files(&self, root_prefix: &str, visited: &HashSet<String>) {
+
+        let recorded: Vec<String> = self
+            .file_to_symbols
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+
+        for file_path in recorded {
+            if visited.contains(&file_path) {
+                continue;
+            }
+            if !file_path.starts_with(root_prefix) {
+                continue;
+            }
+            if !Path::new(&file_path).exists() {
+                self.forget_file(&file_path);
+            }
+        }
+    }
+
+    /// Rebuild the reverse graph from the nodes that remain. Purging by file
+    /// leaves dangling entries otherwise, and a stale caller list is how a
+    /// deleted test keeps showing up in a blast radius.
+    fn rebuild_reverse_deps(&self) {
+        let nodes = self.nodes.read().unwrap();
+        let mut rebuilt: HashMap<String, Vec<String>> = HashMap::new();
+        for (symbol, node) in nodes.iter() {
+            for dep in &node.dependencies {
+                rebuilt.entry(dep.clone()).or_default().push(symbol.clone());
+            }
+        }
+        *self.reverse_deps.write().unwrap() = rebuilt;
+    }
+
+    fn walk_dir(
+        &self,
+        dir: &Path,
+        root: &Path,
+        root_key: &str,
+        files_count: &mut usize,
+        nodes_count: &mut usize,
+        visited: &mut HashSet<String>,
+    ) -> std::io::Result<()> {
         if !dir.exists() || !dir.is_dir() {
             return Ok(());
         }
@@ -340,7 +730,7 @@ impl AstIndex {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 // Skip hidden folders and build directories
                 if !dir_name.starts_with('.') && dir_name != "target" && dir_name != "node_modules" && dir_name != "build" && dir_name != "dist" {
-                    self.walk_dir(&path, files_count, nodes_count)?;
+                    self.walk_dir(&path, root, root_key, files_count, nodes_count, visited)?;
                 }
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -348,8 +738,14 @@ impl AstIndex {
                         "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c" | "cpp" | "h" | "json" | "toml" => {
                             if let Ok(content) = std::fs::read_to_string(&path) {
                                 *files_count += 1;
-                                let rel = path.to_string_lossy().replace("\\", "/");
-                                
+                                let rel = Self::key_under_root(root, root_key, &path);
+                                visited.insert(rel.clone());
+
+                                // Drop what this file contributed last time before
+                                // re-reading it, so a renamed or removed symbol does
+                                // not survive alongside its replacement.
+                                self.forget_file(&rel);
+
                                 // Index into Zoekt Trigram store
                                 self.zoekt_index.write().unwrap().add_document(&rel, &content);
 
@@ -367,6 +763,12 @@ impl AstIndex {
     }
 
     fn parse_file_content(&self, file_path: &str, ext: &str, content: &str, nodes_count: &mut usize) {
+        *self.parsing_file.write().unwrap() = Some(file_path.to_string());
+        self.parse_by_language(file_path, ext, content, nodes_count);
+        *self.parsing_file.write().unwrap() = None;
+    }
+
+    fn parse_by_language(&self, file_path: &str, ext: &str, content: &str, nodes_count: &mut usize) {
         match ext {
             "java" | "kt" | "scala" => self.parse_java_content(file_path, content, nodes_count),
             "rs" => self.parse_rust_content(file_path, content, nodes_count),
@@ -538,8 +940,11 @@ fn strip_comments_and_strings(content: &str) -> String {
             }
         }
 
-        // Store clean code text for accessor resolution
-        self.clean_file_texts.write().unwrap().insert(file_path.to_string(), clean_code.clone());
+        // Record which methods this file calls, for accessor resolution.
+        self.file_call_names
+            .write()
+            .unwrap()
+            .insert(file_path.to_string(), Self::extract_call_names(&clean_code));
 
         let lines: Vec<&str> = content.lines().collect();
         let mut i = 0;
@@ -886,6 +1291,114 @@ fn strip_comments_and_strings(content: &str) -> String {
         }
     }
 
+
+    /// Identifiers appearing immediately before an opening parenthesis, i.e. the
+    /// methods a file calls. Derived from already comment- and string-stripped
+    /// source, so a name mentioned only in prose never reaches this set.
+    fn extract_call_names(clean_code: &str) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let bytes = clean_code.as_bytes();
+        let mut start: Option<usize> = None;
+
+        for (i, &b) in bytes.iter().enumerate() {
+            let c = b as char;
+            if c.is_alphanumeric() || c == '_' || c == '$' {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                continue;
+            }
+
+            if let Some(s0) = start.take() {
+                if c == '(' {
+                    let name = &clean_code[s0..i];
+                    if !name.is_empty()
+                        && !name.chars().next().unwrap().is_ascii_digit()
+                        && !names.iter().any(|n| n == name)
+                    {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        names
+    }
+
+    /// Parse an index file.
+    ///
+    /// The current format carries the resolution side tables alongside the
+    /// nodes. Indexes written before those tables existed are a bare node map;
+    /// they still load, only without accessor resolution until the next scan.
+    fn load_payload(path: &Path) -> std::io::Result<PersistedIndex> {
+        let content = std::fs::read_to_string(path)?;
+        match serde_json::from_str::<PersistedIndex>(&content) {
+            Ok(p) => Ok(p),
+            Err(struct_err) => {
+                let nodes: HashMap<String, AstNode> =
+                    serde_json::from_str(&content).map_err(|bare_err| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!(
+                                "{path:?} parses as neither the current index format ({struct_err}) nor a legacy bare node map ({bare_err})"
+                            ),
+                        )
+                    })?;
+                Ok(PersistedIndex {
+                    format_version: 1,
+                    nodes,
+                    method_return_types: HashMap::new(),
+                    file_call_names: HashMap::new(),
+                    file_to_symbols: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    /// Record one symbol into the index on disk without overwriting anything
+    /// else in it.
+    ///
+    /// A mutation is a change to one node. Persisting it by writing this
+    /// process's entire in-memory index would also write back every other symbol
+    /// as this process last saw it, undoing whatever another agent recorded in
+    /// the meantime. So the current file is re-read under the lock, the one node
+    /// is inserted, and the result is written atomically.
+    pub fn persist_symbol(&self, file_path: &Path, symbol: &str) -> std::io::Result<PathBuf> {
+        let abs_path = if file_path.is_absolute() {
+            file_path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(file_path)
+        };
+        if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let node = self
+            .get_symbol(symbol)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{symbol:?} is not indexed")))?;
+
+        let _lock = IndexLock::acquire(&abs_path)?;
+
+        let mut payload = match Self::load_payload(&abs_path) {
+            Ok(p) => p,
+            Err(_) => PersistedIndex {
+                format_version: INDEX_FORMAT_VERSION,
+                nodes: HashMap::new(),
+                method_return_types: HashMap::new(),
+                file_call_names: HashMap::new(),
+                file_to_symbols: HashMap::new(),
+            },
+        };
+
+        payload.format_version = INDEX_FORMAT_VERSION;
+        payload.nodes.insert(symbol.to_string(), node);
+
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        write_atomically(&abs_path, json.as_bytes())?;
+        Ok(abs_path)
+    }
+
     /// Persist the Merkle AST CAS index to disk (.axiom/index.json)
     pub fn save_to_disk(&self, file_path: &Path) -> std::io::Result<PathBuf> {
         let abs_path = if file_path.is_absolute() {
@@ -898,11 +1411,49 @@ fn strip_comments_and_strings(content: &str) -> String {
             std::fs::create_dir_all(parent)?;
         }
 
-        let nodes = self.nodes.read().unwrap();
-        let json = serde_json::to_string_pretty(&*nodes)
+        let _lock = IndexLock::acquire(&abs_path)?;
+
+        // Merge over whatever is on disk now rather than replacing it. Another
+        // agent may have recorded a symbol since this process loaded, and
+        // writing this view whole would take that symbol with it. Removals this
+        // process made are subtracted explicitly, so a re-scan still drops what
+        // it purged instead of a union resurrecting it.
+        let mut payload = Self::load_payload(&abs_path).unwrap_or(PersistedIndex {
+            format_version: INDEX_FORMAT_VERSION,
+            nodes: HashMap::new(),
+            method_return_types: HashMap::new(),
+            file_call_names: HashMap::new(),
+            file_to_symbols: HashMap::new(),
+        });
+
+        for symbol in self.forgotten_symbols.read().unwrap().iter() {
+            payload.nodes.remove(symbol);
+        }
+        for file in self.forgotten_files.read().unwrap().iter() {
+            payload.file_call_names.remove(file);
+            payload.file_to_symbols.remove(file);
+        }
+
+        payload.format_version = INDEX_FORMAT_VERSION;
+        payload.nodes.extend(self.nodes.read().unwrap().clone());
+        payload
+            .method_return_types
+            .extend(self.method_return_types.read().unwrap().clone());
+        payload
+            .file_call_names
+            .extend(self.file_call_names.read().unwrap().clone());
+        payload
+            .file_to_symbols
+            .extend(self.file_to_symbols.read().unwrap().clone());
+
+        let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        
-        std::fs::write(&abs_path, json.as_bytes())?;
+
+        write_atomically(&abs_path, json.as_bytes())?;
+
+        // Recorded so the next save does not have to re-apply them.
+        self.forgotten_symbols.write().unwrap().clear();
+        self.forgotten_files.write().unwrap().clear();
         
         // Verify write succeeded
         if !abs_path.exists() {
@@ -923,25 +1474,37 @@ fn strip_comments_and_strings(content: &str) -> String {
             std::env::current_dir()?.join(file_path)
         };
 
-        let content = std::fs::read_to_string(&abs_path)?;
-        let nodes: HashMap<String, AstNode> = serde_json::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let payload = Self::load_payload(&abs_path)?;
 
         let mut reverse_deps = HashMap::new();
-        for (symbol, node) in &nodes {
+        for (symbol, node) in &payload.nodes {
             for dep in &node.dependencies {
                 reverse_deps.entry(dep.clone()).or_insert_with(Vec::new).push(symbol.clone());
             }
         }
 
+        // The searchable text is not stored in the index: it would duplicate the
+        // working tree and go stale against it. The scan recorded which files it
+        // read, so re-read them here. Files that have since moved or been deleted
+        // are skipped, which costs their text search rather than the whole load.
+        let mut zoekt = ZoektIndex::new();
+        for file_path in payload.file_call_names.keys() {
+            if let Ok(text) = std::fs::read_to_string(file_path) {
+                zoekt.add_document(file_path, &text);
+            }
+        }
+
         Ok(Self {
-            nodes: RwLock::new(nodes),
+            nodes: RwLock::new(payload.nodes),
             reverse_deps: RwLock::new(reverse_deps),
             cas_cache: RwLock::new(HashMap::new()),
-            zoekt_index: RwLock::new(ZoektIndex::new()),
-            method_return_types: RwLock::new(HashMap::new()),
-            clean_file_texts: RwLock::new(HashMap::new()),
-            file_to_symbols: RwLock::new(HashMap::new()),
+            zoekt_index: RwLock::new(zoekt),
+            method_return_types: RwLock::new(payload.method_return_types),
+            file_call_names: RwLock::new(payload.file_call_names),
+            file_to_symbols: RwLock::new(payload.file_to_symbols),
+            forgotten_symbols: RwLock::new(HashSet::new()),
+            forgotten_files: RwLock::new(HashSet::new()),
+            parsing_file: RwLock::new(None),
         })
     }
 }
@@ -971,12 +1534,16 @@ impl ZoektIndex {
         }
     }
 
-    pub fn search(&self, query: &str, max_results: usize) -> Vec<ZoektMatch> {
+    pub fn search(&self, query: &str, compiled: Option<&Regex>, max_results: usize) -> Vec<ZoektMatch> {
         let mut matches = Vec::new();
         let query_bytes = query.as_bytes();
 
-        // Candidates filtering via trigrams if query >= 3 chars
-        let candidates: Vec<&String> = if query_bytes.len() >= 3 {
+        // Trigram prefiltering only holds for a literal query: the trigrams of a
+        // pattern are not text that appears in any file. A regex search scans
+        // every document instead, trading speed for not missing matches.
+        let candidates: Vec<&String> = if compiled.is_some() {
+            self.files.keys().collect()
+        } else if query_bytes.len() >= 3 {
             let mut candidate_set: Option<HashSet<String>> = None;
             for i in 0..query_bytes.len() - 2 {
                 let tri = [query_bytes[i], query_bytes[i + 1], query_bytes[i + 2]];
@@ -1000,10 +1567,15 @@ impl ZoektIndex {
         for path in candidates {
             if let Some(content) = self.files.get(path) {
                 for (line_no, line) in content.lines().enumerate() {
-                    if line.contains(query) {
+                    let hit = match compiled {
+                        Some(re) => re.is_match(line),
+                        None => line.contains(query),
+                    };
+                    if hit {
                         matches.push(ZoektMatch {
+                            match_kind: "text".to_string(),
                             file_path: path.clone(),
-                            line_number: line_no + 1,
+                            line_number: Some(line_no + 1),
                             line_content: line.trim().to_string(),
                         });
                         if matches.len() >= max_results {
@@ -1018,10 +1590,64 @@ impl ZoektIndex {
     }
 }
 
+/// How a search query is interpreted.
+///
+/// The default is deliberately `Literal`. Real queries an agent sends are full
+/// of regex metacharacters that it means literally: `validate_token(`,
+/// `List<String>`, `config.threads`. Guessing regex from the presence of those
+/// characters would silently answer a different question than the one asked,
+/// so regex is opt-in and the mode actually used is reported back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Match the query as plain text.
+    Literal,
+    /// Compile the query as a regular expression.
+    Regex,
+    /// Use regex only if the query both parses as one and contains a construct
+    /// that is meaningless as literal text. Never silently reinterprets a query
+    /// that could plausibly be literal.
+    Auto,
+}
+
+impl SearchMode {
+    /// Parse a caller-supplied mode. Unknown values are rejected rather than
+    /// quietly treated as the default.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "literal" | "" => Ok(SearchMode::Literal),
+            "regex" => Ok(SearchMode::Regex),
+            "auto" => Ok(SearchMode::Auto),
+            other => Err(format!(
+                "unknown search mode {:?}; expected \"literal\", \"regex\" or \"auto\"",
+                other
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SearchMode::Literal => "literal",
+            SearchMode::Regex => "regex",
+            SearchMode::Auto => "auto",
+        }
+    }
+}
+
+/// Constructs that carry no meaning as literal source text, so a query holding
+/// one was almost certainly written as a pattern. Bare `.`, `(`, `)`, `<` and
+/// `>` are excluded on purpose: they are ordinary code punctuation.
+fn looks_like_a_pattern(query: &str) -> bool {
+    const PATTERN_TOKENS: [&str; 10] = [".*", ".+", "[", "]", "^", "$", "\\b", "\\d", "\\w", "\\s"];
+    PATTERN_TOKENS.iter().any(|t| query.contains(t))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ZoektMatch {
+    /// "text" for a hit on a line of source, "symbol" for a hit on a symbol name.
+    /// A symbol hit has no line to point at, so `line_number` is None there.
+    pub match_kind: String,
     pub file_path: String,
-    pub line_number: usize,
+    pub line_number: Option<usize>,
     pub line_content: String,
 }
 

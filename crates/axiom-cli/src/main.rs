@@ -1,4 +1,5 @@
 use anyhow::Result;
+use axiom_ast::SearchMode;
 use axiom_core::{mcp::JsonRpcRequest, AxiomMcpServer};
 use axiom_vmm::SandboxEngine;
 use clap::{Parser, Subcommand};
@@ -52,12 +53,15 @@ enum Commands {
     },
     /// Export ready-to-use MCP configuration for AI IDEs (Cursor, Claude Code, Antigravity, Windsurf)
     McpConfig,
-    /// Cryptographically verify a commit's SLSA L4+ attestation seal
+    /// Look up the provenance record for a symbol and prompt, and check it is unaltered
     Verify {
         #[arg(short, long)]
         symbol: String,
         #[arg(short, long)]
         prompt: String,
+        /// Public key, or a file holding one, that the record must be signed by
+        #[arg(long)]
+        trusted_key: Option<String>,
     },
     /// Scan and index an entire local repository into the Merkle AST CAS
     Scan {
@@ -67,9 +71,21 @@ enum Commands {
     /// Launch real-time Terminal UI Dashboard displaying Swarm and Engine metrics
     Dashboard,
     /// Watch filesystem for live incremental AST Merkle updates
+    /// Generate an Ed25519 keypair for signing provenance records
+    Keygen {
+        /// Where to write the private key. Keep it outside the workspace.
+        #[arg(long)]
+        out: String,
+    },
     Watch {
         #[arg(short, long, default_value = ".")]
         path: String,
+        /// How often to check the tree for changes, in milliseconds
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        /// Scan once and exit instead of watching
+        #[arg(long, default_value_t = false)]
+        once: bool,
     },
     /// Export current Merkle state to a Git-compatible patch / commit summary
     GitExport,
@@ -77,9 +93,49 @@ enum Commands {
     Search {
         #[arg(short, long)]
         query: String,
+        /// How to read the query: literal (default), regex, or auto
+        #[arg(long, default_value = "literal")]
+        mode: String,
         #[arg(short, long, default_value_t = 20)]
         max: usize,
     },
+}
+
+/// Pull the payload out of a tool response.
+///
+/// A tool answer arrives as a JSON-RPC envelope whose `result.content[0].text`
+/// is itself a JSON document, encoded as a string. Printing the envelope leaves
+/// a person reading escaped JSON inside JSON to find the answer, so the CLI
+/// unwraps it and prints what was asked for.
+fn tool_payload(resp: &axiom_core::mcp::JsonRpcResponse) -> serde_json::Value {
+    resp.result
+        .as_ref()
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_else(|| {
+            resp.result
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({ "error": "no result in response" }))
+        })
+}
+
+/// Report an error payload and stop, or hand back the payload.
+fn payload_or_exit(payload: serde_json::Value) -> serde_json::Value {
+    if let Some(err) = payload.get("error").and_then(|e| e.as_str()) {
+        eprintln!("Error: {err}");
+        if let Some(candidates) = payload.get("candidates").and_then(|c| c.as_array()) {
+            for c in candidates {
+                if let Some(c) = c.as_str() {
+                    eprintln!("  {c}");
+                }
+            }
+        }
+        std::process::exit(1);
+    }
+    payload
 }
 
 #[tokio::main]
@@ -123,11 +179,33 @@ async fn main() -> Result<()> {
                     }
                 })),
             };
-
-            let resp = server.handle_request(req).await;
+            let report = payload_or_exit(tool_payload(&server.handle_request(req).await));
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            eprintln!("\n⚡ Total Axiom Client-Server Round-Trip: {:.2} ms", elapsed);
+
+            let status = report["status"].as_str().unwrap_or("?");
+            println!("{status}");
+            println!("  engine     {}", report["engine"].as_str().unwrap_or("?"));
+            println!("  took       {elapsed:.1} ms");
+            println!("  passed     {}", report["passed_checks_count"].as_u64().unwrap_or(0));
+
+            for f in report["failed_checks"].as_array().cloned().unwrap_or_default() {
+                println!();
+                println!("  {}", f["error_type"].as_str().unwrap_or("failure"));
+                if let Some(a) = f["actual"].as_str() {
+                    println!("    actual   {a}");
+                }
+                if let Some(e) = f["expected"].as_str() {
+                    println!("    expected {e}");
+                }
+                if let Some(h) = f["hint"].as_str() {
+                    println!("    hint     {h}");
+                }
+            }
+
+            // Exit non-zero on anything but a pass, so this can gate a script.
+            if status != "PASSED" {
+                std::process::exit(1);
+            }
         }
 
         Commands::Symbol { path } => {
@@ -142,8 +220,24 @@ async fn main() -> Result<()> {
                     }
                 })),
             };
-            let resp = server.handle_request(req).await;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            let node = payload_or_exit(tool_payload(&server.handle_request(req).await));
+
+            println!("{}", node["symbol_path"].as_str().unwrap_or("?"));
+            println!("  kind       {}", node["kind"].as_str().unwrap_or("?"));
+            println!("  hash       {}", node["hash"].as_str().unwrap_or("?"));
+            if let Some(sig) = node["signature"].as_str() {
+                if sig != node["symbol_path"].as_str().unwrap_or("") {
+                    println!("  signature  {sig}");
+                }
+            }
+            let deps = node["dependencies"].as_array().cloned().unwrap_or_default();
+            println!("  depends on {} symbol(s)", deps.len());
+            for d in deps.iter().take(12) {
+                println!("    {}", d.as_str().unwrap_or("?"));
+            }
+            if deps.len() > 12 {
+                println!("    ... and {} more", deps.len() - 12);
+            }
         }
 
         Commands::BlastRadius { symbol, depth } => {
@@ -159,13 +253,33 @@ async fn main() -> Result<()> {
                     }
                 })),
             };
-            let resp = server.handle_request(req).await;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            let radius = payload_or_exit(tool_payload(&server.handle_request(req).await));
+
+            let tests = radius["impacted_tests"].as_array().cloned().unwrap_or_default();
+            let total = radius["total_tests_in_repo"].as_u64().unwrap_or(0);
+            let pruned = radius["pruned_test_percentage"].as_f64().unwrap_or(0.0);
+
+            println!("{}", radius["symbol"].as_str().unwrap_or(&symbol));
+            println!("  {} of {} tests, {:.2}% pruned", tests.len(), total, pruned);
+            if tests.is_empty() {
+                println!();
+                println!("  Nothing depends on this symbol as far as the index can tell.");
+                println!("  That is not the same as nothing being affected: run the suite if the");
+                println!("  change matters.");
+            } else {
+                println!();
+                for t in tests.iter().take(40) {
+                    println!("  {}", t.as_str().unwrap_or("?"));
+                }
+                if tests.len() > 40 {
+                    println!("  ... and {} more", tests.len() - 40);
+                }
+            }
         }
 
         Commands::Bench { iterations } => {
-            println!("🚀 Running Axiom Sub-15ms Sandbox Benchmark ({} iterations)...", iterations);
-            let mut total_duration = 0.0;
+            println!("Measuring axiom_eval_patch over {} iterations...", iterations);
+            let mut timings: Vec<f64> = Vec::with_capacity(iterations as usize);
 
             for i in 0..iterations {
                 let start = Instant::now();
@@ -182,16 +296,36 @@ async fn main() -> Result<()> {
                     })),
                 };
                 let _resp = server.handle_request(req).await;
-                total_duration += start.elapsed().as_secs_f64() * 1000.0;
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
             }
 
-            let avg = total_duration / iterations as f64;
-            println!("✅ Completed {} iterations.", iterations);
-            println!("⚡ Average Task Sandbox Latency: {:.3} ms", avg);
-            println!("🎯 Sub-15ms Target: {}", if avg < 15.0 { "PASSED (EXCEEDED TARGET)" } else { "FAILED" });
+            timings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let n = timings.len().max(1);
+            let avg: f64 = timings.iter().sum::<f64>() / n as f64;
+
+            println!();
+            println!("  iterations {}", n);
+            println!("  min        {:.1} ms", timings.first().copied().unwrap_or(0.0));
+            println!("  median     {:.1} ms", timings[n / 2]);
+            println!("  max        {:.1} ms", timings.last().copied().unwrap_or(0.0));
+            println!("  mean       {:.1} ms", avg);
+            println!();
+            // A real evaluation compiles the snippet, so the compiler dominates.
+            // Reporting against a sub-15ms target invites the reading that
+            // something is broken, when what changed is that the sandbox stopped
+            // pretending: the sub-millisecond figures this once printed were
+            // measuring a function that ran nothing.
+            println!("  A Rust snippet is compiled and run, so rustc dominates this figure.");
+            println!("  Snippets in a language the sandbox cannot compile are refused rather");
+            println!("  than timed, so this measures the Rust path only.");
         }
 
         Commands::Demo => {
+            // The walkthrough talks about auth::service::validate_token, so put
+            // it there deliberately rather than relying on a server that seeds
+            // itself behind every user's back.
+            server.seed_demo_workspace();
+
             println!("================================================================================");
             println!("   ⚡ AXIOM: THE AGENT-NATIVE AUTONOMOUS SOFTWARE ENGINE DEMONSTRATION ⚡");
             println!("================================================================================\n");
@@ -236,8 +370,13 @@ async fn main() -> Result<()> {
             let s3 = Instant::now();
             let _failed_report = server.wasi_engine.execute_eval("auth::service::validate_token", "assert!(validate_token(\"\")); // BUG: empty token").await?;
             let el3 = s3.elapsed().as_secs_f64() * 1000.0;
-            println!("   ↳ Sandbox Caught Bug Instantly: ❌ CTOP_STATUS = FAILED (Sandbox latency: {:.3} ms)", el3);
-            println!("   ↳ Structured Diagnostic Hint: 'Expected token length > 10, got length 0'");
+            println!("   ↳ Sandbox Caught the Bug: ❌ CTOP_STATUS = FAILED (Sandbox latency: {:.3} ms)", el3);
+            let hint = _failed_report
+                .failed_checks
+                .first()
+                .and_then(|c| c.hint.clone())
+                .unwrap_or_else(|| "no hint reported".to_string());
+            println!("   ↳ Structured Diagnostic Hint: '{}'", hint);
 
             // Step 4: Agent self-corrects -> Instant Sandbox passes
             println!("\n🔹 [Step 4/5] Agent automatically self-heals using the diagnostic hint & re-tests...");
@@ -246,8 +385,9 @@ async fn main() -> Result<()> {
             let el4 = s4.elapsed().as_secs_f64() * 1000.0;
             println!("   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: {:.3} ms)", el4);
 
-            // Step 5: Cryptographic SLSA L4+ Provenance Seal
-            println!("\n🔹 [Step 5/5] Generating SLSA L4+ Cryptographic Attestation Proof...");
+            // Step 5: record the provenance of the change
+            println!("
+🔹 [Step 5/5] Recording the provenance of the change...");
             let req5 = JsonRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: Some(serde_json::json!(5)),
@@ -277,7 +417,7 @@ async fn main() -> Result<()> {
             println!(" Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)", );
             println!(" Sandbox Feedback Loop     300,000 ms (5 minutes)        {:.2} ms (Tier-1 WASI / MicroVM)", el4);
             println!(" Self-Correction Total     600,000 ms (10 minutes)       {:.2} ms (End-to-End)", total_loop_ms);
-            println!(" Provenance Security       Unsigned text commit          SLSA L4+ Merkle Proof & Ed25519");
+            println!(" Provenance Security       Unsigned text commit          Prompt, symbol and check recorded together");
             println!(" Speedup Multiplier        1.0x (Baseline)               {:.0}x FASTER", 600000.0 / total_loop_ms.max(0.1));
             println!("================================================================================\n");
             println!("🎯 VERDICT: Autonomous AI Coding Agents iterate at MACHINE SPEED with ZERO merge conflicts.");
@@ -309,10 +449,6 @@ async fn main() -> Result<()> {
 
         Commands::McpConfig => {
             let exe_path = std::env::current_exe()?.to_string_lossy().replace("\\", "/");
-            println!("// =============================================================================");
-            println!("// 🔌 AXIOM NATIVE MCP CONFIGURATION FOR AI AGENTS (Cursor, Claude Code, AGY)");
-            println!("// Add this to your ~/.cursor/mcp.json or Claude Desktop configuration:");
-            println!("// =============================================================================\n");
             let cfg = serde_json::json!({
                 "mcpServers": {
                     "axiom": {
@@ -321,28 +457,197 @@ async fn main() -> Result<()> {
                     }
                 }
             });
+
+            // Guidance goes to stderr so that `axiom mcp-config > mcp.json`
+            // produces a file that parses. It used to print JSON with // comments
+            // above it on the same stream, which is not JSON, so the obvious way
+            // to use this command produced a config no client could read.
+            eprintln!("Add this to your MCP client configuration, for example");
+            eprintln!("~/.cursor/mcp.json or Claude Desktop's config file.");
+            eprintln!("Redirect stdout to write it straight to a file:");
+            eprintln!("  axiom mcp-config > mcp.json");
+            eprintln!();
+
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
 
-        Commands::Verify { symbol, prompt } => {
-            println!("🔍 Verifying cryptographic SLSA L4+ attestation seal for '{}'...", symbol);
-            let attestation = axiom_proto::ProvenanceAttestation::generate(
-                "merkle_root_prev_77a1",
-                "merkle_root_current_88b2",
-                "agent_axiom_v1",
-                &prompt,
-                &symbol,
-                "ctop_task_pass_001",
-            );
+        Commands::Keygen { out } => {
+            let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
+            let out_path = std::path::Path::new(&out);
+            if out_path.exists() {
+                eprintln!("Error: {:?} already exists; refusing to overwrite a signing key", out_path);
+                std::process::exit(2);
+            }
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(out_path, &private_hex)?;
+            let pub_path = out_path.with_extension("pub");
+            std::fs::write(&pub_path, &public_hex)?;
 
-            let is_valid = attestation.verify(&symbol, &prompt);
-            if is_valid {
-                println!("✅ ATTESTATION VALID");
-                println!("   Signature:  {}", attestation.signature);
-                println!("   Prompt Digest: {}", attestation.prompt_digest);
-                println!("   Audit Result: Commit is mathematically proven to have executed inside isolated sandbox.");
+            println!("Private key -> {:?}", out_path);
+            println!("Public key  -> {:?}", pub_path);
+            println!("Fingerprint    {}", axiom_proto::signing::fingerprint(&public_hex));
+            println!();
+            println!("Point axiom at it when issuing records:");
+            println!("  AXIOM_SIGNING_KEY_FILE={}", out.replace('\\', "/"));
+            println!();
+            println!("Keep the private key outside any workspace you index. A signature only");
+            println!("tells a reader who issued a record; if the key sits beside the records it");
+            println!("signs, anyone who can add a record can sign it too.");
+            if cfg!(windows) {
+                println!();
+                println!("Note: file permissions were not restricted. On Windows, set them yourself");
+                println!("if this machine has other users.");
+            }
+        }
+
+        Commands::Verify { symbol, prompt, trusted_key } => {
+            println!("🔍 Verifying attestation for '{}'...", symbol);
+
+            // Look the seal up. Re-deriving one from these same arguments and
+            // then checking it against itself is a tautology: it would report
+            // every symbol and prompt as proven, including ones nobody ever
+            // attested.
+            let ledger = match axiom_core::mcp::load_attestations() {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("❌ could not read {:?}: {}", axiom_core::mcp::attestation_ledger_path(), e);
+                    std::process::exit(2);
+                }
+            };
+
+            if ledger.is_empty() {
+                println!("❌ NO ATTESTATION: nothing has been attested in this workspace.");
+                println!("   Ledger: {:?}", axiom_core::mcp::attestation_ledger_path());
+                std::process::exit(1);
+            }
+
+            // Resolve the anchor before choosing a record, because which
+            // record counts depends on it.
+            let expected = trusted_key.as_ref().map(|k| {
+                std::fs::read_to_string(k)
+                    .map(|c| c.trim().to_string())
+                    .unwrap_or_else(|_| k.trim().to_string())
+            });
+
+            // A record can be genuine and the ledger still be wrong, if one of
+            // its neighbours has been removed. Report that before reporting the
+            // record, because it changes what the record is worth.
+            let chain = axiom_proto::verify_chain(&ledger);
+
+            let matching: Vec<&axiom_proto::ProvenanceAttestation> =
+                ledger.iter().filter(|a| a.verify(&symbol, &prompt)).collect();
+
+            if matching.is_empty() {
+                let for_symbol = ledger.iter().filter(|a| a.symbol_path == symbol).count();
+                if for_symbol == 0 {
+                    println!("❌ NO ATTESTATION: no record has been issued for this symbol.");
+                } else {
+                    println!(
+                        "❌ NO MATCH: {for_symbol} record(s) exist for this symbol, none for this prompt."
+                    );
+                }
+                std::process::exit(1);
+            }
+
+            // With a signer required, only a record signed by that signer counts.
+            // Accepting an unsigned one here would undo the requirement: anybody
+            // can write an unsigned record, so treating "no signature" as good
+            // enough lets a forgery through the very check meant to stop it.
+            let chosen = match &expected {
+                Some(want) => {
+                    let signed_by_expected = matching.iter().find(|a| {
+                        !a.signature.is_empty()
+                            && &a.public_key == want
+                            && axiom_proto::signing::verify(a, &symbol, &prompt).is_ok()
+                    });
+                    match signed_by_expected {
+                        Some(a) => *a,
+                        None => {
+                            let unsigned = matching.iter().filter(|a| a.signature.is_empty()).count();
+                            let other_signers = matching.len() - unsigned;
+                            println!("❌ NOT SIGNED BY THE REQUIRED KEY.");
+                            println!("   required signer   {}", axiom_proto::signing::fingerprint(want));
+                            if unsigned > 0 {
+                                println!("   {unsigned} matching record(s) carry no signature at all.");
+                            }
+                            for a in matching.iter().filter(|a| !a.signature.is_empty()) {
+                                println!("   record signed by  {}", axiom_proto::signing::fingerprint(&a.public_key));
+                            }
+                            if other_signers == 0 && unsigned > 0 {
+                                println!();
+                                println!("   An unsigned record proves nothing about who wrote it, so it cannot");
+                                println!("   satisfy a check that named the signer it expects.");
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => matching[0],
+            };
+
+            let signature_state = if chosen.signature.is_empty() {
+                "unsigned".to_string()
             } else {
-                println!("❌ ATTESTATION INVALID: Signature mismatch or tampering detected.");
+                match axiom_proto::signing::verify(chosen, &symbol, &prompt) {
+                    Ok(()) if expected.is_some() => "signed by the expected key".to_string(),
+                    Ok(()) => "signed, key not anchored".to_string(),
+                    Err(e) => {
+                        println!("❌ SIGNATURE INVALID: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            if chain.is_err() && expected.is_some() {
+                println!("❌ LEDGER ALTERED: {}", chain.unwrap_err());
+                println!("   Refusing to report a record as trusted from a ledger that has had");
+                println!("   records removed. Verify without --trusted-key to inspect it anyway.");
+                std::process::exit(1);
+            }
+
+            println!("✅ ATTESTATION VALID");
+            println!("   Symbol:        {}", chosen.symbol_path);
+            println!("   Checked by:    {} ({})", chosen.verified_by, chosen.verification_detail);
+            println!("   Task:          {}", chosen.ctop_proof_hash);
+            println!("   Issued:        {}", chosen.timestamp);
+            println!("   Seal:          {}", chosen.seal);
+            println!("   Signature:     {}", signature_state);
+            if !chosen.public_key.is_empty() {
+                println!("   Signer:        {}", axiom_proto::signing::fingerprint(&chosen.public_key));
+            }
+            println!("   (BLAKE3 integrity tag over the record, not a signature: it shows the");
+            println!("    record is unaltered, not who issued it.)");
+
+            if chosen.signature.is_empty() {
+                println!();
+                println!("   No signing key was configured when this record was written, so it");
+                println!("   shows only that the record is unaltered, not who issued it. Anyone");
+                println!("   able to write the ledger could have added it. Run `axiom keygen`,");
+                println!("   set AXIOM_SIGNING_KEY_FILE, and verify with --trusted-key.");
+            } else if expected.is_none() {
+                println!();
+                println!("   The signature matches the key inside the record, which shows the two");
+                println!("   agree and nothing more. Pass --trusted-key to require a signer you");
+                println!("   already know.");
+            }
+
+            match &chain {
+                Ok(()) => println!("   Ledger:        chain intact across {} record(s)", ledger.len()),
+                Err(e) => {
+                    println!();
+                    println!("⚠  LEDGER ALTERED: {e}");
+                    println!("   This record verifies on its own, but the ledger it sits in has had");
+                    println!("   a record removed or reordered, so treat what it says about history");
+                    println!("   as incomplete.");
+                }
+            }
+
+            if chosen.verified_by == "reported" {
+                println!();
+                println!("   Axiom did not run this check. The outcome above was reported by");
+                println!("   the agent that asked for the record.");
             }
         }
 
@@ -371,57 +676,183 @@ async fn main() -> Result<()> {
         }
 
         Commands::Dashboard => {
-            println!("================================================================================");
-            println!("               🚀 AXIOM AGENT-NATIVE ENGINE LIVE METRICS TUI 🚀");
-            println!("================================================================================\n");
+            // This used to print a fixed panel under the heading LIVE METRICS:
+            // "100+ Indexed Symbols" whatever the index held, a blast-radius
+            // ratio, an attestation level, and five activity lines with invented
+            // timings for calls nobody had made. Everything below is read from
+            // the workspace.
+            let symbols = server.ast_index.list_symbols();
+            let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for n in &symbols {
+                *by_kind.entry(n.kind.clone()).or_default() += 1;
+            }
 
-            println!("┌───────────────────────────────────────────────┬──────────────────────────────┐");
-            println!("│ 🌐 AXIOM ENGINE STATUS: ONLINE (HOST: TOKIO)  │ ⚡ EXECUTION TIERS: DUAL     │");
-            println!("├───────────────────────────────────────────────┼──────────────────────────────┤");
-            println!("│ Active MCP Transport: stdio (JSON-RPC 2.0)    │ Tier-1 WASI Latency: 0.001ms │");
-            println!("│ Connected AI Swarms:  1 Active Swarm Pool     │ Tier-2 MicroVM Latency: 1.2ms│");
-            println!("│ AST Merkle CAS Size:  100+ Indexed Symbols    │ Blast Radius Ratio:  99.98%  │");
-            println!("│ Tree-CRDT Convergence:100% IDENTICAL STATE    │ Attestation: SLSA Level 4+   │");
-            println!("└───────────────────────────────────────────────┴──────────────────────────────┘");
+            let index_path = std::path::Path::new(".axiom/index.json");
+            let attestations = axiom_core::mcp::load_attestations().unwrap_or_default();
 
-            println!("\n📊 LIVE ACTIVITY MONITOR:");
-            println!(" [OK] 0.03ms - axiom_query_symbol('auth::service::validate_token')");
-            println!(" [OK] 0.01ms - axiom_get_blast_radius('auth::service::validate_token') -> [1 test]");
-            println!(" [OK] 0.00ms - axiom_eval_patch('auth::service::validate_token') -> CTOP_PASSED");
-            println!(" [OK] 0.04ms - axiom_apply_mutation('node_auth_val') -> MERKLE ROOT CONVERGED");
-            println!(" [OK] 0.01ms - axiom_attest_commit() -> ED25519 SEAL GENERATED");
-
-            println!("\n🏆 System ready for autonomous agent connections via `axiom serve`.");
+            println!("AXIOM WORKSPACE");
+            println!("===============");
+            println!();
+            if symbols.is_empty() {
+                println!("  No symbols indexed. Run `axiom scan --path .` first.");
+            } else {
+                println!("  Indexed symbols: {}", symbols.len());
+                for (kind, count) in &by_kind {
+                    println!("    {:<10} {}", kind, count);
+                }
+            }
+            println!();
+            println!("  Index file:      {}", if index_path.exists() {
+                format!("{:?} ({} bytes)", index_path,
+                    std::fs::metadata(index_path).map(|m| m.len()).unwrap_or(0))
+            } else {
+                "not written yet".to_string()
+            });
+            println!("  CRDT nodes:      {}", server.tree_crdt.active_nodes_count());
+            println!("  Merkle root:     {}", server.tree_crdt.compute_tree_merkle_root());
+            println!("  Provenance:      {} record(s)", attestations.len());
+            println!();
+            println!("  This is a snapshot of the workspace as it is now, not a live feed.");
+            println!("  Run `axiom bench` to measure sandbox latency on this machine.");
         }
 
-        Commands::Watch { path } => {
-            println!("👀 Axiom File Watcher active on '{}'...", path);
+        Commands::Watch { path, interval_ms, once } => {
             let p = std::path::Path::new(&path);
+            let index_path = std::path::Path::new(".axiom/index.json");
+
             let summary = server.ast_index.scan_directory(p)?;
-            let saved_path = server.ast_index.save_to_disk(std::path::Path::new(".axiom/index.json"))?;
-            println!("✅ Initial Scan: {} files, {} AST nodes indexed into Merkle CAS (Saved to {:?}).", summary.files_scanned, summary.nodes_indexed, saved_path);
-            println!("📡 Listening for changes... (Press Ctrl+C to stop)");
-            println!("⚡ Incremental updates will hot-patch Merkle DAG in <1ms.");
+            let saved = server.ast_index.save_to_disk(index_path)?;
+            println!("👀 Watching '{}'", path);
+            println!(
+                "   Initial scan: {} files, {} AST nodes -> {:?}",
+                summary.files_scanned, summary.nodes_indexed, saved
+            );
+
+            if once {
+                println!("   --once given, so stopping after the initial scan.");
+                return Ok(());
+            }
+
+            // Poll a fingerprint of the tree rather than parsing it every tick:
+            // one stat per source file, against a full re-parse only when
+            // something has actually changed.
+            let mut fingerprint = server.ast_index.tree_fingerprint(p);
+            println!("   Polling every {}ms. Ctrl+C to stop.", interval_ms);
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+
+                let current = server.ast_index.tree_fingerprint(p);
+                if current == fingerprint {
+                    continue;
+                }
+                fingerprint = current;
+
+                let started = Instant::now();
+                match server.ast_index.scan_directory(p) {
+                    Ok(summary) => match server.ast_index.save_to_disk(index_path) {
+                        Ok(_) => println!(
+                            "   change detected: re-indexed {} files, {} nodes in {:.0}ms",
+                            summary.files_scanned,
+                            summary.nodes_indexed,
+                            started.elapsed().as_secs_f64() * 1000.0
+                        ),
+                        // Keep watching: a failed save is worth reporting, but
+                        // giving up leaves the index frozen with no warning.
+                        Err(e) => eprintln!("   could not save the index: {}", e),
+                    },
+                    Err(e) => eprintln!("   re-scan failed: {}", e),
+                }
+            }
         }
 
         Commands::GitExport => {
-            let root = server.ast_index.compute_merkle_root();
-            println!("================================================================================");
-            println!("                     🔀 AXIOM -> GIT COMMIT BRIDGE");
-            println!("================================================================================");
-            println!(" Merkle Root:          {}", root);
-            println!(" Target Branch:        axiom/automerge-main");
-            println!(" Tree-CRDT Status:     0 Merge Conflicts (Deterministic LWW-Lamport)");
-            println!(" SLSA Level 4+ Seal:   ed25519_verified");
-            println!(" Git Unified Commit:   [axiom: {}] Auto-sealed agent swarm state", &root[..12.min(root.len())]);
-            println!("================================================================================");
+            // This used to print a commit line, a branch name and an
+            // "SLSA Level 4+ Seal: ed25519_verified" while touching nothing. The
+            // name promises an export, so write one: a summary a human or a
+            // commit hook can actually read.
+            let root = server.tree_crdt.compute_tree_merkle_root();
+            let symbols = server.ast_index.list_symbols();
+            let out_dir = std::path::Path::new(".axiom");
+            std::fs::create_dir_all(out_dir)?;
+            let out = out_dir.join("export.md");
+
+            let mut body = String::new();
+            body.push_str("# Axiom export
+
+");
+            body.push_str(&format!("Merkle root: `{}`
+", root));
+            body.push_str(&format!("Active CRDT nodes: {}
+", server.tree_crdt.active_nodes_count()));
+            body.push_str(&format!("Indexed symbols: {}
+
+", symbols.len()));
+            body.push_str("Suggested commit message:
+
+```
+");
+            body.push_str(&format!("axiom: sync index at {}
+
+", &root[..12]));
+            body.push_str(&format!("{} symbols indexed.
+```
+
+", symbols.len()));
+
+            body.push_str("## Symbols by kind
+
+");
+            let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for n in &symbols {
+                *by_kind.entry(n.kind.clone()).or_default() += 1;
+            }
+            for (kind, count) in &by_kind {
+                body.push_str(&format!("- {}: {}
+", kind, count));
+            }
+
+            std::fs::write(&out, body)?;
+
+            println!("Wrote {:?}", out);
+            println!("  Merkle root:     {}", root);
+            println!("  Indexed symbols: {}", symbols.len());
+            for (kind, count) in &by_kind {
+                println!("  {:<10} {}", kind, count);
+            }
+            println!();
+            println!("This is a summary of the index, not a commit. Nothing in git was");
+            println!("changed: review the file and commit it yourself if you want it kept.");
         }
 
-        Commands::Search { query, max } => {
-            let matches = server.ast_index.search_regex(&query, max);
-            println!("🔍 Zoekt Trigram Search for '{}' (Found {} matches):", query, matches.len());
+        Commands::Search { query, mode, max } => {
+            let parsed = match SearchMode::parse(&mode) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            let (applied, matches) = match server.ast_index.search(&query, parsed, max) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            println!(
+                "🔍 Search for '{}' [{}] (Found {} matches):",
+                query,
+                applied.as_str(),
+                matches.len()
+            );
             for m in matches {
-                println!("  {}:{} | {}", m.file_path, m.line_number, m.line_content);
+                match m.line_number {
+                    Some(line) => println!("  {}:{} | {}", m.file_path, line, m.line_content),
+                    // A symbol-name hit has no line; printing one would invite a
+                    // caller to open a file that is not there.
+                    None => println!("  {} (symbol) | {}", m.file_path, m.line_content),
+                }
             }
         }
     }

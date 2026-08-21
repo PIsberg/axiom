@@ -42,11 +42,11 @@ sequenceDiagram
 
     AI->>MCP: axiom_get_blast_radius("auth::service::validate_token")
     MCP->>AST: Compute Reverse Transitive Call Graph
-    AST-->>AI: Impacted Tests: ["test_auth_validation"] (99.98% Pruned)
+    AST-->>AI: Impacted tests, with the pruned percentage
 
     loop Test-Driven Hypothesis Validation
-        AI->>MCP: axiom_eval_patch(snippet="assert!(validate_token(\"...\"));")
-        MCP->>VMM: Instant WASI/MicroVM Sandbox (<0.1ms)
+        AI->>MCP: axiom_eval_patch(snippet) for Rust, else axiom_record_verification
+        MCP->>VMM: Compile and run the snippet (rustc, ~175ms)
         VMM-->>AI: CTOP JSON Report (Status: PASSED / FAILED + Hints)
     end
 
@@ -55,192 +55,231 @@ sequenceDiagram
     AST-->>AI: New Merkle Root
 
     AI->>MCP: axiom_attest_commit(prompt, symbol, ctop_task_id)
-    MCP->>Ledger: Generate SLSA L4+ Cryptographic Seal
-    Ledger-->>AI: Signed Attestation Proof (Ed25519)
+    MCP->>Ledger: Record prompt, symbol and check together
+    Ledger-->>AI: Provenance record, signed if a key is configured
 ```
 
 ---
 
-## 3. MCP Tool Reference & Schemas
+## 3. MCP Tool Reference
+
+Seven tools. Every response below is what the current build returns; the shapes
+were captured from a running server rather than written from memory.
+
+A tool that cannot answer returns an `error` field rather than a plausible
+answer. That distinction is the point of most of what follows.
+
+---
 
 ### 3.1 `axiom_query_symbol`
-Inspect an AST node definition, signature, and dependency list without cloning the repository.
 
-* **Request**:
-  ```json
-  {
-    "name": "axiom_query_symbol",
-    "arguments": {
-      "symbol_path": "auth::service::validate_token"
-    }
-  }
-  ```
+Look up one symbol.
+
+* **Request**: `{"symbol_path": "auth::service::validate_token"}`
 * **Response**:
   ```json
   {
-    "id": "node_667fde43c6ec",
-    "symbol_path": "auth::service::validate_token",
+    "symbol_path": "C:/work/src/lib.rs::validate_token",
     "kind": "function",
-    "hash": "667fde43c6ec9c70fcec87a12c1068a5cc3e949cbb77bec9c82dd67c5a389d12",
-    "signature": "auth::service::validate_token",
-    "dependencies": ["jwt::verifier"]
+    "id": "node_2b4cc05ea97d",
+    "hash": "2b4cc05ea97d276538c9650a9ba3942a743b681c46fe6f6980b072c05b2dd23c",
+    "signature": "C:/work/src/lib.rs::validate_token",
+    "docstring": null,
+    "source_range": [0, 40],
+    "dependencies": []
   }
   ```
+
+A shorter name resolves when it identifies exactly one symbol: `validate_token`
+finds `pkg.Class::validate_token`. A name matching several returns the candidates
+instead of picking one, under `error` and `candidates`.
+
+A missing, blank or non-string `symbol_path` is an error, not a lookup for the
+empty string.
 
 ---
 
 ### 3.2 `axiom_get_blast_radius`
-Calculates the exact subset of unit and integration tests affected by changes to a symbol.
 
-* **Request**:
-  ```json
-  {
-    "name": "axiom_get_blast_radius",
-    "arguments": {
-      "symbol_path": "auth::service::validate_token",
-      "max_depth": 5
-    }
-  }
-  ```
+The tests that reach a symbol.
+
+* **Request**: `{"symbol_path": "auth::service::validate_token", "max_depth": 1}`
 * **Response**:
   ```json
   {
-    "symbol": "auth::service::validate_token",
-    "impacted_tests": ["test_auth_validation"],
-    "pruned_test_percentage": 99.98
+    "symbol": "C:/work/src/lib.rs::validate_token",
+    "direct_tests": ["C:/work/src/tests.rs::test_auth_validation"],
+    "impacted_tests": ["C:/work/src/tests.rs::test_auth_validation"],
+    "tests_by_depth": { "1": ["C:/work/src/tests.rs::test_auth_validation"] },
+    "total_tests_in_repo": 2219,
+    "pruned_test_percentage": 98.56
   }
   ```
-* **Agent Directive**: Execute *only* the tests in `impacted_tests`. Do not run the full test suite.
+
+`max_depth` defaults to 1, which is direct dependents. Raising it was measured
+and is usually not worth it: at depth 2 one symbol went from 57 impacted tests to
+146 with no recall gain, and the overlap between the blast radii of unrelated
+symbols rose from 0.00 to 0.19.
+
+**Agent directive**: run the tests in `impacted_tests` rather than the whole
+suite. Two limits worth holding on to. An empty list means the index found no
+dependents, which is not the same as nothing being affected. And a test that
+reaches the symbol only through another class is not found at depth 1: what is
+found is direct references, and calls through an accessor returning the type.
 
 ---
 
 ### 3.3 `axiom_eval_patch`
-Executes code changes inside an isolated memory sandbox in microsecond latency and returns structured CTOP diagnostics.
 
-* **Request**:
+Compile and run a snippet.
+
+* **Request**: `{"symbol_path": "auth::service::validate_token", "code_snippet": "assert!(validate_token(\"\"));"}`
+* **Response (failure)**:
   ```json
   {
-    "name": "axiom_eval_patch",
-    "arguments": {
-      "symbol_path": "auth::service::validate_token",
-      "code_snippet": "assert!(validate_token(\"secret_token_123\"));"
-    }
-  }
-  ```
-* **Response (Success)**:
-  ```json
-  {
-    "task_id": "task_auth_val_01",
-    "engine": "tier1_wasi_wasmtime",
-    "status": "PASSED",
-    "execution_duration_ms": 0.001,
-    "failed_checks": [],
-    "passed_checks_count": 1,
-    "stdout": "Evaluated snippet: assert!(validate_token(\"secret_token_123\"));"
-  }
-  ```
-* **Response (Failure - Agent Self-Correction Signal)**:
-  ```json
-  {
-    "task_id": "task_auth_val_02",
-    "engine": "tier1_wasi_wasmtime",
+    "task_id": "eval_1f4",
+    "engine": "tier1_wasi_cranelift",
     "status": "FAILED",
-    "execution_duration_ms": 0.002,
-    "failed_checks": [
-      {
-        "symbol": "auth::service::validate_token",
-        "error_type": "AssertionError",
-        "expected": "token.len() > 10",
-        "actual": "token.len() == 0",
-        "hint": "Expected token length > 10, got length 0"
-      }
-    ]
+    "execution_duration_ms": 322.43,
+    "passed_checks_count": 0,
+    "failed_checks": [{
+      "symbol": "validate_token",
+      "error_type": "Panic/AssertionFailure",
+      "expected": "Invariant expression == true",
+      "actual": "thread main panicked at eval_main.rs:8:5: assertion failed",
+      "hint": "Assertion expression evaluated to false during sandbox execution"
+    }]
   }
   ```
-* **Agent Directive**: If `status == "FAILED"`, inspect `failed_checks[].hint` and modify your code logic before requesting commit.
+
+The snippet is written out and compiled with `rustc`, so expect a few hundred
+milliseconds rather than microseconds, and real compiler errors for code that
+does not compile.
+
+**This is a Rust sandbox.** A symbol from a Java, Kotlin, Python, TypeScript or
+Go file returns `EVALUATOR_UNAVAILABLE` with `UnsupportedLanguage` rather than
+being handed to `rustc`. For those, run the project's own tests and report the
+outcome with `axiom_record_verification`.
+
+If `rustc` is missing or the temp directory is not writable, the result is
+`EVALUATOR_UNAVAILABLE` with `passed_checks_count` of 0. It is never `PASSED`:
+nothing ran, so nothing passed.
+
+**Agent directive**: on `FAILED`, read the hint and actual output before changing
+the code. Keep the `task_id`, because a provenance record must name it.
 
 ---
 
-### 3.4 `axiom_apply_mutation`
-Applies commutative Tree-CRDT AST modifications to the shared repository graph without merge conflicts.
+### 3.4 `axiom_record_verification`
 
-* **Request**:
+Report a check axiom did not run, so a provenance record can rest on it.
+
+* **Request**: `{"task_id": "mvn_run_01", "passed": true, "command": "mvn test -Dtest=ConcurrencyRunnerTest"}`
+* **Response**:
   ```json
   {
-    "name": "axiom_apply_mutation",
-    "arguments": {
-      "node_id": "node_auth_val",
-      "symbol_path": "auth::service::validate_token",
-      "content": "pub fn validate_token(t: &str) -> bool { t.len() > 10 }"
-    }
+    "task_id": "mvn_run_01",
+    "passed": true,
+    "recorded_as": "reported",
+    "note": "Axiom did not run this. The provenance record will say the outcome was reported by the agent, not observed by axiom."
   }
   ```
+
+This exists because the sandbox only compiles Rust. An agent that ran a project's
+own suite has checked something real and can say so; what it cannot do is have
+that recorded as axiom's own observation.
+
+---
+
+### 3.5 `axiom_apply_mutation`
+
+Apply a Tree-CRDT mutation and persist the symbol.
+
+* **Request**: `{"node_id": "node_auth_val", "symbol_path": "auth::service::validate_token", "content": "pub fn validate_token(t: &str) -> bool { t.len() > 10 }"}`
 * **Response**:
   ```json
   {
     "status": "APPLIED",
     "new_merkle_root": "1a9dab4c9c1e3f13a9a206501457b6511de0f552df57039e9952559e81590366",
-    "active_ast_nodes": 102
+    "active_ast_nodes": 102,
+    "crdt_op": { "Insert": { "node_id": "node_auth_val", "timestamp": { "agent_id": 31728, "time": 2 } } }
   }
   ```
+
+Only the mutated symbol is written, under a lock, so an agent sharing the
+workspace does not lose its work to this one.
 
 ---
 
-### 3.5 `axiom_attest_commit`
-Generates a cryptographically sealed SLSA Level 4+ attestation proof binding prompt intent, AST delta, and sandbox verification results.
+### 3.6 `axiom_attest_commit`
 
-* **Request**:
-  ```json
-  {
-    "name": "axiom_attest_commit",
-    "arguments": {
-      "prompt": "Fix token validation minimum length invariant",
-      "symbol_path": "auth::service::validate_token",
-      "ctop_task_id": "task_auth_val_01"
-    }
-  }
-  ```
+Record the provenance of a change.
+
+* **Request**: `{"prompt": "Fix the token length invariant", "symbol_path": "auth::service::validate_token", "ctop_task_id": "eval_1f4"}`
 * **Response**:
   ```json
   {
+    "symbol_path": "auth::service::validate_token",
+    "verified_by": "sandbox",
+    "verification_detail": "axiom sandbox, engine tier1_wasi_cranelift",
+    "ctop_proof_hash": "eval_1f4",
     "parent_merkle_root": "merkle_root_prev_77a1",
     "commit_merkle_root": "merkle_root_1a9dab4c",
+    "previous_seal": "blake3_seal_0147bb",
+    "seal": "blake3_seal_26ba03bb89e57ade9e0ca6214daeb22f",
+    "signature": "ddcc139ce344",
+    "public_key": "2c37bfc05ad1",
     "agent_identity": "agent_axiom_v1",
-    "prompt_digest": "blake3:933176e307f6ccab",
-    "sandbox_trace_hash": "trace:d06ad0bb6e8b09eb",
-    "ctop_proof_hash": "task_auth_val_01",
-    "timestamp": "2026-08-20T22:28:44Z",
-    "signature": "ed25519_seal_d06ad0bb6e8b09eb1f644ce0626fdc6e"
+    "timestamp": "2026-08-21T01:24:03Z"
   }
   ```
 
-### 3.6 `axiom_search_regex`
-Fast Zoekt-style in-memory trigram regex and literal search across all files and symbols in the CAS.
+`ctop_task_id` must name a check this server performed or was told about. A task
+it has no record of, or one that failed, is refused with an `error` explaining
+which of the two paths to take.
 
-* **Request**:
-  ```json
-  {
-    "name": "axiom_search_regex",
-    "arguments": {
-      "query": "validate_token",
-      "max_results": 10
-    }
-  }
-  ```
+`seal` is a BLAKE3 digest over the record, so it shows the record is unaltered
+and nothing about who wrote it. `signature` and `public_key` are present when a
+signing key was configured through `AXIOM_SIGNING_KEY_FILE`. `previous_seal`
+chains the record to the one before it, so removing a record from the ledger is
+visible.
+
+`verified_by` is `sandbox` when axiom compiled and ran the code, and `reported`
+when an agent ran something else and said so. Do not present the second as the
+first: axiom vouches for what it ran and is repeating what it was told.
+
+---
+
+### 3.7 `axiom_search_regex`
+
+Search source text, falling back to symbol names.
+
+* **Request**: `{"query": "new CyclicBarrier", "mode": "literal", "max_results": 20}`
 * **Response**:
   ```json
   {
-    "query": "validate_token",
-    "matches_count": 3,
-    "matches": [
-      {
-        "file_path": "auth::service::validate_token",
-        "line_number": 1,
-        "line_content": "auth::service::validate_token"
-      }
-    ]
+    "query": "new CyclicBarrier",
+    "mode_requested": "literal",
+    "mode_applied": "literal",
+    "matches_count": 20,
+    "matches": [{
+      "match_kind": "text",
+      "file_path": "C:/work/src/test/java/DetectorRegistrationRaceTest.java",
+      "line_number": 163,
+      "line_content": "CyclicBarrier barrier = new CyclicBarrier(2);"
+    }]
   }
   ```
+
+`mode` is `literal` by default, so `.` and `(` match themselves. `regex` compiles
+the query as a pattern; `auto` uses regex only for a query containing something
+meaningless as literal text. The mode actually applied comes back, so a caller
+can check what it got. An invalid pattern is refused rather than retried as a
+literal.
+
+`match_kind` is `text` for a hit on a line of source and `symbol` for a hit on a
+symbol name. A symbol hit has no line, so `line_number` is `null` rather than a
+fabricated 1.
 
 ---
 
@@ -249,16 +288,17 @@ Fast Zoekt-style in-memory trigram regex and literal search across all files and
 | Command | Purpose |
 |---|---|
 | `axiom serve` | Starts the native MCP server over `stdio` (JSON-RPC 2.0) |
-| `axiom eval --symbol <SYM> -c <CODE>` | Runs an instant isolated sandbox evaluation |
+| `axiom eval --symbol <SYM> -c <CODE>` | Compiles and runs a Rust snippet, exiting non-zero if it fails |
 | `axiom symbol --path <SYM>` | Queries AST node metadata and type signatures |
 | `axiom blast-radius --symbol <SYM>` | Calculates impacted tests and pruned percentage |
-| `axiom bench --iterations <N>` | Executes performance latency benchmarks |
+| `axiom bench --iterations <N>` | Measures how long axiom_eval_patch takes on this machine, reporting min, median, max and mean |
 | `axiom demo` | Runs live end-to-end agent workflow demonstration |
 | `axiom swarm --agents <N> --ops <M>` | Runs multi-agent Tree-CRDT swarm simulation |
-| `axiom verify --symbol <SYM> --prompt <P>` | Cryptographically audits SLSA L4+ commit seal |
+| `axiom verify --symbol <SYM> --prompt <P> [--trusted-key K]` | Looks the provenance record up, checks the chain, and checks the signature against a signer you name |
+| `axiom keygen --out <PATH>` | Generates an Ed25519 keypair for signing provenance records. Keep the private key outside any workspace you index |
 | `axiom mcp-config` | Outputs ready-to-copy JSON configuration for AI IDEs |
 | `axiom scan --path <DIR>` | Scans and indexes a real codebase into the Merkle AST CAS |
 | `axiom search --query <STR>` | Ultra-fast Zoekt trigram regex and text search across repo |
-| `axiom watch --path <DIR>` | Watches filesystem for live incremental AST Merkle updates |
-| `axiom git-export` | Exports current Merkle state to a Git-compatible commit |
+| `axiom watch --path <DIR> [--interval-ms N] [--once]` | Re-indexes the tree when it changes, polling a cheap fingerprint between scans |
+| `axiom git-export` | Writes .axiom/export.md summarising the index. It does not touch git |
 | `axiom dashboard` | Displays live real-time terminal metrics & swarm activity |
