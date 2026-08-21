@@ -14,7 +14,11 @@ fn extract_tool_result(resp: &JsonRpcResponse) -> Value {
 
 #[tokio::test]
 async fn test_mcp_initialize() {
-    let server = AxiomMcpServer::new().expect("Failed to create MCP server");
+    // Explicitly no ambient index: new() searches upwards from the working
+    // directory, so a test using it asserts something about the machine it runs
+    // on. This one passed locally only because a scan had left an index above
+    // the repository, and failed on a clean checkout in CI.
+    let server = AxiomMcpServer::with_index(None).expect("Failed to create MCP server");
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id: Some(json!(1)),
@@ -29,7 +33,11 @@ async fn test_mcp_initialize() {
 
 #[tokio::test]
 async fn test_mcp_tools_list() {
-    let server = AxiomMcpServer::new().expect("Failed to create MCP server");
+    // Explicitly no ambient index: new() searches upwards from the working
+    // directory, so a test using it asserts something about the machine it runs
+    // on. This one passed locally only because a scan had left an index above
+    // the repository, and failed on a clean checkout in CI.
+    let server = AxiomMcpServer::with_index(None).expect("Failed to create MCP server");
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id: Some(json!(2)),
@@ -48,7 +56,12 @@ async fn test_mcp_tools_list() {
 
 #[tokio::test]
 async fn test_mcp_blast_radius_valid_and_invalid() {
-    let server = AxiomMcpServer::new().expect("Failed to create MCP server");
+    // Explicitly no ambient index: new() searches upwards from the working
+    // directory, so a test using it asserts something about the machine it runs
+    // on. This one passed locally only because a scan had left an index above
+    // the repository, and failed on a clean checkout in CI.
+    let server = AxiomMcpServer::with_index(None).expect("Failed to create MCP server");
+    server.seed_demo_workspace();
 
     // 1. Valid symbol
     let req_valid = JsonRpcRequest {
@@ -93,7 +106,11 @@ async fn test_mcp_blast_radius_valid_and_invalid() {
 
 #[tokio::test]
 async fn test_mcp_eval_syntax_error_and_assertion_failure() {
-    let server = AxiomMcpServer::new().expect("Failed to create MCP server");
+    // Explicitly no ambient index: new() searches upwards from the working
+    // directory, so a test using it asserts something about the machine it runs
+    // on. This one passed locally only because a scan had left an index above
+    // the repository, and failed on a clean checkout in CI.
+    let server = AxiomMcpServer::with_index(None).expect("Failed to create MCP server");
 
     // 1. Invalid syntax with @@@ must return CompilationError
     let req_syntax_err = JsonRpcRequest {
@@ -156,7 +173,11 @@ async fn test_mcp_eval_syntax_error_and_assertion_failure() {
 
 #[tokio::test]
 async fn test_mcp_java_symbol_indexing() {
-    let server = AxiomMcpServer::new().expect("Failed to create MCP server");
+    // Explicitly no ambient index: new() searches upwards from the working
+    // directory, so a test using it asserts something about the machine it runs
+    // on. This one passed locally only because a scan had left an index above
+    // the repository, and failed on a clean checkout in CI.
+    let server = AxiomMcpServer::with_index(None).expect("Failed to create MCP server");
 
     // Simulate indexing a Java source file
     let java_code = r#"
