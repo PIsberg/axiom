@@ -122,10 +122,16 @@ and is usually not worth it: at depth 2 one symbol went from 57 impacted tests t
 symbols rose from 0.00 to 0.19.
 
 **Agent directive**: run the tests in `impacted_tests` rather than the whole
-suite. Two limits worth holding on to. An empty list means the index found no
-dependents, which is not the same as nothing being affected. And a test that
-reaches the symbol only through another class is not found at depth 1: what is
-found is direct references, and calls through an accessor returning the type.
+suite. That is direct references plus calls through an accessor returning the
+type.
+
+`tests_by_depth` goes further than `impacted_tests` does. Depth 2 and beyond are
+tests that reach the symbol through another class; they are surveyed but left out
+of the answer, because including them costs more precision than it gains. Read
+them when a change looks risky and widen `max_depth` to move them in.
+
+An empty `impacted_tests` means the index found no dependents. That is not the
+same as nothing being affected: if the change matters, run the suite.
 
 ---
 

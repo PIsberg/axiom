@@ -2245,3 +2245,67 @@ async fn test_e2e_unrecoverable_write_errors_are_not_waited_out() -> Result<()> 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// A test that reaches a symbol through another class must at least be visible,
+/// even though widening the reported set to include it is the wrong trade.
+///
+/// Measured on a 2,219-test suite, going from depth 1 to depth 2 took one symbol
+/// from 57 impacted tests to 146 with no recall gain, and lifted the overlap
+/// between the blast radii of unrelated symbols from 0.00 to 0.19. So the
+/// reported set stays at depth 1. What was missing is any way for a caller to
+/// know what widening would add: `AsyncTestInvocationInterceptorTest` exists to
+/// pin that the interceptor delegates to ConcurrencyRunner, and nothing in the
+/// answer mentioned it. The deeper layers are surveyed and returned separately.
+#[tokio::test]
+async fn test_e2e_deeper_dependents_are_surveyed_without_widening_the_answer() -> Result<()> {
+    let idx = axiom_ast::AstIndex::new();
+
+    // target <- middle <- a test two hops away, plus one directly on target.
+    idx.index_node("pkg.Target", "class", "class Target {}", vec![]);
+    idx.index_node("pkg.Middle", "class", "class Middle {}", vec!["pkg.Target".into()]);
+    idx.index_node("pkg.DirectTest", "test", "class DirectTest {}", vec!["pkg.Target".into()]);
+    idx.index_node("pkg.IndirectTest", "test", "class IndirectTest {}", vec!["pkg.Middle".into()]);
+
+    let radius = idx
+        .compute_blast_radius("pkg.Target", 1)
+        .expect("the symbol must resolve");
+
+    // The answer keeps its precision: only the direct dependent.
+    assert_eq!(
+        radius.impacted_tests,
+        vec!["pkg.DirectTest".to_string()],
+        "widening the reported set is the trade this deliberately does not make"
+    );
+
+    // But the two-hop test is visible, so a caller can decide to widen.
+    let depth_two = radius.tests_by_depth.get(&2).cloned().unwrap_or_default();
+    assert!(
+        depth_two.contains(&"pkg.IndirectTest".to_string()),
+        "a test reaching the symbol through another class must be surveyed; got {:?}",
+        radius.tests_by_depth
+    );
+
+    // A test appears once, at the shallowest depth that reaches it.
+    let depth_one = radius.tests_by_depth.get(&1).cloned().unwrap_or_default();
+    assert!(!depth_one.contains(&"pkg.IndirectTest".to_string()));
+    assert!(!depth_two.contains(&"pkg.DirectTest".to_string()));
+
+    // Asking for depth 2 explicitly moves it into the answer.
+    let wider = idx
+        .compute_blast_radius("pkg.Target", 2)
+        .expect("the symbol must resolve");
+    assert!(
+        wider.impacted_tests.contains(&"pkg.IndirectTest".to_string()),
+        "asking for more must deliver more, got {:?}",
+        wider.impacted_tests
+    );
+
+    // The pruning figure describes what was reported, not what was surveyed.
+    assert_eq!(radius.total_tests_in_repo, 2);
+    assert!(
+        radius.pruned_test_percentage > 0.0,
+        "one of two tests reported means something was pruned"
+    );
+
+    Ok(())
+}

@@ -344,7 +344,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_get_blast_radius",
-                            "description": "The tests that reach a symbol, so a change can be checked without running everything. An empty result means none were found in the index, which is not the same as nothing being affected.",
+                            "description": "The tests that reach a symbol, so a change can be checked without running everything. impacted_tests holds what to run: direct dependents, and tests reaching the symbol through an accessor. tests_by_depth also lists tests that reach it through another class, at depth 2 and beyond, which are not in impacted_tests because including them costs more precision than it gains; widen max_depth to move them into the answer. An empty result means none were found in the index, which is not the same as nothing being affected.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
