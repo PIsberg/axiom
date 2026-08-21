@@ -449,10 +449,6 @@ async fn main() -> Result<()> {
 
         Commands::McpConfig => {
             let exe_path = std::env::current_exe()?.to_string_lossy().replace("\\", "/");
-            println!("// =============================================================================");
-            println!("// 🔌 AXIOM NATIVE MCP CONFIGURATION FOR AI AGENTS (Cursor, Claude Code, AGY)");
-            println!("// Add this to your ~/.cursor/mcp.json or Claude Desktop configuration:");
-            println!("// =============================================================================\n");
             let cfg = serde_json::json!({
                 "mcpServers": {
                     "axiom": {
@@ -461,6 +457,17 @@ async fn main() -> Result<()> {
                     }
                 }
             });
+
+            // Guidance goes to stderr so that `axiom mcp-config > mcp.json`
+            // produces a file that parses. It used to print JSON with // comments
+            // above it on the same stream, which is not JSON, so the obvious way
+            // to use this command produced a config no client could read.
+            eprintln!("Add this to your MCP client configuration, for example");
+            eprintln!("~/.cursor/mcp.json or Claude Desktop's config file.");
+            eprintln!("Redirect stdout to write it straight to a file:");
+            eprintln!("  axiom mcp-config > mcp.json");
+            eprintln!();
+
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
 
