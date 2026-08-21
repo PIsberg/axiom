@@ -1959,3 +1959,44 @@ async fn test_e2e_removing_a_record_breaks_the_chain() -> Result<()> {
 
     Ok(())
 }
+
+/// Seeding the demo workspace has to work in a workspace that already has an
+/// index, because that is where it is asked for.
+///
+/// The guard belonged to the version that ran automatically inside `new`. Kept
+/// after seeding became an explicit call, it made that call quietly do nothing
+/// wherever an index existed, so `axiom demo` queried a symbol it had not
+/// inserted and reported zero tests out of zero.
+#[tokio::test]
+async fn test_e2e_demo_seeding_works_in_a_populated_workspace() -> Result<()> {
+    let server = AxiomMcpServer::with_index(None)?;
+
+    // Something is already here, as in any real workspace.
+    server.ast_index.index_node("pkg.Existing::method", "method", "fn method() {}", vec![]);
+    assert!(server.ast_index.total_symbols_count() > 0);
+
+    server.seed_demo_workspace();
+
+    assert!(
+        server.ast_index.get_symbol("auth::service::validate_token").is_some(),
+        "seeding must insert the demo symbol even when the index is not empty"
+    );
+    assert!(
+        server.ast_index.get_symbol("pkg.Existing::method").is_some(),
+        "and must not remove what was already there"
+    );
+
+    // The blast radius the walkthrough prints has to be computable, or the demo
+    // reports numbers about a symbol it never inserted.
+    let radius = server
+        .ast_index
+        .compute_blast_radius("auth::service::validate_token", 5)
+        .expect("the seeded symbol must be resolvable");
+    assert!(
+        radius.impacted_tests.iter().any(|t| t.contains("test_auth_validation")),
+        "the seeded test must be reachable from the seeded symbol, got {:?}",
+        radius.impacted_tests
+    );
+
+    Ok(())
+}

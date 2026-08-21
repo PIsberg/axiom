@@ -360,10 +360,30 @@ async fn main() -> Result<()> {
                 })),
             };
             let s2 = Instant::now();
-            let _resp2 = server.handle_request(req2).await;
+            let resp2 = server.handle_request(req2).await;
             let el2 = s2.elapsed().as_secs_f64() * 1000.0;
-            println!("   ↳ Total repo tests: 5,000 | Targeted tests: 1 ('test_auth_validation')");
-            println!("   ↳ Pruned scope: 99.98% of test suite bypassed in {:.3} ms", el2);
+
+            // Print what this workspace actually contains. The demo used to
+            // announce 5,000 tests and 99.98% pruned while running against two
+            // seeded symbols and one test.
+            let radius = tool_payload(&resp2);
+            if let Some(err) = radius.get("error").and_then(|e| e.as_str()) {
+                // Reporting zeros here would read as "nothing is affected" when
+                // the truth is that the query failed.
+                eprintln!("   demo could not compute a blast radius: {err}");
+                std::process::exit(1);
+            }
+            let targeted = radius["impacted_tests"].as_array().map(|a| a.len()).unwrap_or(0);
+            let total = radius["total_tests_in_repo"].as_u64().unwrap_or(0);
+            let pruned = radius["pruned_test_percentage"].as_f64().unwrap_or(0.0);
+            println!(
+                "   ↳ Tests in this workspace: {} | Targeted: {}",
+                total, targeted
+            );
+            println!(
+                "   ↳ Pruned {:.2}% of them, computed in {:.3} ms",
+                pruned, el2
+            );
 
             // Step 3: Agent proposes buggy patch -> Instant Sandbox catches bug
             println!("\n🔹 [Step 3/5] Simulating Agent testing a BUGGY hypothesis (empty token) in sandbox...");

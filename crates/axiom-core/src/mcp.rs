@@ -207,8 +207,13 @@ impl AxiomMcpServer {
     /// symbol is in no real codebase, and an agent following the usage guide,
     /// which uses exactly that name, had no way to tell it was talking to a
     /// fixture. Seeding is now something `axiom demo` asks for.
+    /// The empty-index guard this used to carry belonged to the version that ran
+    /// automatically. A caller that asks for the demo data means it whatever the
+    /// workspace already holds, and keeping the guard made the call quietly do
+    /// nothing wherever an index existed, so `axiom demo` then queried a symbol
+    /// it had not inserted and reported zeros.
     pub fn seed_demo_workspace(&self) {
-        if self.ast_index.total_symbols_count() == 0 {
+        {
             self.ast_index.index_node(
                 "auth::service::validate_token",
                 "function",
