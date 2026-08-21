@@ -112,6 +112,14 @@ pub struct AstIndex {
     file_call_names: RwLock<HashMap<String, Vec<String>>>,
     /// File path to indexed symbols mapping
     file_to_symbols: RwLock<HashMap<String, Vec<String>>>,
+    /// Symbols and files this process has deliberately forgotten since it loaded.
+    ///
+    /// Saving has to merge rather than overwrite, or a scan running beside
+    /// another agent writes back its own view and drops that agent's work. But a
+    /// plain union would also resurrect everything a re-scan just purged, so the
+    /// removals are recorded and subtracted from the merge.
+    forgotten_symbols: RwLock<HashSet<String>>,
+    forgotten_files: RwLock<HashSet<String>>,
 }
 
 impl AstIndex {
@@ -124,6 +132,8 @@ impl AstIndex {
             method_return_types: RwLock::new(HashMap::new()),
             file_call_names: RwLock::new(HashMap::new()),
             file_to_symbols: RwLock::new(HashMap::new()),
+            forgotten_symbols: RwLock::new(HashSet::new()),
+            forgotten_files: RwLock::new(HashSet::new()),
         }
     }
 
@@ -528,11 +538,14 @@ impl AstIndex {
     fn forget_file(&self, file_path: &str) {
         let previous = self.file_to_symbols.write().unwrap().remove(file_path);
         self.file_call_names.write().unwrap().remove(file_path);
+        self.forgotten_files.write().unwrap().insert(file_path.to_string());
 
         if let Some(symbols) = previous {
             let mut nodes = self.nodes.write().unwrap();
+            let mut forgotten = self.forgotten_symbols.write().unwrap();
             for symbol in symbols {
                 nodes.remove(&symbol);
+                forgotten.insert(symbol);
             }
         }
     }
@@ -1278,18 +1291,49 @@ fn strip_comments_and_strings(content: &str) -> String {
             std::fs::create_dir_all(parent)?;
         }
 
-        let payload = PersistedIndex {
+        let _lock = IndexLock::acquire(&abs_path)?;
+
+        // Merge over whatever is on disk now rather than replacing it. Another
+        // agent may have recorded a symbol since this process loaded, and
+        // writing this view whole would take that symbol with it. Removals this
+        // process made are subtracted explicitly, so a re-scan still drops what
+        // it purged instead of a union resurrecting it.
+        let mut payload = Self::load_payload(&abs_path).unwrap_or(PersistedIndex {
             format_version: INDEX_FORMAT_VERSION,
-            nodes: self.nodes.read().unwrap().clone(),
-            method_return_types: self.method_return_types.read().unwrap().clone(),
-            file_call_names: self.file_call_names.read().unwrap().clone(),
-            file_to_symbols: self.file_to_symbols.read().unwrap().clone(),
-        };
+            nodes: HashMap::new(),
+            method_return_types: HashMap::new(),
+            file_call_names: HashMap::new(),
+            file_to_symbols: HashMap::new(),
+        });
+
+        for symbol in self.forgotten_symbols.read().unwrap().iter() {
+            payload.nodes.remove(symbol);
+        }
+        for file in self.forgotten_files.read().unwrap().iter() {
+            payload.file_call_names.remove(file);
+            payload.file_to_symbols.remove(file);
+        }
+
+        payload.format_version = INDEX_FORMAT_VERSION;
+        payload.nodes.extend(self.nodes.read().unwrap().clone());
+        payload
+            .method_return_types
+            .extend(self.method_return_types.read().unwrap().clone());
+        payload
+            .file_call_names
+            .extend(self.file_call_names.read().unwrap().clone());
+        payload
+            .file_to_symbols
+            .extend(self.file_to_symbols.read().unwrap().clone());
+
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        
-        let _lock = IndexLock::acquire(&abs_path)?;
+
         write_atomically(&abs_path, json.as_bytes())?;
+
+        // Recorded so the next save does not have to re-apply them.
+        self.forgotten_symbols.write().unwrap().clear();
+        self.forgotten_files.write().unwrap().clear();
         
         // Verify write succeeded
         if !abs_path.exists() {
@@ -1338,6 +1382,8 @@ fn strip_comments_and_strings(content: &str) -> String {
             method_return_types: RwLock::new(payload.method_return_types),
             file_call_names: RwLock::new(payload.file_call_names),
             file_to_symbols: RwLock::new(payload.file_to_symbols),
+            forgotten_symbols: RwLock::new(HashSet::new()),
+            forgotten_files: RwLock::new(HashSet::new()),
         })
     }
 }

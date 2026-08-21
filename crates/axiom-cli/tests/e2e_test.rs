@@ -1340,3 +1340,62 @@ async fn test_e2e_index_lock_is_exclusive_then_released() -> Result<()> {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// Saving after a scan must merge over what is on disk, not replace it.
+///
+/// Locking the write is not enough on its own: a scanning process still holds
+/// the view it loaded, so writing that view whole drops any symbol another agent
+/// recorded in the meantime. Against two processes, a scan racing a mutation
+/// lost the mutation in two runs out of five. A plain union would fix that and
+/// break re-scan purging, resurrecting every symbol a deleted file used to own,
+/// so removals are tracked and subtracted.
+#[tokio::test]
+async fn test_e2e_scan_merges_over_concurrent_work_but_still_purges() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_scan_merge_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let src = temp_dir.join("src");
+    std::fs::create_dir_all(&src)?;
+    std::fs::write(src.join("Alpha.java"), "package p;\npublic class Alpha {\n    public void am() {}\n}\n")?;
+    std::fs::write(src.join("Beta.java"), "package p;\npublic class Beta {\n    public void bm() {}\n}\n")?;
+
+    let shared_index = temp_dir.join(".axiom").join("index.json");
+
+    // Agent one indexes the tree and saves.
+    let scanner = axiom_ast::AstIndex::new();
+    scanner.scan_directory(&temp_dir)?;
+    scanner.save_to_disk(&shared_index)?;
+
+    // Agent two records a symbol of its own, which agent one has never seen.
+    let mutator = axiom_ast::AstIndex::new();
+    mutator.index_node("agentB::mutation", "function", "fn from_b() {}", vec![]);
+    mutator.persist_symbol(&shared_index, "agentB::mutation")?;
+
+    // Agent one re-scans, having deleted a file, and saves again from its own
+    // view, which still does not contain agent two's symbol.
+    std::fs::remove_file(src.join("Beta.java"))?;
+    scanner.scan_directory(&temp_dir)?;
+    scanner.save_to_disk(&shared_index)?;
+
+    let reloaded = axiom_ast::AstIndex::load_from_disk(&shared_index)?;
+    assert!(
+        reloaded.get_symbol("agentB::mutation").is_some(),
+        "a concurrent agent's symbol must survive another agent's scan"
+    );
+    assert!(
+        reloaded.get_symbol("p.Alpha").is_some(),
+        "the scanned tree must still be indexed"
+    );
+    assert!(
+        reloaded.get_symbol("p.Beta").is_none(),
+        "merging must not resurrect a class whose file was deleted"
+    );
+    assert!(
+        reloaded.get_symbol("p.Beta::bm").is_none(),
+        "nor its methods"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
