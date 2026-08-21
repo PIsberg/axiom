@@ -485,16 +485,62 @@ async fn main() -> Result<()> {
         }
 
         Commands::GitExport => {
-            let root = server.ast_index.compute_merkle_root();
-            println!("================================================================================");
-            println!("                     🔀 AXIOM -> GIT COMMIT BRIDGE");
-            println!("================================================================================");
-            println!(" Merkle Root:          {}", root);
-            println!(" Target Branch:        axiom/automerge-main");
-            println!(" Tree-CRDT Status:     0 Merge Conflicts (Deterministic LWW-Lamport)");
-            println!(" SLSA Level 4+ Seal:   ed25519_verified");
-            println!(" Git Unified Commit:   [axiom: {}] Auto-sealed agent swarm state", &root[..12.min(root.len())]);
-            println!("================================================================================");
+            // This used to print a commit line, a branch name and an
+            // "SLSA Level 4+ Seal: ed25519_verified" while touching nothing. The
+            // name promises an export, so write one: a summary a human or a
+            // commit hook can actually read.
+            let root = server.tree_crdt.compute_tree_merkle_root();
+            let symbols = server.ast_index.list_symbols();
+            let out_dir = std::path::Path::new(".axiom");
+            std::fs::create_dir_all(out_dir)?;
+            let out = out_dir.join("export.md");
+
+            let mut body = String::new();
+            body.push_str("# Axiom export
+
+");
+            body.push_str(&format!("Merkle root: `{}`
+", root));
+            body.push_str(&format!("Active CRDT nodes: {}
+", server.tree_crdt.active_nodes_count()));
+            body.push_str(&format!("Indexed symbols: {}
+
+", symbols.len()));
+            body.push_str("Suggested commit message:
+
+```
+");
+            body.push_str(&format!("axiom: sync index at {}
+
+", &root[..12]));
+            body.push_str(&format!("{} symbols indexed.
+```
+
+", symbols.len()));
+
+            body.push_str("## Symbols by kind
+
+");
+            let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for n in &symbols {
+                *by_kind.entry(n.kind.clone()).or_default() += 1;
+            }
+            for (kind, count) in &by_kind {
+                body.push_str(&format!("- {}: {}
+", kind, count));
+            }
+
+            std::fs::write(&out, body)?;
+
+            println!("Wrote {:?}", out);
+            println!("  Merkle root:     {}", root);
+            println!("  Indexed symbols: {}", symbols.len());
+            for (kind, count) in &by_kind {
+                println!("  {:<10} {}", kind, count);
+            }
+            println!();
+            println!("This is a summary of the index, not a commit. Nothing in git was");
+            println!("changed: review the file and commit it yourself if you want it kept.");
         }
 
         Commands::Search { query, mode, max } => {

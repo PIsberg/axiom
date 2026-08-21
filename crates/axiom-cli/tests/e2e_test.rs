@@ -1488,3 +1488,54 @@ async fn test_e2e_watch_notices_a_change_after_the_first_scan() -> Result<()> {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// Purging a deleted file works by looking up what that file owned, so every
+/// parser has to record its symbols. Only the Java one did, which meant a
+/// deleted .rs, .py, .ts or .go file left its symbols in the index for ever
+/// while the Java case looked fine. Attribution now happens in index_node, so a
+/// language added later cannot forget it.
+#[tokio::test]
+async fn test_e2e_rescan_purges_every_language_not_just_java() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_purge_langs_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let src = temp_dir.join("src");
+    std::fs::create_dir_all(&src)?;
+
+    std::fs::write(src.join("keep.rs"), "pub fn kept_symbol() {}\n")?;
+    std::fs::write(src.join("gone.rs"), "pub fn rust_symbol() {}\n")?;
+    std::fs::write(src.join("gone.py"), "def python_symbol():\n    pass\n")?;
+    std::fs::write(src.join("gone.ts"), "function tsSymbol() {}\n")?;
+    std::fs::write(src.join("gone.go"), "func GoSymbol() {}\n")?;
+    std::fs::write(
+        src.join("Gone.java"),
+        "package p;\npublic class Gone {\n    public void javaSymbol() {}\n}\n",
+    )?;
+
+    let idx = axiom_ast::AstIndex::new();
+    idx.scan_directory(&temp_dir)?;
+
+    let present = |needle: &str| idx.list_symbols().iter().any(|n| n.symbol_path.contains(needle));
+    for needle in ["rust_symbol", "python_symbol", "tsSymbol", "GoSymbol", "javaSymbol"] {
+        assert!(present(needle), "{needle} must be indexed by the first scan");
+    }
+
+    for name in ["gone.rs", "gone.py", "gone.ts", "gone.go", "Gone.java"] {
+        std::fs::remove_file(src.join(name))?;
+    }
+    idx.scan_directory(&temp_dir)?;
+
+    for needle in ["rust_symbol", "python_symbol", "tsSymbol", "GoSymbol", "javaSymbol"] {
+        assert!(
+            !present(needle),
+            "{needle} came from a deleted file and must not survive the re-scan"
+        );
+    }
+    assert!(
+        present("kept_symbol"),
+        "the file that still exists must stay indexed"
+    );
+
+    Ok(())
+}

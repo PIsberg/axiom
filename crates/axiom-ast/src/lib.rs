@@ -120,6 +120,14 @@ pub struct AstIndex {
     /// removals are recorded and subtracted from the merge.
     forgotten_symbols: RwLock<HashSet<String>>,
     forgotten_files: RwLock<HashSet<String>>,
+    /// The file currently being parsed, so every symbol it produces is attributed
+    /// to it whichever language parser produced it.
+    ///
+    /// Recording this inside each parser meant only the Java one did, so a
+    /// deleted .rs or .py file left its symbols behind for ever: the purge works
+    /// by looking up what a file owned, and for those languages the answer was
+    /// always nothing.
+    parsing_file: RwLock<Option<String>>,
 }
 
 impl AstIndex {
@@ -134,6 +142,7 @@ impl AstIndex {
             file_to_symbols: RwLock::new(HashMap::new()),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
+            parsing_file: RwLock::new(None),
         }
     }
 
@@ -166,6 +175,17 @@ impl AstIndex {
 
         let mut nodes = self.nodes.write().unwrap();
         nodes.insert(symbol.to_string(), node.clone());
+        drop(nodes);
+
+        // Attribution happens here rather than in each parser, so a language
+        // added later cannot forget to do it.
+        if let Some(file) = self.parsing_file.read().unwrap().as_ref() {
+            let mut owned = self.file_to_symbols.write().unwrap();
+            let entry = owned.entry(file.clone()).or_default();
+            if !entry.iter().any(|s| s == symbol) {
+                entry.push(symbol.to_string());
+            }
+        }
 
         node
     }
@@ -698,6 +718,12 @@ impl AstIndex {
     }
 
     fn parse_file_content(&self, file_path: &str, ext: &str, content: &str, nodes_count: &mut usize) {
+        *self.parsing_file.write().unwrap() = Some(file_path.to_string());
+        self.parse_by_language(file_path, ext, content, nodes_count);
+        *self.parsing_file.write().unwrap() = None;
+    }
+
+    fn parse_by_language(&self, file_path: &str, ext: &str, content: &str, nodes_count: &mut usize) {
         match ext {
             "java" | "kt" | "scala" => self.parse_java_content(file_path, content, nodes_count),
             "rs" => self.parse_rust_content(file_path, content, nodes_count),
@@ -1433,6 +1459,7 @@ fn strip_comments_and_strings(content: &str) -> String {
             file_to_symbols: RwLock::new(payload.file_to_symbols),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
+            parsing_file: RwLock::new(None),
         })
     }
 }
