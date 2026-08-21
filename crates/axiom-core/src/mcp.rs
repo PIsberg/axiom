@@ -99,14 +99,25 @@ fn find_index_file() -> Option<std::path::PathBuf> {
 }
 
 impl AxiomMcpServer {
+    /// Build a server over whichever index is above the working directory.
     pub fn new() -> Result<Self> {
-        let ast_index = if let Some(index_path) = find_index_file() {
-            match AstIndex::load_from_disk(&index_path) {
+        Self::with_index(find_index_file().as_deref())
+    }
+
+    /// Build a server over an explicit index, or over an empty one when given
+    /// `None`.
+    ///
+    /// `new` searches upwards from the working directory, which is right for a
+    /// server an agent starts inside a project and wrong for anything that must
+    /// not depend on what happens to be above it. A test that constructs a
+    /// server through `new` is really testing this machine's directory tree.
+    pub fn with_index(index_path: Option<&std::path::Path>) -> Result<Self> {
+        let ast_index = match index_path {
+            Some(path) => match AstIndex::load_from_disk(path) {
                 Ok(idx) => Arc::new(idx),
                 Err(_) => Arc::new(AstIndex::new()),
-            }
-        } else {
-            Arc::new(AstIndex::new())
+            },
+            None => Arc::new(AstIndex::new()),
         };
 
         let wasi_engine = Arc::new(WasiEngine::new()?);
@@ -115,22 +126,38 @@ impl AxiomMcpServer {
         // last-writer-wins rule cannot order a tie it cannot see.
         let tree_crdt = Arc::new(TreeCrdt::new(std::process::id()));
 
-        // If index is empty, seed with standard starter nodes
-        if ast_index.total_symbols_count() == 0 {
-            ast_index.index_node(
+        Ok(Self {
+            sandbox_runs: Arc::new(RwLock::new(HashMap::new())),
+            ast_index,
+            wasi_engine,
+            tree_crdt,
+        })
+    }
+
+/// Populate the workspace with the demo symbols the walkthrough uses.
+    ///
+    /// This used to run inside `new` whenever the index was empty, which made a
+    /// workspace nobody had scanned answer confidently about
+    /// `auth::service::validate_token` and hand back a blast radius for it. That
+    /// symbol is in no real codebase, and an agent following the usage guide,
+    /// which uses exactly that name, had no way to tell it was talking to a
+    /// fixture. Seeding is now something `axiom demo` asks for.
+    pub fn seed_demo_workspace(&self) {
+        if self.ast_index.total_symbols_count() == 0 {
+            self.ast_index.index_node(
                 "auth::service::validate_token",
                 "function",
                 "pub fn validate_token(t: &str) -> bool { t.len() > 10 }",
                 vec!["jwt::verifier".into()],
             );
-            ast_index.index_node(
+            self.ast_index.index_node(
                 "test_auth_validation",
                 "test",
                 "#[test] fn test_auth_validation() { assert!(validate_token(\"valid_token_secret\")); }",
                 vec!["auth::service::validate_token".into()],
             );
 
-            tree_crdt.insert_node(
+            self.tree_crdt.insert_node(
                 "root",
                 "node_auth_val",
                 "auth::service::validate_token",
@@ -139,12 +166,6 @@ impl AxiomMcpServer {
             );
         }
 
-        Ok(Self {
-            sandbox_runs: Arc::new(RwLock::new(HashMap::new())),
-            ast_index,
-            wasi_engine,
-            tree_crdt,
-        })
     }
 
     pub async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {

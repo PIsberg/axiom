@@ -318,6 +318,55 @@ impl AstIndex {
         None
     }
 
+/// A cheap summary of every source file under `root`: path, size and
+    /// modification time. Comparing two of these says whether a re-scan is
+    /// worth doing, at the cost of a stat per file rather than a parse.
+    pub fn tree_fingerprint(&self, root: &Path) -> String {
+        let mut entries: Vec<String> = Vec::new();
+        Self::fingerprint_dir(root, &mut entries);
+        entries.sort();
+
+        let mut hasher = blake3::Hasher::new();
+        for e in &entries {
+            hasher.update(e.as_bytes());
+            hasher.update(b"
+");
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn fingerprint_dir(dir: &Path, out: &mut Vec<String>) {
+        let read = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with('.') || name == "target" || name == "node_modules" || name == "build" || name == "dist" {
+                    continue;
+                }
+                Self::fingerprint_dir(&path, out);
+            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if !matches!(ext, "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c" | "cpp" | "h" | "json" | "toml") {
+                    continue;
+                }
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                out.push(format!("{}|{}|{}", path.to_string_lossy(), meta.len(), modified));
+            }
+        }
+    }
+
     /// Predictive Blast-Radius Calculation with Accessor Return-Type Resolution
     pub fn compute_blast_radius(&self, symbol_path: &str, max_depth: usize) -> Option<BlastRadiusResult> {
         let symbol_node = self.get_symbol(symbol_path)?;

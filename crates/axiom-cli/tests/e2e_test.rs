@@ -1399,3 +1399,92 @@ async fn test_e2e_scan_merges_over_concurrent_work_but_still_purges() -> Result<
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// A workspace nobody has scanned must say so, not answer from a fixture.
+///
+/// The server used to seed `auth::service::validate_token` and
+/// `test_auth_validation` whenever the index was empty, so a fresh workspace
+/// answered confidently about a symbol in no real codebase and returned a blast
+/// radius for it. The usage guide uses exactly that symbol in its examples, so
+/// an agent had no way to tell it was talking to a fixture.
+#[tokio::test]
+async fn test_e2e_unscanned_workspace_does_not_answer_from_a_fixture() -> Result<()> {
+    // Explicitly no index, rather than whatever sits above the working
+    // directory: otherwise this asserts something about the machine it runs on.
+    let server = AxiomMcpServer::with_index(None)?;
+
+    let query = |symbol: &str| JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(30)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_query_symbol",
+            "arguments": { "symbol_path": symbol }
+        })),
+    };
+
+    // Whatever this workspace holds, it must not hold the demo fixture unless
+    // something asked for it.
+    let res = extract_tool_result(&server.handle_request(query("auth::service::validate_token")).await);
+    assert!(
+        res.get("error").is_some(),
+        "the demo symbol must not be present until seed_demo_workspace is called, got {res:?}"
+    );
+
+    // Asking for it explicitly is still supported, which is how the walkthrough
+    // gets its data.
+    server.seed_demo_workspace();
+    let res = extract_tool_result(&server.handle_request(query("auth::service::validate_token")).await);
+    assert_eq!(
+        res.get("symbol_path").and_then(|v| v.as_str()),
+        Some("auth::service::validate_token"),
+        "seeding on request must still work, or the demo has no data"
+    );
+
+    Ok(())
+}
+
+/// `axiom watch` claimed to listen for changes and hot-patch the index, and
+/// returned immediately after its first scan. The two lines it printed, about
+/// listening and about Ctrl+C, described a loop that was not there, so an edit
+/// made after starting it was never picked up.
+#[tokio::test]
+async fn test_e2e_watch_notices_a_change_after_the_first_scan() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_watch_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let src = temp_dir.join("src");
+    std::fs::create_dir_all(&src)?;
+    let file = src.join("lib.rs");
+    std::fs::write(&file, "pub fn alpha() {}\n")?;
+
+    let idx = axiom_ast::AstIndex::new();
+    idx.scan_directory(&temp_dir)?;
+    let before = idx.tree_fingerprint(&temp_dir);
+
+    // Same tree, same answer: polling must not re-parse on every tick.
+    assert_eq!(
+        before,
+        idx.tree_fingerprint(&temp_dir),
+        "an unchanged tree must fingerprint the same, or watch re-scans forever"
+    );
+
+    // Size changes, so this is visible without waiting on clock granularity.
+    std::fs::write(&file, "pub fn alpha() {}\npub fn added_later() {}\n")?;
+    assert_ne!(
+        before,
+        idx.tree_fingerprint(&temp_dir),
+        "an edited tree must fingerprint differently, or watch never notices"
+    );
+
+    // And re-scanning on that signal actually picks the new symbol up.
+    idx.scan_directory(&temp_dir)?;
+    assert!(
+        idx.list_symbols().iter().any(|n| n.symbol_path.contains("added_later")),
+        "the symbol added after the first scan must be indexed"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

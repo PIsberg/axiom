@@ -71,6 +71,12 @@ enum Commands {
     Watch {
         #[arg(short, long, default_value = ".")]
         path: String,
+        /// How often to check the tree for changes, in milliseconds
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        /// Scan once and exit instead of watching
+        #[arg(long, default_value_t = false)]
+        once: bool,
     },
     /// Export current Merkle state to a Git-compatible patch / commit summary
     GitExport,
@@ -196,6 +202,11 @@ async fn main() -> Result<()> {
         }
 
         Commands::Demo => {
+            // The walkthrough talks about auth::service::validate_token, so put
+            // it there deliberately rather than relying on a server that seeds
+            // itself behind every user's back.
+            server.seed_demo_workspace();
+
             println!("================================================================================");
             println!("   ⚡ AXIOM: THE AGENT-NATIVE AUTONOMOUS SOFTWARE ENGINE DEMONSTRATION ⚡");
             println!("================================================================================\n");
@@ -423,14 +434,54 @@ async fn main() -> Result<()> {
             println!("\n🏆 System ready for autonomous agent connections via `axiom serve`.");
         }
 
-        Commands::Watch { path } => {
-            println!("👀 Axiom File Watcher active on '{}'...", path);
+        Commands::Watch { path, interval_ms, once } => {
             let p = std::path::Path::new(&path);
+            let index_path = std::path::Path::new(".axiom/index.json");
+
             let summary = server.ast_index.scan_directory(p)?;
-            let saved_path = server.ast_index.save_to_disk(std::path::Path::new(".axiom/index.json"))?;
-            println!("✅ Initial Scan: {} files, {} AST nodes indexed into Merkle CAS (Saved to {:?}).", summary.files_scanned, summary.nodes_indexed, saved_path);
-            println!("📡 Listening for changes... (Press Ctrl+C to stop)");
-            println!("⚡ Incremental updates will hot-patch Merkle DAG in <1ms.");
+            let saved = server.ast_index.save_to_disk(index_path)?;
+            println!("👀 Watching '{}'", path);
+            println!(
+                "   Initial scan: {} files, {} AST nodes -> {:?}",
+                summary.files_scanned, summary.nodes_indexed, saved
+            );
+
+            if once {
+                println!("   --once given, so stopping after the initial scan.");
+                return Ok(());
+            }
+
+            // Poll a fingerprint of the tree rather than parsing it every tick:
+            // one stat per source file, against a full re-parse only when
+            // something has actually changed.
+            let mut fingerprint = server.ast_index.tree_fingerprint(p);
+            println!("   Polling every {}ms. Ctrl+C to stop.", interval_ms);
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+
+                let current = server.ast_index.tree_fingerprint(p);
+                if current == fingerprint {
+                    continue;
+                }
+                fingerprint = current;
+
+                let started = Instant::now();
+                match server.ast_index.scan_directory(p) {
+                    Ok(summary) => match server.ast_index.save_to_disk(index_path) {
+                        Ok(_) => println!(
+                            "   change detected: re-indexed {} files, {} nodes in {:.0}ms",
+                            summary.files_scanned,
+                            summary.nodes_indexed,
+                            started.elapsed().as_secs_f64() * 1000.0
+                        ),
+                        // Keep watching: a failed save is worth reporting, but
+                        // giving up leaves the index frozen with no warning.
+                        Err(e) => eprintln!("   could not save the index: {}", e),
+                    },
+                    Err(e) => eprintln!("   re-scan failed: {}", e),
+                }
+            }
         }
 
         Commands::GitExport => {
