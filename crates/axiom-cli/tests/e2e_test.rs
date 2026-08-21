@@ -1615,3 +1615,47 @@ async fn test_e2e_external_verification_can_back_a_record_but_says_who_ran_it() 
 
     Ok(())
 }
+
+/// The dashboard printed a fixed panel under the heading LIVE METRICS: "100+
+/// Indexed Symbols" whatever the index held, a blast-radius ratio, an
+/// attestation level, and five activity lines with invented timings for calls
+/// nobody had made. A display that reports constants as measurements is the same
+/// defect as a sandbox that reports PASSED without running anything, so what it
+/// shows now has to come from the workspace.
+#[tokio::test]
+async fn test_e2e_dashboard_counts_come_from_the_index() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_dashboard_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let src = temp_dir.join("src");
+    std::fs::create_dir_all(&src)?;
+    std::fs::write(src.join("lib.rs"), "pub fn alpha() {}\npub fn beta() {}\n")?;
+
+    let idx = axiom_ast::AstIndex::new();
+    idx.scan_directory(&temp_dir)?;
+
+    // The dashboard reads exactly these, so they must reflect the tree rather
+    // than a constant. Two functions in, two functions out.
+    let symbols = idx.list_symbols();
+    assert_eq!(
+        symbols.len(),
+        2,
+        "the count the dashboard prints must follow the workspace, got {symbols:?}"
+    );
+    assert!(
+        symbols.iter().all(|n| n.kind == "function"),
+        "and so must the breakdown by kind"
+    );
+
+    // An empty workspace reports nothing indexed rather than a plausible number.
+    let empty = axiom_ast::AstIndex::new();
+    assert_eq!(
+        empty.list_symbols().len(),
+        0,
+        "an unscanned workspace must not report symbols it does not have"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

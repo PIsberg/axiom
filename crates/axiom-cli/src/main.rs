@@ -53,7 +53,7 @@ enum Commands {
     },
     /// Export ready-to-use MCP configuration for AI IDEs (Cursor, Claude Code, Antigravity, Windsurf)
     McpConfig,
-    /// Cryptographically verify a commit's SLSA L4+ attestation seal
+    /// Look up the provenance record for a symbol and prompt, and check it is unaltered
     Verify {
         #[arg(short, long)]
         symbol: String,
@@ -174,8 +174,8 @@ async fn main() -> Result<()> {
         }
 
         Commands::Bench { iterations } => {
-            println!("🚀 Running Axiom Sub-15ms Sandbox Benchmark ({} iterations)...", iterations);
-            let mut total_duration = 0.0;
+            println!("Measuring axiom_eval_patch over {} iterations...", iterations);
+            let mut timings: Vec<f64> = Vec::with_capacity(iterations as usize);
 
             for i in 0..iterations {
                 let start = Instant::now();
@@ -192,13 +192,28 @@ async fn main() -> Result<()> {
                     })),
                 };
                 let _resp = server.handle_request(req).await;
-                total_duration += start.elapsed().as_secs_f64() * 1000.0;
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
             }
 
-            let avg = total_duration / iterations as f64;
-            println!("✅ Completed {} iterations.", iterations);
-            println!("⚡ Average Task Sandbox Latency: {:.3} ms", avg);
-            println!("🎯 Sub-15ms Target: {}", if avg < 15.0 { "PASSED (EXCEEDED TARGET)" } else { "FAILED" });
+            timings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let n = timings.len().max(1);
+            let avg: f64 = timings.iter().sum::<f64>() / n as f64;
+
+            println!();
+            println!("  iterations {}", n);
+            println!("  min        {:.1} ms", timings.first().copied().unwrap_or(0.0));
+            println!("  median     {:.1} ms", timings[n / 2]);
+            println!("  max        {:.1} ms", timings.last().copied().unwrap_or(0.0));
+            println!("  mean       {:.1} ms", avg);
+            println!();
+            // A real evaluation compiles the snippet, so the compiler dominates.
+            // Reporting against a sub-15ms target invites the reading that
+            // something is broken, when what changed is that the sandbox stopped
+            // pretending: the sub-millisecond figures this once printed were
+            // measuring a function that ran nothing.
+            println!("  A Rust snippet is compiled and run, so rustc dominates this figure.");
+            println!("  Snippets in a language the sandbox cannot compile are refused rather");
+            println!("  than timed, so this measures the Rust path only.");
         }
 
         Commands::Demo => {
@@ -251,8 +266,13 @@ async fn main() -> Result<()> {
             let s3 = Instant::now();
             let _failed_report = server.wasi_engine.execute_eval("auth::service::validate_token", "assert!(validate_token(\"\")); // BUG: empty token").await?;
             let el3 = s3.elapsed().as_secs_f64() * 1000.0;
-            println!("   ↳ Sandbox Caught Bug Instantly: ❌ CTOP_STATUS = FAILED (Sandbox latency: {:.3} ms)", el3);
-            println!("   ↳ Structured Diagnostic Hint: 'Expected token length > 10, got length 0'");
+            println!("   ↳ Sandbox Caught the Bug: ❌ CTOP_STATUS = FAILED (Sandbox latency: {:.3} ms)", el3);
+            let hint = _failed_report
+                .failed_checks
+                .first()
+                .and_then(|c| c.hint.clone())
+                .unwrap_or_else(|| "no hint reported".to_string());
+            println!("   ↳ Structured Diagnostic Hint: '{}'", hint);
 
             // Step 4: Agent self-corrects -> Instant Sandbox passes
             println!("\n🔹 [Step 4/5] Agent automatically self-heals using the diagnostic hint & re-tests...");
@@ -261,8 +281,9 @@ async fn main() -> Result<()> {
             let el4 = s4.elapsed().as_secs_f64() * 1000.0;
             println!("   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: {:.3} ms)", el4);
 
-            // Step 5: Cryptographic SLSA L4+ Provenance Seal
-            println!("\n🔹 [Step 5/5] Generating SLSA L4+ Cryptographic Attestation Proof...");
+            // Step 5: record the provenance of the change
+            println!("
+🔹 [Step 5/5] Recording the provenance of the change...");
             let req5 = JsonRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: Some(serde_json::json!(5)),
@@ -292,7 +313,7 @@ async fn main() -> Result<()> {
             println!(" Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)", );
             println!(" Sandbox Feedback Loop     300,000 ms (5 minutes)        {:.2} ms (Tier-1 WASI / MicroVM)", el4);
             println!(" Self-Correction Total     600,000 ms (10 minutes)       {:.2} ms (End-to-End)", total_loop_ms);
-            println!(" Provenance Security       Unsigned text commit          SLSA L4+ Merkle Proof & Ed25519");
+            println!(" Provenance Security       Unsigned text commit          Prompt, symbol and check recorded together");
             println!(" Speedup Multiplier        1.0x (Baseline)               {:.0}x FASTER", 600000.0 / total_loop_ms.max(0.1));
             println!("================================================================================\n");
             println!("🎯 VERDICT: Autonomous AI Coding Agents iterate at MACHINE SPEED with ZERO merge conflicts.");
@@ -416,27 +437,44 @@ async fn main() -> Result<()> {
         }
 
         Commands::Dashboard => {
-            println!("================================================================================");
-            println!("               🚀 AXIOM AGENT-NATIVE ENGINE LIVE METRICS TUI 🚀");
-            println!("================================================================================\n");
+            // This used to print a fixed panel under the heading LIVE METRICS:
+            // "100+ Indexed Symbols" whatever the index held, a blast-radius
+            // ratio, an attestation level, and five activity lines with invented
+            // timings for calls nobody had made. Everything below is read from
+            // the workspace.
+            let symbols = server.ast_index.list_symbols();
+            let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for n in &symbols {
+                *by_kind.entry(n.kind.clone()).or_default() += 1;
+            }
 
-            println!("┌───────────────────────────────────────────────┬──────────────────────────────┐");
-            println!("│ 🌐 AXIOM ENGINE STATUS: ONLINE (HOST: TOKIO)  │ ⚡ EXECUTION TIERS: DUAL     │");
-            println!("├───────────────────────────────────────────────┼──────────────────────────────┤");
-            println!("│ Active MCP Transport: stdio (JSON-RPC 2.0)    │ Tier-1 WASI Latency: 0.001ms │");
-            println!("│ Connected AI Swarms:  1 Active Swarm Pool     │ Tier-2 MicroVM Latency: 1.2ms│");
-            println!("│ AST Merkle CAS Size:  100+ Indexed Symbols    │ Blast Radius Ratio:  99.98%  │");
-            println!("│ Tree-CRDT Convergence:100% IDENTICAL STATE    │ Attestation: SLSA Level 4+   │");
-            println!("└───────────────────────────────────────────────┴──────────────────────────────┘");
+            let index_path = std::path::Path::new(".axiom/index.json");
+            let attestations = axiom_core::mcp::load_attestations().unwrap_or_default();
 
-            println!("\n📊 LIVE ACTIVITY MONITOR:");
-            println!(" [OK] 0.03ms - axiom_query_symbol('auth::service::validate_token')");
-            println!(" [OK] 0.01ms - axiom_get_blast_radius('auth::service::validate_token') -> [1 test]");
-            println!(" [OK] 0.00ms - axiom_eval_patch('auth::service::validate_token') -> CTOP_PASSED");
-            println!(" [OK] 0.04ms - axiom_apply_mutation('node_auth_val') -> MERKLE ROOT CONVERGED");
-            println!(" [OK] 0.01ms - axiom_attest_commit() -> ED25519 SEAL GENERATED");
-
-            println!("\n🏆 System ready for autonomous agent connections via `axiom serve`.");
+            println!("AXIOM WORKSPACE");
+            println!("===============");
+            println!();
+            if symbols.is_empty() {
+                println!("  No symbols indexed. Run `axiom scan --path .` first.");
+            } else {
+                println!("  Indexed symbols: {}", symbols.len());
+                for (kind, count) in &by_kind {
+                    println!("    {:<10} {}", kind, count);
+                }
+            }
+            println!();
+            println!("  Index file:      {}", if index_path.exists() {
+                format!("{:?} ({} bytes)", index_path,
+                    std::fs::metadata(index_path).map(|m| m.len()).unwrap_or(0))
+            } else {
+                "not written yet".to_string()
+            });
+            println!("  CRDT nodes:      {}", server.tree_crdt.active_nodes_count());
+            println!("  Merkle root:     {}", server.tree_crdt.compute_tree_merkle_root());
+            println!("  Provenance:      {} record(s)", attestations.len());
+            println!();
+            println!("  This is a snapshot of the workspace as it is now, not a live feed.");
+            println!("  Run `axiom bench` to measure sandbox latency on this machine.");
         }
 
         Commands::Watch { path, interval_ms, once } => {

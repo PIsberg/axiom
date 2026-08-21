@@ -1,6 +1,6 @@
 # AXIOM: The Agent-Native Autonomous Software Engine
 
-> **Replace passive, text-oriented version control (Git) and 10-minute CI/CD pipelines with an active, executable Merkle AST graph and sub-15ms virtualization substrate purpose-built for autonomous AI coding agents.**
+> **Replace passive, text-oriented version control (Git) and 10-minute CI/CD pipelines with an active, executable Merkle AST graph and an in-process sandbox, purpose-built for autonomous AI coding agents.**
 
 ---
 
@@ -23,7 +23,7 @@ agent pays on every iteration.
 ## 🚀 Key Features
 
 * **Repository as an Active MCP Server**: Direct structured AST and semantic graph navigation over JSON-RPC 2.0 (`stdio`), eliminating local file clones.
-* **Sub-15ms Deterministic Sandbox Loop**: In-process WASI Cranelift isolates and microVM execution with truth-preserving validation (zero false-positives).
+* **In-Process Sandbox**: a Rust snippet is compiled and run in place, so a hypothesis is checked without a CI round trip. Measure it on your own machine with `axiom bench`; on the development machine the median is around 175ms, which is `rustc` rather than the harness. A snippet in a language the sandbox cannot compile is refused rather than guessed at.
 * **Predictive Blast-Radius Test Pruning**: Transitive reverse dependency reachability prunes $\ge 99.9\%$ of irrelevant tests across 5,000+ test repositories.
 * **Ultra-Fast Zoekt Trigram Search**: In-memory sliding trigram index (`[u8; 3] -> HashSet<Path>`) providing $<1\text{ms}$ regex and literal search without disk I/O.
 * **Tree-CRDT Multi-Agent Swarm Concurrency**: Commutative LWW-Lamport tree operations enabling 50+ concurrent AI agents to mutate code without merge conflicts.
@@ -48,11 +48,11 @@ Run `axiom demo` to see the autonomous agent self-healing loop in action:
    ↳ Pruned scope: 99.98% of test suite bypassed in 0.023 ms
 
 🔹 [Step 3/5] Simulating Agent testing a BUGGY hypothesis (empty token) in sandbox...
-   ↳ Sandbox Caught Bug Instantly: ❌ CTOP_STATUS = FAILED (Sandbox latency: 0.003 ms)
+   ↳ Sandbox Caught Bug: ❌ CTOP_STATUS = FAILED (Sandbox latency: 171.402 ms)
    ↳ Structured Diagnostic Hint: 'Expected token length > 10, got length 0'
 
 🔹 [Step 4/5] Agent automatically self-heals using the diagnostic hint & re-tests...
-   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: 0.003 ms)
+   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: 168.955 ms)
 
 🔹 [Step 5/5] Recording the provenance of the change...
    ↳ Provenance record written, tying the prompt, symbol and sandbox result together
@@ -64,10 +64,10 @@ Run `axiom demo` to see the autonomous agent self-healing loop in action:
  -------------------------------------------------------------------------------
  Workspace Sync            git clone (500 MB / ~12s)     MCP Graph Query (2 KB / 0.04 ms)
  Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)
- Sandbox Feedback Loop     300,000 ms (5 minutes)        0.00 ms (Tier-1 WASI / MicroVM)
- Self-Correction Total     600,000 ms (10 minutes)       0.87 ms (End-to-End)
+ Sandbox Feedback Loop     300,000 ms (5 minutes)        ~175 ms (compile and run, measured)
+ Self-Correction Total     600,000 ms (10 minutes)       ~350 ms (two sandbox rounds)
  Provenance Security       Unsigned text commit          Prompt, symbol and sandbox result recorded together
- Speedup Multiplier        1.0x (Baseline)               686656x FASTER
+ Speedup Multiplier        1.0x (Baseline)               ~1700x on this stage
 ================================================================================
 
 🎯 VERDICT: Autonomous AI Coding Agents iterate at MACHINE SPEED with ZERO merge conflicts.
