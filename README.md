@@ -247,12 +247,20 @@ things together: the prompt that asked for the change, the symbol it touched, th
 sandbox task that checked it, the Merkle root before and after, and when it
 happened.
 
-The record is only issued when the sandbox run it names actually happened and
-passed. Naming a task the server never ran, or one that failed, is refused:
+A record is only issued against a check that happened and passed. Naming a check
+the server has no record of, or one that failed, is refused.
+
+There are two kinds of check, and the record says which it rests on. `sandbox`
+means axiom compiled and ran the code itself, which it can only do for Rust.
+`reported` means an agent ran something else, a project's own test suite for
+instance, and told axiom the outcome through `axiom_record_verification`. Axiom
+vouches for the first and is repeating the second, and `axiom verify` says so:
 
 ```
-no sandbox run recorded for task "task_probe_01"; call axiom_eval_patch first
-and attest against the task_id it returns
+Checked by:    reported (mvn -pl async-test-lib test -Dtest=ConcurrencyRunnerTest)
+
+Axiom did not run this check. The outcome above was reported by
+the agent that asked for the record.
 ```
 
 Read a record back with:

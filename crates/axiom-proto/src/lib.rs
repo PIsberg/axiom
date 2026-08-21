@@ -63,6 +63,21 @@ pub struct EvalRequest {
 /// SLSA Level 4+ Cryptographic Attestation Proof
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvenanceAttestation {
+    /// How the change was checked before this record was issued: "sandbox" when
+    /// axiom compiled and ran it, "reported" when an agent ran something else,
+    /// a project's own test suite for instance, and told axiom the outcome.
+    ///
+    /// The distinction is the whole value of the record. Axiom can vouch for what
+    /// it ran itself; for anything else it is repeating a claim, and a reader
+    /// deserves to know which they are looking at.
+    #[serde(default)]
+    pub verified_by: String,
+
+    /// What was run, when that is known: the sandbox task, or the command an
+    /// agent reported.
+    #[serde(default)]
+    pub verification_detail: String,
+
     /// The symbol this seal was issued for. Without it a stored attestation
     /// cannot be found again, and verification degenerates into re-deriving a
     /// seal from whatever arguments it was handed.
@@ -90,6 +105,8 @@ impl ProvenanceAttestation {
         prompt: &str,
         symbol_path: &str,
         ctop_task_id: &str,
+        verified_by: &str,
+        verification_detail: &str,
     ) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(parent_merkle_root.as_bytes());
@@ -101,6 +118,8 @@ impl ProvenanceAttestation {
         let digest = hasher.finalize().to_hex().to_string();
 
         Self {
+            verified_by: verified_by.to_string(),
+            verification_detail: verification_detail.to_string(),
             symbol_path: symbol_path.to_string(),
             parent_merkle_root: parent_merkle_root.to_string(),
             commit_merkle_root: commit_merkle_root.to_string(),

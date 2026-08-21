@@ -1119,9 +1119,9 @@ async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
     Ok(())
 }
 
-/// An attestation claims a change was verified in the sandbox, so it may only
-/// be issued for a run that happened and passed, and verification has to look
-/// the seal up rather than re-derive one from whatever it was asked about.
+/// An attestation claims a change was checked, so it may only be issued against
+/// a check that happened and passed, and verification has to look the seal up
+/// rather than re-derive one from whatever it was asked about.
 /// Re-deriving is a tautology: it reports every symbol and prompt as proven,
 /// including a symbol that does not exist and a prompt nobody ever issued.
 #[tokio::test]
@@ -1147,7 +1147,7 @@ async fn test_e2e_attestation_requires_a_sandbox_run_that_passed() -> Result<()>
     let res = extract_tool_result(&resp);
     let err = res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err.contains("no sandbox run recorded"),
+        err.contains("no verification recorded"),
         "attesting an unknown task must be refused, got {res:?}"
     );
 
@@ -1197,6 +1197,8 @@ async fn test_e2e_attestation_ledger_binds_symbol_and_prompt() -> Result<()> {
         "Tighten the guard",
         "auth::service::validate_token",
         "eval_7",
+        "sandbox",
+        "axiom sandbox, engine tier1_wasi_cranelift",
     );
     axiom_core::mcp::append_attestation_to(&ledger, &seal)?;
 
@@ -1535,6 +1537,80 @@ async fn test_e2e_rescan_purges_every_language_not_just_java() -> Result<()> {
     assert!(
         present("kept_symbol"),
         "the file that still exists must stay indexed"
+    );
+
+    Ok(())
+}
+
+/// Requiring a sandbox run before a provenance record made provenance
+/// unreachable for most of the codebases axiom indexes.
+///
+/// The sandbox compiles Rust, and correctly refuses a Java symbol. Combined with
+/// "attest only after a run that passed", that left no path at all for a Java,
+/// Kotlin, Python, TypeScript or Go change, which is most of what the parsers
+/// read and all of what the usage guide is written around. An agent that ran the
+/// project's own suite has checked something real and can now say so, on the
+/// condition that the record states axiom did not run it.
+#[tokio::test]
+async fn test_e2e_external_verification_can_back_a_record_but_says_who_ran_it() -> Result<()> {
+    let server = AxiomMcpServer::with_index(None)?;
+
+    let call = |name: &str, args: serde_json::Value| JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(40)),
+        method: "tools/call".into(),
+        params: Some(json!({ "name": name, "arguments": args })),
+    };
+
+    // Nothing recorded yet, so nothing can be attested.
+    let res = extract_tool_result(&server.handle_request(call("axiom_attest_commit", json!({
+        "prompt": "Restore the guard",
+        "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+        "ctop_task_id": "mvn_run_01"
+    }))).await);
+    assert!(
+        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("no verification recorded"),
+        "attesting an unknown check must be refused, got {res:?}"
+    );
+
+    // An outcome with no verdict is not a verification.
+    let res = extract_tool_result(&server.handle_request(call("axiom_record_verification", json!({
+        "task_id": "mvn_run_01", "command": "mvn test"
+    }))).await);
+    assert!(res.get("error").is_some(), "passed must be required, got {res:?}");
+
+    // A failed external check cannot back a record either.
+    server.handle_request(call("axiom_record_verification", json!({
+        "task_id": "mvn_failed", "passed": false, "command": "mvn test"
+    }))).await;
+    let res = extract_tool_result(&server.handle_request(call("axiom_attest_commit", json!({
+        "prompt": "p", "symbol_path": "s", "ctop_task_id": "mvn_failed"
+    }))).await);
+    assert!(
+        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("did not pass"),
+        "a failed check must not back a record, got {res:?}"
+    );
+
+    // A passing one does, and the record says axiom was told rather than that it
+    // looked.
+    let recorded = extract_tool_result(&server.handle_request(call("axiom_record_verification", json!({
+        "task_id": "mvn_run_01", "passed": true, "command": "mvn -pl async-test-lib test -Dtest=ConcurrencyRunnerTest"
+    }))).await);
+    assert_eq!(recorded.get("recorded_as").and_then(|v| v.as_str()), Some("reported"));
+
+    let sealed = extract_tool_result(&server.handle_request(call("axiom_attest_commit", json!({
+        "prompt": "Restore the guard",
+        "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+        "ctop_task_id": "mvn_run_01"
+    }))).await);
+    assert_eq!(
+        sealed.get("verified_by").and_then(|v| v.as_str()),
+        Some("reported"),
+        "a record backed by an external check must not read as axiom's own work"
+    );
+    assert!(
+        sealed.get("verification_detail").and_then(|v| v.as_str()).unwrap_or("").contains("mvn"),
+        "the record must say what was run, got {sealed:?}"
     );
 
     Ok(())

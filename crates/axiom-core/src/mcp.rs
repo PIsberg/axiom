@@ -73,11 +73,27 @@ pub fn append_attestation_to(
     Ok(())
 }
 
+/// A check that was performed before a provenance record was issued.
+#[derive(Debug, Clone)]
+pub struct Verification {
+    pub passed: bool,
+    /// "sandbox" when axiom ran it, "reported" when an agent says it ran
+    /// something elsewhere. Never collapse the two: axiom can vouch for the
+    /// first and is only repeating the second.
+    pub kind: String,
+    pub detail: String,
+}
+
 pub struct AxiomMcpServer {
-    /// Sandbox runs this server has actually performed: task id to whether it
-    /// passed. An attestation may only be issued against an entry here, so a
-    /// caller cannot name a task that never ran.
-    pub sandbox_runs: Arc<RwLock<HashMap<String, bool>>>,
+    /// Verifications this server knows about, by task id.
+    ///
+    /// A sandbox run is one kind. It cannot be the only kind: the sandbox
+    /// compiles Rust, so requiring one made provenance unreachable for every
+    /// Java, Kotlin, Python, TypeScript and Go change, which is most of what the
+    /// indexer reads. An agent that ran a project's own suite has verified
+    /// something real, and can say so. What it cannot do is pass that off as
+    /// axiom's own work, which is why the kind travels with the record.
+    pub verifications: Arc<RwLock<HashMap<String, Verification>>>,
     pub ast_index: Arc<AstIndex>,
     pub wasi_engine: Arc<WasiEngine>,
     pub tree_crdt: Arc<TreeCrdt>,
@@ -127,7 +143,7 @@ impl AxiomMcpServer {
         let tree_crdt = Arc::new(TreeCrdt::new(std::process::id()));
 
         Ok(Self {
-            sandbox_runs: Arc::new(RwLock::new(HashMap::new())),
+            verifications: Arc::new(RwLock::new(HashMap::new())),
             ast_index,
             wasi_engine,
             tree_crdt,
@@ -252,6 +268,19 @@ impl AxiomMcpServer {
                                     "content": { "type": "string" }
                                 },
                                 "required": ["node_id", "symbol_path", "content"]
+                            }
+                        },
+                        {
+                            "name": "axiom_record_verification",
+                            "description": "Record the outcome of a check run outside the sandbox, such as a project's own test suite, so a provenance record can rest on it. Axiom stores what you report and marks it as reported rather than as its own work.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "task_id": { "type": "string", "description": "Identifier to attest against later" },
+                                    "passed": { "type": "boolean", "description": "Whether the check succeeded" },
+                                    "command": { "type": "string", "description": "What was run, recorded verbatim in the provenance record" }
+                                },
+                                "required": ["task_id", "passed", "command"]
                             }
                         },
                         {
@@ -382,10 +411,14 @@ impl AxiomMcpServer {
                 // run that genuinely happened, rather than against a task id the
                 // caller made up.
                 let passed = matches!(report.status, CtopStatus::Passed);
-                self.sandbox_runs
-                    .write()
-                    .unwrap()
-                    .insert(report.task_id.clone(), passed);
+                self.verifications.write().unwrap().insert(
+                    report.task_id.clone(),
+                    Verification {
+                        passed,
+                        kind: "sandbox".to_string(),
+                        detail: format!("axiom sandbox, engine {}", report.engine),
+                    },
+                );
 
                 Ok(json!(report))
             }
@@ -405,25 +438,24 @@ impl AxiomMcpServer {
                 // The seal claims the change was verified in the sandbox. Issuing
                 // one for a run this server never performed, or for one that
                 // failed, would make that claim false, so both are refused.
-                match self.sandbox_runs.read().unwrap().get(task_id) {
+                let verification = match self.verifications.read().unwrap().get(task_id) {
                     None => {
                         return Ok(json!({
                             "error": format!(
-                                "no sandbox run recorded for task {:?}; call axiom_eval_patch first and attest against the task_id it returns",
-                                task_id
+                                "no verification recorded for task {task_id:?}. Either run axiom_eval_patch and attest against the task_id it returns, or report an external check with axiom_record_verification"
                             )
                         }))
                     }
-                    Some(false) => {
+                    Some(v) if !v.passed => {
                         return Ok(json!({
                             "error": format!(
-                                "sandbox run {:?} did not pass; an attestation may only be issued for a run that succeeded",
-                                task_id
+                                "verification {task_id:?} did not pass ({}); a record may only be issued for a check that succeeded",
+                                v.detail
                             )
                         }))
                     }
-                    Some(true) => {}
-                }
+                    Some(v) => v.clone(),
+                };
 
                 let root = self.tree_crdt.compute_tree_merkle_root();
                 let attestation = ProvenanceAttestation::generate(
@@ -433,6 +465,8 @@ impl AxiomMcpServer {
                     prompt,
                     symbol,
                     task_id,
+                    &verification.kind,
+                    &verification.detail,
                 );
 
                 // Persist it, or verification later has nothing to look up.
@@ -470,6 +504,40 @@ impl AxiomMcpServer {
                     "crdt_op": op,
                     "new_merkle_root": root,
                     "active_ast_nodes": self.tree_crdt.active_nodes_count()
+                }))
+            }
+
+            "axiom_record_verification" => {
+                let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let passed = match args.get("passed").and_then(|v| v.as_bool()) {
+                    Some(p) => p,
+                    None => {
+                        return Ok(json!({
+                            "error": "passed is required and must be true or false: a verification with no outcome is not one"
+                        }))
+                    }
+                };
+                if task_id.is_empty() || command.is_empty() {
+                    return Ok(json!({
+                        "error": "task_id and command are both required: a record that cannot say what was run is worth nothing"
+                    }));
+                }
+
+                self.verifications.write().unwrap().insert(
+                    task_id.to_string(),
+                    Verification {
+                        passed,
+                        kind: "reported".to_string(),
+                        detail: command.to_string(),
+                    },
+                );
+
+                Ok(json!({
+                    "task_id": task_id,
+                    "passed": passed,
+                    "recorded_as": "reported",
+                    "note": "Axiom did not run this. The provenance record will say the outcome was reported by the agent, not observed by axiom."
                 }))
             }
 

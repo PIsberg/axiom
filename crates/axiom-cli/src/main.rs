@@ -364,12 +364,17 @@ async fn main() -> Result<()> {
                 Some(a) => {
                     println!("✅ ATTESTATION VALID");
                     println!("   Symbol:        {}", a.symbol_path);
-                    println!("   Sandbox task:  {}", a.ctop_proof_hash);
+                    println!("   Checked by:    {} ({})", a.verified_by, a.verification_detail);
+                    println!("   Task:          {}", a.ctop_proof_hash);
                     println!("   Issued:        {}", a.timestamp);
                     println!("   Seal:          {}", a.seal);
                     println!("   (BLAKE3 integrity tag over the record, not a signature: it shows the
     record is unaltered, not who issued it.)");
-                    println!("   This seal was issued after sandbox task {} passed.", a.ctop_proof_hash);
+                    if a.verified_by == "reported" {
+                        println!();
+                        println!("   Axiom did not run this check. The outcome above was reported by");
+                        println!("   the agent that asked for the record.");
+                    }
                 }
                 None => {
                     let for_symbol = ledger.iter().filter(|a| a.symbol_path == symbol).count();
