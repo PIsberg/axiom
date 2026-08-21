@@ -1809,3 +1809,85 @@ async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> 
 
     Ok(())
 }
+
+/// Requiring a signer must not accept a record that has no signer.
+///
+/// Anyone can write an unsigned record: the seal is a digest over public inputs,
+/// so producing one takes no key at all. An attacker who can write the ledger
+/// therefore only needs `axiom attest` with no key configured to manufacture a
+/// record for a symbol and prompt nobody ever checked. Treating "no signature"
+/// as good enough when a signer was demanded lets that straight through the
+/// check meant to stop it, which is the downgrade this pins shut.
+#[tokio::test]
+async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_downgrade_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let ledger = temp_dir.join("attestations.json");
+
+    let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
+
+    let make = |symbol: &str, prompt: &str| {
+        axiom_proto::ProvenanceAttestation::generate(
+            "root_parent",
+            "root_commit",
+            "agent_axiom_v1",
+            prompt,
+            symbol,
+            "task_1",
+            "reported",
+            "cargo test",
+        )
+    };
+
+    // What an attacker with no key can produce: a well-formed, unsigned record.
+    let forged = make("src/lib.rs::payload", "ship the backdoor");
+    assert!(
+        forged.verify("src/lib.rs::payload", "ship the backdoor"),
+        "the seal is computable without a key, which is exactly the problem"
+    );
+    assert!(forged.signature.is_empty());
+    axiom_core::mcp::append_attestation_to(&ledger, &forged)?;
+
+    // And a genuine signed one for something else.
+    let mut genuine = make("src/lib.rs::validate_token", "tighten the guard");
+    genuine
+        .sign_with("src/lib.rs::validate_token", "tighten the guard", &private_hex)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    axiom_core::mcp::append_attestation_to(&ledger, &genuine)?;
+
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(stored.len(), 2);
+
+    // The rule verify applies: with a signer required, a record counts only if
+    // it is signed by that signer.
+    let satisfies = |symbol: &str, prompt: &str, want: &str| {
+        stored.iter().any(|a| {
+            a.verify(symbol, prompt)
+                && !a.signature.is_empty()
+                && a.public_key == want
+                && axiom_proto::signing::verify(a, symbol, prompt).is_ok()
+        })
+    };
+
+    assert!(
+        !satisfies("src/lib.rs::payload", "ship the backdoor", &public_hex),
+        "an unsigned forgery must not satisfy a check that named its expected signer"
+    );
+    assert!(
+        satisfies("src/lib.rs::validate_token", "tighten the guard", &public_hex),
+        "the genuine signed record must still satisfy it"
+    );
+
+    // A different signer does not satisfy it either.
+    let (_, other_public) = axiom_proto::signing::generate_keypair();
+    assert!(
+        !satisfies("src/lib.rs::validate_token", "tighten the guard", &other_public),
+        "a record signed by one key must not satisfy a check demanding another"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

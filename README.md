@@ -305,9 +305,15 @@ reports "signed, key not anchored" unless you name one:
 axiom verify --symbol "auth::service::validate_token"              --prompt "Tighten the guard"              --trusted-key ~/.config/axiom/agent.pub
 ```
 
-A record signed by a different key, or altered since it was written, exits
-non-zero and says which. With no key configured, records are still written and
-still tamper-evident; they are simply anonymous, and `verify` says so.
+A record signed by a different key, altered since it was written, or carrying no
+signature at all exits non-zero and says which. That last case matters: producing
+an unsigned record takes no key, since the seal is a digest over public inputs,
+so anyone able to write the ledger can manufacture one. Accepting it when a
+signer was demanded would defeat the check, so naming `--trusted-key` means a
+record must be signed by that key to count.
+
+With no key configured, records are still written and still tamper-evident; they
+are anonymous, and `verify` says so rather than implying more.
 
 None of this is a reproducible-build attestation. It does not rebuild anything or
 establish that a build was hermetic.

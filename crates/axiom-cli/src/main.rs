@@ -421,80 +421,108 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            match ledger.iter().find(|a| a.verify(&symbol, &prompt)) {
-                Some(a) => {
-                    // Resolve the anchor first: a signature checked against the
-                    // key the record itself carries says only that the two match.
-                    // Whether that key is one to trust is a separate question,
-                    // and the answer has to come from outside the record.
-                    let expected = trusted_key.as_ref().map(|k| {
-                        std::fs::read_to_string(k)
-                            .map(|c| c.trim().to_string())
-                            .unwrap_or_else(|_| k.trim().to_string())
+            // Resolve the anchor before choosing a record, because which
+            // record counts depends on it.
+            let expected = trusted_key.as_ref().map(|k| {
+                std::fs::read_to_string(k)
+                    .map(|c| c.trim().to_string())
+                    .unwrap_or_else(|_| k.trim().to_string())
+            });
+
+            let matching: Vec<&axiom_proto::ProvenanceAttestation> =
+                ledger.iter().filter(|a| a.verify(&symbol, &prompt)).collect();
+
+            if matching.is_empty() {
+                let for_symbol = ledger.iter().filter(|a| a.symbol_path == symbol).count();
+                if for_symbol == 0 {
+                    println!("❌ NO ATTESTATION: no record has been issued for this symbol.");
+                } else {
+                    println!(
+                        "❌ NO MATCH: {for_symbol} record(s) exist for this symbol, none for this prompt."
+                    );
+                }
+                std::process::exit(1);
+            }
+
+            // With a signer required, only a record signed by that signer counts.
+            // Accepting an unsigned one here would undo the requirement: anybody
+            // can write an unsigned record, so treating "no signature" as good
+            // enough lets a forgery through the very check meant to stop it.
+            let chosen = match &expected {
+                Some(want) => {
+                    let signed_by_expected = matching.iter().find(|a| {
+                        !a.signature.is_empty()
+                            && &a.public_key == want
+                            && axiom_proto::signing::verify(a, &symbol, &prompt).is_ok()
                     });
-
-                    let signature_state = if a.signature.is_empty() {
-                        "unsigned".to_string()
-                    } else {
-                        match axiom_proto::signing::verify(a, &symbol, &prompt) {
-                            Ok(()) => match &expected {
-                                Some(want) if want == &a.public_key => "signed by the expected key".to_string(),
-                                Some(_) => {
-                                    println!("❌ SIGNED BY A DIFFERENT KEY than the one required.");
-                                    println!("   record key  {}", axiom_proto::signing::fingerprint(&a.public_key));
-                                    std::process::exit(1);
-                                }
-                                None => "signed, key not anchored".to_string(),
-                            },
-                            Err(e) => {
-                                println!("❌ SIGNATURE INVALID: {e}");
-                                std::process::exit(1);
+                    match signed_by_expected {
+                        Some(a) => *a,
+                        None => {
+                            let unsigned = matching.iter().filter(|a| a.signature.is_empty()).count();
+                            let other_signers = matching.len() - unsigned;
+                            println!("❌ NOT SIGNED BY THE REQUIRED KEY.");
+                            println!("   required signer   {}", axiom_proto::signing::fingerprint(want));
+                            if unsigned > 0 {
+                                println!("   {unsigned} matching record(s) carry no signature at all.");
                             }
+                            for a in matching.iter().filter(|a| !a.signature.is_empty()) {
+                                println!("   record signed by  {}", axiom_proto::signing::fingerprint(&a.public_key));
+                            }
+                            if other_signers == 0 && unsigned > 0 {
+                                println!();
+                                println!("   An unsigned record proves nothing about who wrote it, so it cannot");
+                                println!("   satisfy a check that named the signer it expects.");
+                            }
+                            std::process::exit(1);
                         }
-                    };
-
-                    println!("✅ ATTESTATION VALID");
-                    println!("   Symbol:        {}", a.symbol_path);
-                    println!("   Checked by:    {} ({})", a.verified_by, a.verification_detail);
-                    println!("   Task:          {}", a.ctop_proof_hash);
-                    println!("   Issued:        {}", a.timestamp);
-                    println!("   Seal:          {}", a.seal);
-                    println!("   Signature:     {}", signature_state);
-                    if !a.public_key.is_empty() {
-                        println!("   Signer:        {}", axiom_proto::signing::fingerprint(&a.public_key));
-                    }
-                    println!("   (BLAKE3 integrity tag over the record, not a signature: it shows the
-    record is unaltered, not who issued it.)");
-                    if a.signature.is_empty() {
-                        println!();
-                        println!("   No signing key was configured when this record was written, so it");
-                        println!("   shows only that the record is unaltered, not who issued it.");
-                        println!("   Run `axiom keygen` and set AXIOM_SIGNING_KEY_FILE to sign records.");
-                    } else if expected.is_none() {
-                        println!();
-                        println!("   The signature matches the key inside the record, which shows the two");
-                        println!("   agree and nothing more. Pass --trusted-key to require a signer you");
-                        println!("   already know.");
-                    }
-
-                    if a.verified_by == "reported" {
-                        println!();
-                        println!("   Axiom did not run this check. The outcome above was reported by");
-                        println!("   the agent that asked for the record.");
                     }
                 }
-                None => {
-                    let for_symbol = ledger.iter().filter(|a| a.symbol_path == symbol).count();
-                    if for_symbol == 0 {
-                        println!("❌ NO ATTESTATION: no seal has been issued for this symbol.");
-                    } else {
-                        println!(
-                            "❌ ATTESTATION INVALID: {} seal(s) exist for this symbol, none matches this prompt.",
-                            for_symbol
-                        );
+                None => matching[0],
+            };
+
+            let signature_state = if chosen.signature.is_empty() {
+                "unsigned".to_string()
+            } else {
+                match axiom_proto::signing::verify(chosen, &symbol, &prompt) {
+                    Ok(()) if expected.is_some() => "signed by the expected key".to_string(),
+                    Ok(()) => "signed, key not anchored".to_string(),
+                    Err(e) => {
+                        println!("❌ SIGNATURE INVALID: {e}");
+                        std::process::exit(1);
                     }
-                    std::process::exit(1);
                 }
+            };
+
+            println!("✅ ATTESTATION VALID");
+            println!("   Symbol:        {}", chosen.symbol_path);
+            println!("   Checked by:    {} ({})", chosen.verified_by, chosen.verification_detail);
+            println!("   Task:          {}", chosen.ctop_proof_hash);
+            println!("   Issued:        {}", chosen.timestamp);
+            println!("   Seal:          {}", chosen.seal);
+            println!("   Signature:     {}", signature_state);
+            if !chosen.public_key.is_empty() {
+                println!("   Signer:        {}", axiom_proto::signing::fingerprint(&chosen.public_key));
+            }
+            println!("   (BLAKE3 integrity tag over the record, not a signature: it shows the");
+            println!("    record is unaltered, not who issued it.)");
+
+            if chosen.signature.is_empty() {
+                println!();
+                println!("   No signing key was configured when this record was written, so it");
+                println!("   shows only that the record is unaltered, not who issued it. Anyone");
+                println!("   able to write the ledger could have added it. Run `axiom keygen`,");
+                println!("   set AXIOM_SIGNING_KEY_FILE, and verify with --trusted-key.");
+            } else if expected.is_none() {
+                println!();
+                println!("   The signature matches the key inside the record, which shows the two");
+                println!("   agree and nothing more. Pass --trusted-key to require a signer you");
+                println!("   already know.");
+            }
+
+            if chosen.verified_by == "reported" {
+                println!();
+                println!("   Axiom did not run this check. The outcome above was reported by");
+                println!("   the agent that asked for the record.");
             }
         }
 
