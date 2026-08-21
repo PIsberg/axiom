@@ -95,10 +95,7 @@ impl IndexLock {
                 // Creating the lock can hit the same transient sharing
                 // violation the rename does, when another agent is replacing
                 // the file this lock guards. Transient means retry, not fail.
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::PermissionDenied
-                        && start.elapsed() < Self::GIVE_UP_AFTER =>
-                {
+                Err(e) if worth_retrying(&e) && start.elapsed() < Self::GIVE_UP_AFTER => {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(e) => return Err(e),
@@ -118,6 +115,26 @@ impl Drop for IndexLock {
             }
             _ => {}
         }
+    }
+}
+
+/// Whether a filesystem error is worth trying again.
+///
+/// On Windows, replacing or creating a file another process holds open fails
+/// with a sharing violation that surfaces as PermissionDenied, and it clears as
+/// soon as that handle closes. On Unix there is no such rule: a rename succeeds
+/// with readers attached, and EACCES means the directory is not writable, which
+/// waiting will not change. Retrying it there converts an immediate, accurate
+/// error into a long pause followed by the same error.
+///
+/// Everything else is treated as final on both. A cross-device rename or a full
+/// disk will not start working within five seconds, and pretending otherwise
+/// only delays the report.
+fn worth_retrying(e: &std::io::Error) -> bool {
+    match e.kind() {
+        std::io::ErrorKind::Interrupted => true,
+        std::io::ErrorKind::PermissionDenied => cfg!(windows),
+        _ => false,
     }
 }
 
@@ -145,7 +162,7 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     loop {
         match std::fs::rename(&tmp, path) {
             Ok(()) => return Ok(()),
-            Err(e) if std::time::Instant::now() < deadline => {
+            Err(e) if worth_retrying(&e) && std::time::Instant::now() < deadline => {
                 std::thread::sleep(wait);
                 // Back off, but stay well below the deadline so a contended file
                 // still gets many attempts.

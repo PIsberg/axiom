@@ -126,6 +126,21 @@ scan-then-query test passes with persistence completely broken.
 apart when reading output. `test_e2e_dynamic_merkle_root_uniqueness` pins that the root actually
 varies with scanned content.
 
+**Retries are for errors that can clear, and the set differs by platform.**
+Windows fails a rename or an exclusive create with a sharing violation while
+another process holds the file open, surfacing as `PermissionDenied`, and it
+clears when that handle closes. Unix has no such rule: a rename succeeds with
+readers attached, and `EACCES` means the directory is not writable, which waiting
+will not change. `worth_retrying` in `axiom-ast` encodes that difference, and
+everything outside it is treated as final. Retrying a full disk or a
+cross-device rename only delays an accurate error, and retrying `EACCES` on Unix
+turns an immediate report into a thirty-second pause followed by the same report.
+
+**All measurement in this repository so far is from Windows.** The concurrency
+numbers quoted in commit messages, and the sharing-violation behaviour the retry
+loops exist for, were observed there. The retries are written to be correct on
+Unix rather than merely harmless, but that has been reasoned rather than run.
+
 ## Repository state
 
 There is no git repository here (`git status` fails) and no CI. `cargo test` is the only gate, so it

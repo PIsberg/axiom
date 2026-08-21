@@ -2185,3 +2185,63 @@ async fn test_e2e_writes_survive_a_reader_holding_the_file_open() -> Result<()> 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// An error that cannot clear must be reported at once, not waited out.
+///
+/// The retry loops added for Windows sharing violations originally retried every
+/// error. A rename that fails because the disk is full, or a lock that cannot be
+/// created because the directory is read-only, will not start working within the
+/// deadline, so retrying turns an immediate and accurate error into a long pause
+/// followed by the same error. On Unix that is exactly what EACCES means, and
+/// waiting thirty seconds per operation to be told a directory is not writable
+/// is worse than being told straight away.
+#[tokio::test]
+async fn test_e2e_unrecoverable_write_errors_are_not_waited_out() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_fastfail_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // A target whose parent does not exist can never be written, whatever the
+    // platform, so it stands in for the class of error that will not clear.
+    let impossible = temp_dir.join("no").join("such").join("dir").join("records.json");
+
+    let started = std::time::Instant::now();
+    let result = axiom_ast::write_atomically(&impossible, b"[1]");
+    let elapsed = started.elapsed();
+
+    assert!(result.is_err(), "writing into a missing directory must fail");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "a permanent error must be reported at once, not retried to the deadline; took {elapsed:?}"
+    );
+
+    // The same for the lock, though it takes a different impossible path:
+    // acquiring creates the directory it needs, by design, so a missing parent
+    // is not an error there. Nesting under a regular file is one that cannot be
+    // resolved by creating anything.
+    let blocker = temp_dir.join("a-file-not-a-directory");
+    std::fs::write(&blocker, b"x")?;
+    let under_a_file = blocker.join("nested").join("records.json");
+
+    let started = std::time::Instant::now();
+    let locked = axiom_ast::IndexLock::acquire(&under_a_file);
+    let elapsed = started.elapsed();
+
+    assert!(locked.is_err(), "locking beneath a regular file must fail");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "and must fail promptly; took {elapsed:?}"
+    );
+
+    // A write that can succeed still does, so the guard has not made the retry
+    // useless.
+    let fine = temp_dir.join("records.json");
+    axiom_ast::write_atomically(&fine, b"[1,2]")?;
+    assert_eq!(std::fs::read_to_string(&fine)?, "[1,2]");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
