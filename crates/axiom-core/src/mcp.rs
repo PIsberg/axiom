@@ -76,11 +76,25 @@ fn read_json_settling(path: &std::path::Path) -> Option<String> {
         .filter(|r| !r.trim().is_empty())
 }
 
-/// Append one attestation to the ledger.
+/// Append one attestation to the ledger, refusing any record that does not
+/// chain onto the current tail.
 pub fn append_attestation(attestation: &ProvenanceAttestation) -> Result<()> {
     append_attestation_to(&attestation_ledger_path(), attestation)
 }
 
+/// Append one attestation, refusing any record that does not chain onto the
+/// current tail of `path`.
+///
+/// The check is not a formality. `seal` is a digest *over* `previous_seal`, so
+/// a record cannot be re-linked after it is generated: fixing up the field
+/// would invalidate the seal and any signature covering it. The link therefore
+/// has to be chosen when the record is built, and the only way to choose it
+/// correctly is to read the tail under the same lock that will do the write.
+///
+/// Appending a record built against a different tail leaves a ledger that
+/// `verify_chain` rejects from then on, and nothing about the failure points
+/// back at the append that caused it. Refusing here turns that silent, permanent
+/// corruption into an error at the call that is wrong.
 pub fn append_attestation_to(
     path: &std::path::Path,
     attestation: &ProvenanceAttestation,
@@ -90,7 +104,44 @@ pub fn append_attestation_to(
     }
 
     // Read-modify-write, so two agents appending at once would otherwise drop
-    // one of the records. The lock makes the sequence atomic.
+    // one of the records. The lock makes the sequence atomic, and it has to
+    // cover the link check too: a tail read before the lock can be stale by the
+    // time the write happens.
+    let _lock = axiom_ast::IndexLock::acquire(path)?;
+    let mut all = load_attestations_from(path).unwrap_or_default();
+
+    let tail = all.last().map(|a| a.seal.as_str()).unwrap_or("");
+    if attestation.previous_seal != tail {
+        anyhow::bail!(
+            "this record does not chain onto the ledger: it names predecessor {},              but the ledger currently ends at {}. Build the record against the tail              read under the ledger lock; the seal covers previous_seal, so it cannot              be corrected afterwards.",
+            if attestation.previous_seal.is_empty() {
+                "(none)"
+            } else {
+                &attestation.previous_seal
+            },
+            if tail.is_empty() { "(empty)" } else { tail },
+        );
+    }
+
+    all.push(attestation.clone());
+    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
+    Ok(())
+}
+
+/// Append a record without checking that it chains, for tests that need to put
+/// a ledger into a state a correct caller could not produce.
+///
+/// Real tampering happens by writing the file, not by calling this crate, so a
+/// test that simulates an attacker has to be able to bypass the check the same
+/// way an attacker does.
+#[doc(hidden)]
+pub fn append_attestation_unlinked_to(
+    path: &std::path::Path,
+    attestation: &ProvenanceAttestation,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let _lock = axiom_ast::IndexLock::acquire(path)?;
     let mut all = load_attestations_from(path).unwrap_or_default();
     all.push(attestation.clone());

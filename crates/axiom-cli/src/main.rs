@@ -10,6 +10,7 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(
     name = "axiom",
+    version,
     about = "AXIOM: Agent-Native Autonomous Software Engine"
 )]
 struct Cli {
@@ -73,13 +74,13 @@ enum Commands {
     },
     /// Launch real-time Terminal UI Dashboard displaying Swarm and Engine metrics
     Dashboard,
-    /// Watch filesystem for live incremental AST Merkle updates
     /// Generate an Ed25519 keypair for signing provenance records
     Keygen {
         /// Where to write the private key. Keep it outside the workspace.
         #[arg(long)]
         out: String,
     },
+    /// Watch the filesystem and re-index symbols as files change
     Watch {
         #[arg(short, long, default_value = ".")]
         path: String,

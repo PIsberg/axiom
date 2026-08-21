@@ -2297,7 +2297,9 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
         "the seal is computable without a key, which is exactly the problem"
     );
     assert!(forged.signature.is_empty());
-    axiom_core::mcp::append_attestation_to(&ledger, &forged)?;
+    // Written unlinked on purpose: an attacker edits the file, they do not call
+    // the append helper, so the chain check that helper enforces is not in their way.
+    axiom_core::mcp::append_attestation_unlinked_to(&ledger, &forged)?;
 
     // And a genuine signed one for something else.
     let mut genuine = make("src/lib.rs::validate_token", "tighten the guard");
@@ -2308,7 +2310,9 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
             &private_hex,
         )
         .map_err(|e| anyhow::anyhow!(e))?;
-    axiom_core::mcp::append_attestation_to(&ledger, &genuine)?;
+    // Also unlinked: this ledger is deliberately in a state a correct caller
+    // could not produce, which is the point of the test.
+    axiom_core::mcp::append_attestation_unlinked_to(&ledger, &genuine)?;
 
     let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
     assert_eq!(stored.len(), 2);
@@ -2839,4 +2843,171 @@ async fn test_e2e_deeper_dependents_are_surveyed_without_widening_the_answer() -
     );
 
     Ok(())
+}
+
+/// Appending a record built against a stale tail must be refused, not stored.
+///
+/// `seal` is a digest over `previous_seal`, so a mislinked record cannot be
+/// repaired after the fact: correcting the field would invalidate the seal.
+/// Storing it would leave a ledger that `verify_chain` rejects from then on,
+/// with nothing to say which append broke it.
+#[test]
+fn test_append_refuses_a_record_that_does_not_chain() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_chain_guard_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let ledger = temp_dir.join("attestations.json");
+
+    let build = |previous_seal: &str, prompt: &str| {
+        axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+            parent_merkle_root: "root_parent",
+            commit_merkle_root: "root_commit",
+            agent_identity: "agent_axiom_v1",
+            prompt,
+            symbol_path: "src/lib.rs::validate_token",
+            ctop_task_id: "task_1",
+            verified_by: "reported",
+            verification_detail: "cargo test",
+            previous_seal,
+        })
+    };
+
+    // First record links to nothing, which is what an empty ledger requires.
+    let first = build("", "tighten the guard");
+    axiom_core::mcp::append_attestation_to(&ledger, &first)?;
+
+    // A second record built as though the ledger were still empty. This is the
+    // shape a caller produces by reading the tail before taking the lock, or by
+    // not reading it at all.
+    let stale = build("", "widen the guard");
+    let refused = axiom_core::mcp::append_attestation_to(&ledger, &stale);
+    assert!(
+        refused.is_err(),
+        "a record naming the wrong predecessor must be refused"
+    );
+    let message = refused.unwrap_err().to_string();
+    assert!(
+        message.contains("does not chain"),
+        "the error should say the record does not chain, got: {message}"
+    );
+
+    // The refusal must not have written anything.
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(
+        stored.len(),
+        1,
+        "a refused append must leave the ledger untouched"
+    );
+    assert!(
+        axiom_proto::verify_chain(&stored).is_ok(),
+        "the ledger must still verify after a refused append"
+    );
+
+    // Built against the real tail, the same record is accepted.
+    let linked = build(&first.seal, "widen the guard");
+    axiom_core::mcp::append_attestation_to(&ledger, &linked)?;
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(stored.len(), 2);
+    assert!(
+        axiom_proto::verify_chain(&stored).is_ok(),
+        "two correctly linked records must verify as a chain"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(())
+}
+
+/// Many threads appending at once must produce one chain, not a fork.
+///
+/// Each thread reads the tail and appends under the ledger lock. If the link
+/// were chosen outside the lock, two threads would read the same tail, both
+/// name it as predecessor, and the ledger would fork; `verify_chain` catches
+/// that, because the second of the pair names a predecessor that is no longer
+/// the record before it.
+#[test]
+fn test_concurrent_appends_produce_one_unbroken_chain() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_chain_race_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let ledger = temp_dir.join("attestations.json");
+
+    const AGENTS: usize = 12;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(AGENTS));
+    let mut handles = Vec::new();
+
+    for agent in 0..AGENTS {
+        let ledger = ledger.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || -> Result<()> {
+            barrier.wait();
+            // No retry loop: the lock covers reading the tail, building the
+            // record against it and writing, so an agent that holds it cannot
+            // lose the race. That is the property under test — take the read
+            // outside the lock and every agent links to the same predecessor.
+            {
+                let lock = axiom_ast::IndexLock::acquire(&ledger)?;
+                let existing = axiom_core::mcp::load_attestations_from(&ledger)?;
+                let tail = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
+                let record =
+                    axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+                        parent_merkle_root: "root_parent",
+                        commit_merkle_root: "root_commit",
+                        agent_identity: "agent_axiom_v1",
+                        prompt: "concurrent work",
+                        symbol_path: "src/lib.rs::validate_token",
+                        ctop_task_id: "task_1",
+                        verified_by: "reported",
+                        verification_detail: "cargo test",
+                        previous_seal: &tail,
+                    });
+                let mut all = existing;
+                all.push(record);
+                axiom_ast::write_atomically(
+                    &ledger,
+                    serde_json::to_string_pretty(&all)?.as_bytes(),
+                )?;
+                drop(lock);
+            }
+            let _ = agent;
+            Ok(())
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("agent thread panicked")?;
+    }
+
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(
+        stored.len(),
+        AGENTS,
+        "every agent's record must survive; {} of {AGENTS} did",
+        stored.len()
+    );
+    verify_chain_or_report(&stored);
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(())
+}
+
+fn verify_chain_or_report(stored: &[axiom_proto::ProvenanceAttestation]) {
+    if let Err(e) = axiom_proto::verify_chain(stored) {
+        let links: Vec<String> = stored
+            .iter()
+            .enumerate()
+            .map(|(i, a)| format!("  {i}: seal={} prev={}", a.seal, a.previous_seal))
+            .collect();
+        panic!(
+            "concurrent appends forked the chain: {e}\nledger was:\n{}",
+            links.join("\n")
+        );
+    }
 }
