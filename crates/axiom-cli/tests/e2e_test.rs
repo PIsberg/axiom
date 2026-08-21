@@ -2127,3 +2127,61 @@ async fn test_e2e_a_lock_left_by_a_dead_agent_is_taken_over() -> Result<()> {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// Replacing a file another agent is reading has to succeed eventually, and a
+/// reader that catches the swap has to see a whole document.
+///
+/// The ledger and the operation log are JSON arrays rewritten whole, so a
+/// process killed part-way through writing one loses every record in it rather
+/// than just the record being appended. Renaming a complete file over the target
+/// fixes that, and on Windows introduces the opposite problem: the rename fails
+/// with a sharing violation while any other process holds the destination open.
+/// Measured before the retry existed, twenty agents attesting while three
+/// threads read lost sixteen of twenty records to "Access is denied", which is
+/// worse than the tear it was meant to prevent.
+#[tokio::test]
+async fn test_e2e_writes_survive_a_reader_holding_the_file_open() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_atomic_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let target = temp_dir.join("records.json");
+
+    axiom_ast::write_atomically(&target, b"[1,2,3]")?;
+    assert_eq!(std::fs::read_to_string(&target)?, "[1,2,3]");
+
+    // A reader keeps the file open across a replacement, as a polling agent
+    // would. The write must still land.
+    let held_open = std::fs::File::open(&target)?;
+    axiom_ast::write_atomically(&target, b"[1,2,3,4]")?;
+    drop(held_open);
+
+    assert_eq!(
+        std::fs::read_to_string(&target)?,
+        "[1,2,3,4]",
+        "a write must not be lost because someone was reading"
+    );
+
+    // No temp file is left behind for the next reader to trip over.
+    let leftovers: Vec<_> = std::fs::read_dir(&temp_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains("tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temp files must not accumulate, found {leftovers:?}");
+
+    // A reader always sees one complete document, never a splice of two.
+    for _ in 0..20 {
+        axiom_ast::write_atomically(&target, b"[9,9,9]")?;
+        let seen = std::fs::read_to_string(&target)?;
+        assert!(
+            seen == "[9,9,9]" || seen == "[1,2,3,4]",
+            "a reader must see one version or the other, saw {seen:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

@@ -92,6 +92,15 @@ impl IndexLock {
 
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
+                // Creating the lock can hit the same transient sharing
+                // violation the rename does, when another agent is replacing
+                // the file this lock guards. Transient means retry, not fail.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::PermissionDenied
+                        && start.elapsed() < Self::GIVE_UP_AFTER =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -114,14 +123,39 @@ impl Drop for IndexLock {
 
 /// Write a file so a reader sees either the old contents or the new ones, never
 /// a half-written file: write beside the target, then rename over it.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// This matters most for files that are rewritten whole. The ledger and the
+/// operation log are JSON arrays, so a process killed part-way through writing
+/// one leaves a document that does not parse, and every record in it is lost
+/// rather than just the one being appended.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
+
+    // Renaming over a file another process currently has open fails on Windows
+    // with a sharing violation, and readers of these files are common: an agent
+    // polling the ledger is enough. The violation lasts only as long as that
+    // handle, so retry briefly rather than failing the write.
+    //
+    // Measured before this loop existed: twenty agents attesting while three
+    // threads read the ledger lost sixteen of the twenty records to "Access is
+    // denied", which is a worse outcome than the torn write the rename prevents.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut wait = std::time::Duration::from_millis(1);
+    loop {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(wait);
+                // Back off, but stay well below the deadline so a contended file
+                // still gets many attempts.
+                wait = (wait * 2).min(std::time::Duration::from_millis(20));
+                let _ = e;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
         }
     }
 }

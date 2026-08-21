@@ -42,14 +42,36 @@ pub fn load_attestations() -> Result<Vec<ProvenanceAttestation>> {
 /// As above, from an explicit ledger. Kept separate so a caller that must not
 /// touch the working directory, a test above all, can point somewhere else.
 pub fn load_attestations_from(path: &std::path::Path) -> Result<Vec<ProvenanceAttestation>> {
-    if !path.exists() {
-        return Ok(Vec::new());
+    match read_json_settling(path) {
+        Some(raw) => Ok(serde_json::from_str(&raw)?),
+        None => Ok(Vec::new()),
     }
-    let raw = std::fs::read_to_string(path)?;
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
+}
+
+/// Read a file that another agent may be replacing as we look at it.
+///
+/// Writers rename a complete file over the target, so a reader either sees the
+/// old contents or the new ones. A reader that catches the moment in between
+/// still gets a document that does not parse, and readers here do not hold the
+/// lock: `verify` and startup both read without one. Retrying briefly turns that
+/// into the next consistent state rather than an error.
+///
+/// Returns None when there is nothing to read, which is different from a read
+/// that failed.
+fn read_json_settling(path: &std::path::Path) -> Option<String> {
+    for attempt in 0..5 {
+        if !path.exists() {
+            return None;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(raw) if raw.trim().is_empty() => return None,
+            Ok(raw) if serde_json::from_str::<serde_json::Value>(&raw).is_ok() => return Some(raw),
+            _ => std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1))),
+        }
     }
-    Ok(serde_json::from_str(&raw)?)
+    // Give the caller the last read so a genuinely malformed file still reports
+    // as malformed rather than as absent.
+    std::fs::read_to_string(path).ok().filter(|r| !r.trim().is_empty())
 }
 
 /// Append one attestation to the ledger.
@@ -70,7 +92,7 @@ pub fn append_attestation_to(
     let _lock = axiom_ast::IndexLock::acquire(path)?;
     let mut all = load_attestations_from(path).unwrap_or_default();
     all.push(attestation.clone());
-    std::fs::write(path, serde_json::to_string_pretty(&all)?)?;
+    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
     Ok(())
 }
 
@@ -130,9 +152,9 @@ pub fn crdt_op_log_path() -> PathBuf {
 
 /// Every operation recorded so far. A missing log is an empty one.
 pub fn load_crdt_ops(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw).unwrap_or_default(),
-        _ => Vec::new(),
+    match read_json_settling(path) {
+        Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        None => Vec::new(),
     }
 }
 
@@ -155,7 +177,7 @@ pub fn append_crdt_op(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result
     let _lock = axiom_ast::IndexLock::acquire(path)?;
     let mut all = load_crdt_ops(path);
     all.push(op.clone());
-    std::fs::write(path, serde_json::to_string_pretty(&all)?)?;
+    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
     Ok(())
 }
 
@@ -617,7 +639,7 @@ impl AxiomMcpServer {
                 if let Some(parent) = ledger_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if let Err(e) = std::fs::write(&ledger_path, encoded) {
+                if let Err(e) = axiom_ast::write_atomically(&ledger_path, encoded.as_bytes()) {
                     return Ok(json!({
                         "error": format!("could not record the attestation: {e}")
                     }));
