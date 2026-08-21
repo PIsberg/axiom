@@ -4,8 +4,13 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 fn extract_tool_result(resp: &JsonRpcResponse) -> Value {
-    let res = resp.result.as_ref().expect("Expected result in JsonRpcResponse");
-    let text = res["content"][0]["text"].as_str().expect("Expected text in content");
+    let res = resp
+        .result
+        .as_ref()
+        .expect("Expected result in JsonRpcResponse");
+    let text = res["content"][0]["text"]
+        .as_str()
+        .expect("Expected text in content");
     serde_json::from_str(text).expect("Expected valid json in content text")
 }
 
@@ -34,7 +39,9 @@ async fn test_e2e_agent_full_loop_over_mcp() -> Result<()> {
     };
     let list_resp = server.handle_request(list_req).await;
     let list_result = list_resp.result.expect("Expected tools list");
-    let tools = list_result["tools"].as_array().expect("Expected tools array");
+    let tools = list_result["tools"]
+        .as_array()
+        .expect("Expected tools array");
     assert!(tools.iter().any(|t| t["name"] == "axiom_query_symbol"));
     assert!(tools.iter().any(|t| t["name"] == "axiom_get_blast_radius"));
     assert!(tools.iter().any(|t| t["name"] == "axiom_eval_patch"));
@@ -43,8 +50,18 @@ async fn test_e2e_agent_full_loop_over_mcp() -> Result<()> {
     assert!(tools.iter().any(|t| t["name"] == "axiom_search_regex"));
 
     // 4. Create realistic multi-language repository workspace
-    let temp_root = std::env::temp_dir().join(format!("axiom_e2e_{:x}", std::time::Instant::now().elapsed().as_nanos()));
-    let java_pkg = temp_root.join("src").join("main").join("java").join("se").join("deversity").join("asynctest").join("runner");
+    let temp_root = std::env::temp_dir().join(format!(
+        "axiom_e2e_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let java_pkg = temp_root
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("runner");
     let rust_pkg = temp_root.join("crates").join("auth-lib").join("src");
     std::fs::create_dir_all(&java_pkg)?;
     std::fs::create_dir_all(&rust_pkg)?;
@@ -104,7 +121,10 @@ fn test_token_validation() {
 
     // Verify Merkle Root is dynamically calculated
     let root = server.ast_index.compute_merkle_root();
-    assert_ne!(root, "0000000000000000000000000000000000000000000000000000000000000000");
+    assert_ne!(
+        root,
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    );
 
     // 6. Query Java symbol
     let query_req = JsonRpcRequest {
@@ -139,8 +159,14 @@ fn test_token_validation() {
     };
     let search_resp = server.handle_request(search_req).await;
     let search_result = extract_tool_result(&search_resp);
-    let count = search_result.get("matches_count").and_then(|v| v.as_u64()).unwrap_or(0);
-    assert!(count >= 2, "Expected matches in ConcurrencyRunner.java and ConcurrencyRunnerTest.java");
+    let count = search_result
+        .get("matches_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert!(
+        count >= 2,
+        "Expected matches in ConcurrencyRunner.java and ConcurrencyRunnerTest.java"
+    );
 
     // 8. Probe syntax error -> Must return COMPILATION_ERROR
     let syntax_err_req = JsonRpcRequest {
@@ -157,8 +183,16 @@ fn test_token_validation() {
     };
     let syntax_err_resp = server.handle_request(syntax_err_req).await;
     let syntax_err_res = extract_tool_result(&syntax_err_resp);
-    assert_eq!(syntax_err_res.get("status").and_then(|v| v.as_str()), Some("COMPILATION_ERROR"));
-    assert_eq!(syntax_err_res.get("passed_checks_count").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(
+        syntax_err_res.get("status").and_then(|v| v.as_str()),
+        Some("COMPILATION_ERROR")
+    );
+    assert_eq!(
+        syntax_err_res
+            .get("passed_checks_count")
+            .and_then(|v| v.as_u64()),
+        Some(0)
+    );
 
     // 8b. A symbol from a language the sandbox cannot compile is named as such,
     // rather than handed to rustc so the error blames the caller's syntax.
@@ -196,7 +230,10 @@ fn test_token_validation() {
     };
     let fail_resp = server.handle_request(fail_req).await;
     let fail_res = extract_tool_result(&fail_resp);
-    assert_eq!(fail_res.get("status").and_then(|v| v.as_str()), Some("FAILED"));
+    assert_eq!(
+        fail_res.get("status").and_then(|v| v.as_str()),
+        Some("FAILED")
+    );
 
     // 10. Probe passing assertion -> Must return PASSED
     let pass_req = JsonRpcRequest {
@@ -213,7 +250,10 @@ fn test_token_validation() {
     };
     let pass_resp = server.handle_request(pass_req).await;
     let pass_res = extract_tool_result(&pass_resp);
-    assert_eq!(pass_res.get("status").and_then(|v| v.as_str()), Some("PASSED"));
+    assert_eq!(
+        pass_res.get("status").and_then(|v| v.as_str()),
+        Some("PASSED")
+    );
     // The attestation below must name this run. A made-up task id is refused,
     // because a seal that rests on a run nobody performed proves nothing.
     let passing_task = pass_res
@@ -238,8 +278,14 @@ fn test_token_validation() {
     };
     let mutate_resp = server.handle_request(mutate_req).await;
     let mutate_res = extract_tool_result(&mutate_resp);
-    assert_eq!(mutate_res.get("status").and_then(|v| v.as_str()), Some("APPLIED"));
-    let new_root = mutate_res.get("new_merkle_root").and_then(|v| v.as_str()).expect("Expected new_merkle_root");
+    assert_eq!(
+        mutate_res.get("status").and_then(|v| v.as_str()),
+        Some("APPLIED")
+    );
+    let new_root = mutate_res
+        .get("new_merkle_root")
+        .and_then(|v| v.as_str())
+        .expect("Expected new_merkle_root");
     assert!(!new_root.is_empty());
 
     // 12. Attest and seal commit cryptographically
@@ -258,7 +304,10 @@ fn test_token_validation() {
     };
     let attest_resp = server.handle_request(attest_req).await;
     let attest_res = extract_tool_result(&attest_resp);
-    let seal = attest_res.get("seal").and_then(|v| v.as_str()).expect("Expected a seal");
+    let seal = attest_res
+        .get("seal")
+        .and_then(|v| v.as_str())
+        .expect("Expected a seal");
     assert!(
         seal.starts_with("blake3_seal_"),
         "the seal is a BLAKE3 integrity tag and must not claim to be a signature; got {seal}"
@@ -272,7 +321,10 @@ fn test_token_validation() {
 
 #[tokio::test]
 async fn test_e2e_disk_persistence_cross_instance() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!("axiom_persist_{:x}", std::time::Instant::now().elapsed().as_nanos()));
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_persist_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
     let src_dir = temp_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -293,7 +345,10 @@ async fn test_e2e_disk_persistence_cross_instance() -> Result<()> {
     // Instance 2: Load directly from saved file
     let loaded_ast = axiom_ast::AstIndex::load_from_disk(&saved_path)?;
     assert!(loaded_ast.total_symbols_count() >= 2);
-    assert!(loaded_ast.get_symbol("src/calc.rs::add_numbers").is_some() || loaded_ast.get_symbol("add_numbers").is_some());
+    assert!(
+        loaded_ast.get_symbol("src/calc.rs::add_numbers").is_some()
+            || loaded_ast.get_symbol("add_numbers").is_some()
+    );
 
     // Clean up
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -319,7 +374,11 @@ async fn test_e2e_truth_preserving_assertions() -> Result<()> {
     };
     let resp1 = server.handle_request(req_fail1).await;
     let res1 = extract_tool_result(&resp1);
-    assert_eq!(res1.get("status").and_then(|v| v.as_str()), Some("FAILED"), "assert_eq!(2 + 2, 5) must be FAILED");
+    assert_eq!(
+        res1.get("status").and_then(|v| v.as_str()),
+        Some("FAILED"),
+        "assert_eq!(2 + 2, 5) must be FAILED"
+    );
 
     // 2. vector emptiness invariant violation -> MUST BE FAILED
     let req_fail2 = JsonRpcRequest {
@@ -336,7 +395,11 @@ async fn test_e2e_truth_preserving_assertions() -> Result<()> {
     };
     let resp2 = server.handle_request(req_fail2).await;
     let res2 = extract_tool_result(&resp2);
-    assert_eq!(res2.get("status").and_then(|v| v.as_str()), Some("FAILED"), "assert!(!v.is_empty()) on empty vector must be FAILED");
+    assert_eq!(
+        res2.get("status").and_then(|v| v.as_str()),
+        Some("FAILED"),
+        "assert!(!v.is_empty()) on empty vector must be FAILED"
+    );
 
     // 3. true equality -> MUST BE PASSED
     let req_pass = JsonRpcRequest {
@@ -360,9 +423,26 @@ async fn test_e2e_truth_preserving_assertions() -> Result<()> {
 
 #[tokio::test]
 async fn test_e2e_java_production_vs_test_classification() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!("axiom_java_test_class_{:x}", std::time::Instant::now().elapsed().as_nanos()));
-    let main_pkg = temp_dir.join("async-test-lib").join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
-    let test_pkg = temp_dir.join("async-test-lib").join("src").join("test").join("java").join("se").join("deversity").join("asynctest");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_java_test_class_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let main_pkg = temp_dir
+        .join("async-test-lib")
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
+    let test_pkg = temp_dir
+        .join("async-test-lib")
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
     std::fs::create_dir_all(&main_pkg)?;
     std::fs::create_dir_all(&test_pkg)?;
 
@@ -383,10 +463,18 @@ async fn test_e2e_java_production_vs_test_classification() -> Result<()> {
 
     // Assert total test count is exactly 2 (the test class and test method), not production classes
     let total_tests = ast_index.total_tests_count();
-    assert_eq!(total_tests, 2, "Only test files/methods should be classified as kind='test'");
+    assert_eq!(
+        total_tests, 2,
+        "Only test files/methods should be classified as kind='test'"
+    );
 
-    let prod_symbol = ast_index.get_symbol("se.deversity.asynctest.AsyncRunner").expect("Expected prod symbol");
-    assert_eq!(prod_symbol.kind, "class", "Production class in src/main/java must be kind='class'");
+    let prod_symbol = ast_index
+        .get_symbol("se.deversity.asynctest.AsyncRunner")
+        .expect("Expected prod symbol");
+    assert_eq!(
+        prod_symbol.kind, "class",
+        "Production class in src/main/java must be kind='class'"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
@@ -402,15 +490,35 @@ async fn test_e2e_dynamic_merkle_root_uniqueness() -> Result<()> {
     index2.index_node("auth::token", "function", "fn token() { 2 }", vec![]);
     let root2 = index2.compute_merkle_root();
 
-    assert_ne!(root1, root2, "Different AST content must yield distinct Merkle roots");
+    assert_ne!(
+        root1, root2,
+        "Different AST content must yield distinct Merkle roots"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn test_e2e_javadoc_no_hijacking_and_honest_assertion_counts() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!("axiom_javadoc_test_{:x}", std::time::Instant::now().elapsed().as_nanos()));
-    let pkg_dir = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest").join("runner");
-    let test_dir = temp_dir.join("src").join("test").join("java").join("se").join("deversity").join("asynctest").join("runner");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_javadoc_test_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let pkg_dir = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("runner");
+    let test_dir = temp_dir
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("runner");
     std::fs::create_dir_all(&pkg_dir)?;
     std::fs::create_dir_all(&test_dir)?;
 
@@ -464,23 +572,53 @@ public class ConcurrencyRunnerTest {
     ast_index.scan_directory(&temp_dir)?;
 
     // 1. Verify multiline method execute is indexed under ConcurrencyRunner
-    assert!(ast_index.get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner").is_some());
-    assert!(ast_index.get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::execute").is_some(), "Multiline execute method must be indexed");
-    assert!(ast_index.get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::resolveTimeoutMultiplier").is_some());
-    
+    assert!(ast_index
+        .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner")
+        .is_some());
+    assert!(
+        ast_index
+            .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::execute")
+            .is_some(),
+        "Multiline execute method must be indexed"
+    );
+    assert!(ast_index
+        .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::resolveTimeoutMultiplier")
+        .is_some());
+
     // 2. Verify nested interface unwrap is indexed under ContentionBarrier
-    assert!(ast_index.get_symbol("se.deversity.asynctest.runner.ContentionBarrier::unwrap").is_some());
+    assert!(ast_index
+        .get_symbol("se.deversity.asynctest.runner.ContentionBarrier::unwrap")
+        .is_some());
 
     // 3. Verify brace-depth restores ConcurrencyRunner for buildMultiFailureError (NOT ContentionBarrier::buildMultiFailureError)
-    assert!(ast_index.get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::buildMultiFailureError").is_some(), "buildMultiFailureError must be under ConcurrencyRunner");
-    assert!(ast_index.get_symbol("se.deversity.asynctest.runner.ContentionBarrier::buildMultiFailureError").is_none());
-    assert!(ast_index.get_symbol("se.deversity.asynctest.runner.Javadoc),").is_none());
+    assert!(
+        ast_index
+            .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::buildMultiFailureError")
+            .is_some(),
+        "buildMultiFailureError must be under ConcurrencyRunner"
+    );
+    assert!(ast_index
+        .get_symbol("se.deversity.asynctest.runner.ContentionBarrier::buildMultiFailureError")
+        .is_none());
+    assert!(ast_index
+        .get_symbol("se.deversity.asynctest.runner.Javadoc),")
+        .is_none());
 
     // 4. Verify Dedicated Test Reachability (even without import)
-    let br = ast_index.compute_blast_radius("se.deversity.asynctest.runner.ConcurrencyRunner", 5).expect("Expected blast radius");
+    let br = ast_index
+        .compute_blast_radius("se.deversity.asynctest.runner.ConcurrencyRunner", 5)
+        .expect("Expected blast radius");
     assert_eq!(br.total_tests_in_repo, 2); // ConcurrencyRunnerTest class and testRunExecution method
-    assert!(!br.impacted_tests.is_empty(), "Blast radius must find ConcurrencyRunnerTest");
-    assert!(br.impacted_tests.iter().any(|t| t.contains("ConcurrencyRunnerTest")), "ConcurrencyRunnerTest must be in impacted_tests");
+    assert!(
+        !br.impacted_tests.is_empty(),
+        "Blast radius must find ConcurrencyRunnerTest"
+    );
+    assert!(
+        br.impacted_tests
+            .iter()
+            .any(|t| t.contains("ConcurrencyRunnerTest")),
+        "ConcurrencyRunnerTest must be in impacted_tests"
+    );
 
     // Verify Honest Assertion Counts in execute_eval
     let server = AxiomMcpServer::new()?;
@@ -500,8 +638,17 @@ public class ConcurrencyRunnerTest {
     };
     let resp_no_assert = server.handle_request(req_no_assert).await;
     let res_no_assert = extract_tool_result(&resp_no_assert);
-    assert_eq!(res_no_assert.get("status").and_then(|v| v.as_str()), Some("PASSED"));
-    assert_eq!(res_no_assert.get("passed_checks_count").and_then(|v| v.as_u64()), Some(0), "let x = 5 must have 0 passed checks");
+    assert_eq!(
+        res_no_assert.get("status").and_then(|v| v.as_str()),
+        Some("PASSED")
+    );
+    assert_eq!(
+        res_no_assert
+            .get("passed_checks_count")
+            .and_then(|v| v.as_u64()),
+        Some(0),
+        "let x = 5 must have 0 passed checks"
+    );
 
     // 2. Real assertion (assert_eq!(9 * 9, 81);) -> passed_checks_count MUST BE 1
     let req_assert = JsonRpcRequest {
@@ -518,8 +665,17 @@ public class ConcurrencyRunnerTest {
     };
     let resp_assert = server.handle_request(req_assert).await;
     let res_assert = extract_tool_result(&resp_assert);
-    assert_eq!(res_assert.get("status").and_then(|v| v.as_str()), Some("PASSED"));
-    assert_eq!(res_assert.get("passed_checks_count").and_then(|v| v.as_u64()), Some(1), "assert_eq!(9 * 9, 81) must have 1 passed check");
+    assert_eq!(
+        res_assert.get("status").and_then(|v| v.as_str()),
+        Some("PASSED")
+    );
+    assert_eq!(
+        res_assert
+            .get("passed_checks_count")
+            .and_then(|v| v.as_u64()),
+        Some(1),
+        "assert_eq!(9 * 9, 81) must have 1 passed check"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
@@ -527,10 +683,34 @@ public class ConcurrencyRunnerTest {
 
 #[tokio::test]
 async fn test_e2e_same_package_dependencies_blast_radius() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!("axiom_same_pkg_{:x}", std::time::Instant::now().elapsed().as_nanos()));
-    let main_pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest").join("diagnostics");
-    let test_pkg = temp_dir.join("src").join("test").join("java").join("se").join("deversity").join("asynctest").join("diagnostics");
-    let unrelated_pkg = temp_dir.join("src").join("test").join("java").join("se").join("deversity").join("asynctest").join("digest");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_same_pkg_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let main_pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("diagnostics");
+    let test_pkg = temp_dir
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("diagnostics");
+    let unrelated_pkg = temp_dir
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("digest");
     std::fs::create_dir_all(&main_pkg)?;
     std::fs::create_dir_all(&test_pkg)?;
     std::fs::create_dir_all(&unrelated_pkg)?;
@@ -583,18 +763,26 @@ public class SharedMessageDigestDetectorTest {
     let ast_index = axiom_ast::AstIndex::new();
     ast_index.scan_directory(&temp_dir)?;
 
-    let br = ast_index.compute_blast_radius("se.deversity.asynctest.diagnostics.RaceConditionDetector", 5)
+    let br = ast_index
+        .compute_blast_radius(
+            "se.deversity.asynctest.diagnostics.RaceConditionDetector",
+            5,
+        )
         .expect("Expected blast radius");
 
     // Must find same-package test
     assert!(
-        br.impacted_tests.iter().any(|t| t.contains("RaceConditionDetectorTest")),
+        br.impacted_tests
+            .iter()
+            .any(|t| t.contains("RaceConditionDetectorTest")),
         "Same-package RaceConditionDetectorTest must be included in impacted_tests"
     );
 
     // Must NOT include unrelated test
     assert!(
-        !br.impacted_tests.iter().any(|t| t.contains("SharedMessageDigestDetectorTest")),
+        !br.impacted_tests
+            .iter()
+            .any(|t| t.contains("SharedMessageDigestDetectorTest")),
         "Unrelated SharedMessageDigestDetectorTest must NOT be included in impacted_tests"
     );
 
@@ -604,9 +792,26 @@ public class SharedMessageDigestDetectorTest {
 
 #[tokio::test]
 async fn test_e2e_comment_stripping_and_class_literal_dependencies() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!("axiom_comment_test_{:x}", std::time::Instant::now().elapsed().as_nanos()));
-    let main_pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest").join("runner");
-    let test_pkg = temp_dir.join("src").join("test").join("java").join("se").join("deversity").join("asynctest").join("runner");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_comment_test_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let main_pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("runner");
+    let test_pkg = temp_dir
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest")
+        .join("runner");
     std::fs::create_dir_all(&main_pkg)?;
     std::fs::create_dir_all(&test_pkg)?;
 
@@ -664,18 +869,23 @@ public class AsyncBodyRunnerTest {
     let ast_index = axiom_ast::AstIndex::new();
     ast_index.scan_directory(&temp_dir)?;
 
-    let br = ast_index.compute_blast_radius("se.deversity.asynctest.runner.ConcurrencyRunner", 1)
+    let br = ast_index
+        .compute_blast_radius("se.deversity.asynctest.runner.ConcurrencyRunner", 1)
         .expect("Expected blast radius");
 
     // MultiFailureTest (.class literal) MUST be in impacted_tests
     assert!(
-        br.impacted_tests.iter().any(|t| t.contains("MultiFailureTest")),
+        br.impacted_tests
+            .iter()
+            .any(|t| t.contains("MultiFailureTest")),
         "MultiFailureTest referencing ConcurrencyRunner.class MUST be impacted"
     );
 
     // AsyncBodyRunnerTest (comment/string only) MUST NOT be in impacted_tests
     assert!(
-        !br.impacted_tests.iter().any(|t| t.contains("AsyncBodyRunnerTest")),
+        !br.impacted_tests
+            .iter()
+            .any(|t| t.contains("AsyncBodyRunnerTest")),
         "AsyncBodyRunnerTest with comment-only mention MUST NOT be impacted"
     );
 
@@ -685,9 +895,24 @@ public class AsyncBodyRunnerTest {
 
 #[tokio::test]
 async fn test_e2e_accessor_return_type_dependency_resolution() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!("axiom_accessor_test_{:x}", std::time::Instant::now().elapsed().as_nanos()));
-    let main_pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
-    let test_pkg = temp_dir.join("src").join("test").join("java").join("se").join("deversity").join("asynctest");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_accessor_test_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let main_pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
+    let test_pkg = temp_dir
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
     std::fs::create_dir_all(&main_pkg)?;
     std::fs::create_dir_all(&test_pkg)?;
 
@@ -740,16 +965,21 @@ public class Phase1DetectorSetTest {
     let ast_index = axiom_ast::AstIndex::new();
     ast_index.scan_directory(&temp_dir)?;
 
-    let br = ast_index.compute_blast_radius("se.deversity.asynctest.RaceConditionDetector", 1)
+    let br = ast_index
+        .compute_blast_radius("se.deversity.asynctest.RaceConditionDetector", 1)
         .expect("Expected blast radius");
 
     // Phase1DetectorSetTest MUST be resolved via sharedRaceConditionDetector accessor return-type inference
     assert!(
-        br.impacted_tests.iter().any(|t| t.contains("Phase1DetectorSetTest")),
+        br.impacted_tests
+            .iter()
+            .any(|t| t.contains("Phase1DetectorSetTest")),
         "Phase1DetectorSetTest calling sharedRaceConditionDetector() must be resolved as impacted"
     );
     assert!(
-        br.direct_tests.iter().any(|t| t.contains("Phase1DetectorSetTest")),
+        br.direct_tests
+            .iter()
+            .any(|t| t.contains("Phase1DetectorSetTest")),
         "Phase1DetectorSetTest must be in direct_tests tier"
     );
 
@@ -764,8 +994,14 @@ async fn test_e2e_swarm_50_agents_concurrency() -> Result<()> {
 
     assert_eq!(report.agent_count, 50);
     assert_eq!(report.total_operations, 2000);
-    assert_eq!(report.merge_conflicts_count, 0, "Swarm must produce zero merge conflicts");
-    assert!(report.converged, "All 50 agent replicas must converge to 100% identical Merkle state");
+    assert_eq!(
+        report.merge_conflicts_count, 0,
+        "Swarm must produce zero merge conflicts"
+    );
+    assert!(
+        report.converged,
+        "All 50 agent replicas must converge to 100% identical Merkle state"
+    );
     assert!(!report.merkle_root.is_empty());
 
     Ok(())
@@ -784,8 +1020,20 @@ async fn test_e2e_accessor_resolution_survives_disk_round_trip() -> Result<()> {
         "axiom_persist_accessor_{:x}",
         std::time::Instant::now().elapsed().as_nanos()
     ));
-    let main_pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
-    let test_pkg = temp_dir.join("src").join("test").join("java").join("se").join("deversity").join("asynctest");
+    let main_pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
+    let test_pkg = temp_dir
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
     std::fs::create_dir_all(&main_pkg)?;
     std::fs::create_dir_all(&test_pkg)?;
 
@@ -847,7 +1095,9 @@ public class Phase1DetectorSetTest {
         .expect("reloaded index must still resolve the symbol");
 
     assert!(
-        br.impacted_tests.iter().any(|t| t.contains("Phase1DetectorSetTest")),
+        br.impacted_tests
+            .iter()
+            .any(|t| t.contains("Phase1DetectorSetTest")),
         "a test reaching the class only through sharedRaceConditionDetector() must survive \
          the disk round trip; got {:?}",
         br.impacted_tests
@@ -896,7 +1146,11 @@ async fn test_e2e_legacy_bare_map_index_still_loads() -> Result<()> {
     std::fs::write(&index_file, legacy)?;
 
     let loaded = axiom_ast::AstIndex::load_from_disk(&index_file)?;
-    assert_eq!(loaded.total_symbols_count(), 2, "both legacy nodes must load");
+    assert_eq!(
+        loaded.total_symbols_count(),
+        2,
+        "both legacy nodes must load"
+    );
 
     // Reverse dependencies are rebuilt from the nodes, so the plain
     // import-derived path still resolves without any side tables.
@@ -924,7 +1178,13 @@ async fn test_e2e_text_search_survives_disk_round_trip() -> Result<()> {
         "axiom_search_persist_{:x}",
         std::time::Instant::now().elapsed().as_nanos()
     ));
-    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    let pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
     std::fs::create_dir_all(&pkg)?;
 
     // "barrier.await" appears only in a statement: it is not any symbol's name,
@@ -974,7 +1234,10 @@ public class Gate {
         .search("Gate", axiom_ast::SearchMode::Literal, 10)
         .expect("search must succeed");
     for m in sym_hits.iter().filter(|m| m.match_kind == "symbol") {
-        assert_eq!(m.line_number, None, "symbol hits must not report a line number");
+        assert_eq!(
+            m.line_number, None,
+            "symbol hits must not report a line number"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -993,7 +1256,13 @@ async fn test_e2e_search_modes_are_explicit_and_honest() -> Result<()> {
         "axiom_search_modes_{:x}",
         std::time::Instant::now().elapsed().as_nanos()
     ));
-    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    let pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
     std::fs::create_dir_all(&pkg)?;
 
     // `configXthreads` exists only to be matched by `config.threads` as a regex
@@ -1016,19 +1285,28 @@ public class Knobs {
 
     let count = |q: &str, m: axiom_ast::SearchMode| -> (axiom_ast::SearchMode, usize) {
         let (applied, hits) = idx.search(q, m, 50).expect("search must succeed");
-        (applied, hits.iter().filter(|h| h.match_kind == "text").count())
+        (
+            applied,
+            hits.iter().filter(|h| h.match_kind == "text").count(),
+        )
     };
 
     // Literal is the default reading and matches the dot as a dot.
     let (applied, literal_hits) = count("config.threads", axiom_ast::SearchMode::Literal);
     assert_eq!(applied, axiom_ast::SearchMode::Literal);
-    assert_eq!(literal_hits, 1, "literal must match only the real occurrence");
+    assert_eq!(
+        literal_hits, 1,
+        "literal must match only the real occurrence"
+    );
 
     // The same query as a pattern reaches further, which is exactly why it must
     // be asked for rather than inferred.
     let (applied, regex_hits) = count("config.threads", axiom_ast::SearchMode::Regex);
     assert_eq!(applied, axiom_ast::SearchMode::Regex);
-    assert_eq!(regex_hits, 2, "as a pattern the dot also matches configXthreads");
+    assert_eq!(
+        regex_hits, 2,
+        "as a pattern the dot also matches configXthreads"
+    );
 
     // Auto keeps code punctuation literal ...
     let (applied, _) = count("config.threads", axiom_ast::SearchMode::Auto);
@@ -1041,7 +1319,10 @@ public class Knobs {
     // ... and only switches on a construct that cannot be meant as text.
     let (applied, auto_hits) = count("shared[A-Z][a-z]+Detector", axiom_ast::SearchMode::Auto);
     assert_eq!(applied, axiom_ast::SearchMode::Regex);
-    assert_eq!(auto_hits, 1, "the character class must find sharedRandomDetector");
+    assert_eq!(
+        auto_hits, 1,
+        "the character class must find sharedRandomDetector"
+    );
 
     // A pattern that does not compile is an error, never a quiet literal search.
     let err = idx
@@ -1051,8 +1332,14 @@ public class Knobs {
 
     // An unrecognised mode is rejected rather than silently defaulted.
     assert!(axiom_ast::SearchMode::parse("regexp").is_err());
-    assert_eq!(axiom_ast::SearchMode::parse("REGEX").unwrap(), axiom_ast::SearchMode::Regex);
-    assert_eq!(axiom_ast::SearchMode::parse("").unwrap(), axiom_ast::SearchMode::Literal);
+    assert_eq!(
+        axiom_ast::SearchMode::parse("REGEX").unwrap(),
+        axiom_ast::SearchMode::Regex
+    );
+    assert_eq!(
+        axiom_ast::SearchMode::parse("").unwrap(),
+        axiom_ast::SearchMode::Literal
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
@@ -1068,7 +1355,13 @@ async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
         "axiom_rescan_{:x}",
         std::time::Instant::now().elapsed().as_nanos()
     ));
-    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    let pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
     std::fs::create_dir_all(&pkg)?;
 
     let alpha = pkg.join("Alpha.java");
@@ -1079,7 +1372,9 @@ async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
     let idx = axiom_ast::AstIndex::new();
     idx.scan_directory(&temp_dir)?;
     assert!(idx.get_symbol("se.deversity.asynctest.Beta").is_some());
-    assert!(idx.get_symbol("se.deversity.asynctest.Alpha::alphaMethod").is_some());
+    assert!(idx
+        .get_symbol("se.deversity.asynctest.Alpha::alphaMethod")
+        .is_some());
 
     // Beta is deleted outright; Alpha's method is renamed in place.
     std::fs::remove_file(&beta)?;
@@ -1091,15 +1386,18 @@ async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
         "a class whose file was deleted must not survive a re-scan"
     );
     assert!(
-        idx.get_symbol("se.deversity.asynctest.Beta::betaMethod").is_none(),
+        idx.get_symbol("se.deversity.asynctest.Beta::betaMethod")
+            .is_none(),
         "the deleted class's methods must go with it"
     );
     assert!(
-        idx.get_symbol("se.deversity.asynctest.Alpha::alphaMethod").is_none(),
+        idx.get_symbol("se.deversity.asynctest.Alpha::alphaMethod")
+            .is_none(),
         "a renamed method must not linger under its old name"
     );
     assert!(
-        idx.get_symbol("se.deversity.asynctest.Alpha::renamedMethod").is_some(),
+        idx.get_symbol("se.deversity.asynctest.Alpha::renamedMethod")
+            .is_some(),
         "the new name must be indexed"
     );
 
@@ -1107,7 +1405,10 @@ async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
     // root being scanned: scanning one project must not empty another.
     let other = temp_dir.join("other").join("src");
     std::fs::create_dir_all(&other)?;
-    std::fs::write(other.join("Gamma.java"), "package other;\npublic class Gamma {\n    public void mg() {}\n}\n")?;
+    std::fs::write(
+        other.join("Gamma.java"),
+        "package other;\npublic class Gamma {\n    public void mg() {}\n}\n",
+    )?;
     idx.scan_directory(&other)?;
     idx.scan_directory(&pkg)?;
     assert!(
@@ -1162,8 +1463,15 @@ async fn test_e2e_attestation_requires_a_sandbox_run_that_passed() -> Result<()>
         })),
     };
     let failed = extract_tool_result(&server.handle_request(failing).await);
-    assert_eq!(failed.get("status").and_then(|v| v.as_str()), Some("FAILED"));
-    let failed_task = failed.get("task_id").and_then(|v| v.as_str()).unwrap().to_string();
+    assert_eq!(
+        failed.get("status").and_then(|v| v.as_str()),
+        Some("FAILED")
+    );
+    let failed_task = failed
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
 
     let res = extract_tool_result(&server.handle_request(attest(&failed_task)).await);
     let err = res.get("error").and_then(|v| v.as_str()).unwrap_or("");
@@ -1190,17 +1498,17 @@ async fn test_e2e_attestation_ledger_binds_symbol_and_prompt() -> Result<()> {
     // Nothing attested yet: an empty ledger proves nothing.
     assert!(axiom_core::mcp::load_attestations_from(&ledger)?.is_empty());
 
-    let seal = axiom_proto::ProvenanceAttestation::generate(
-        "root_parent",
-        "root_commit",
-        "agent_axiom_v1",
-        "Tighten the guard",
-        "auth::service::validate_token",
-        "eval_7",
-        "sandbox",
-        "axiom sandbox, engine tier1_wasi_cranelift",
-        "",
-    );
+    let seal = axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+        parent_merkle_root: "root_parent",
+        commit_merkle_root: "root_commit",
+        agent_identity: "agent_axiom_v1",
+        prompt: "Tighten the guard",
+        symbol_path: "auth::service::validate_token",
+        ctop_task_id: "eval_7",
+        verified_by: "sandbox",
+        verification_detail: "axiom sandbox, engine tier1_wasi_cranelift",
+        previous_seal: "",
+    });
     axiom_core::mcp::append_attestation_to(&ledger, &seal)?;
 
     let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
@@ -1234,7 +1542,13 @@ async fn test_e2e_eval_refuses_symbols_it_cannot_compile() -> Result<()> {
         "axiom_eval_lang_{:x}",
         std::time::Instant::now().elapsed().as_nanos()
     ));
-    let pkg = temp_dir.join("src").join("main").join("java").join("se").join("deversity").join("asynctest");
+    let pkg = temp_dir
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("se")
+        .join("deversity")
+        .join("asynctest");
     std::fs::create_dir_all(&pkg)?;
     std::fs::write(
         pkg.join("Gate.java"),
@@ -1245,7 +1559,8 @@ async fn test_e2e_eval_refuses_symbols_it_cannot_compile() -> Result<()> {
     idx.scan_directory(&temp_dir)?;
 
     assert_eq!(
-        idx.language_of_symbol("se.deversity.asynctest.Gate::open").as_deref(),
+        idx.language_of_symbol("se.deversity.asynctest.Gate::open")
+            .as_deref(),
         Some("java"),
         "the index must know which language a symbol came from"
     );
@@ -1360,8 +1675,14 @@ async fn test_e2e_scan_merges_over_concurrent_work_but_still_purges() -> Result<
     ));
     let src = temp_dir.join("src");
     std::fs::create_dir_all(&src)?;
-    std::fs::write(src.join("Alpha.java"), "package p;\npublic class Alpha {\n    public void am() {}\n}\n")?;
-    std::fs::write(src.join("Beta.java"), "package p;\npublic class Beta {\n    public void bm() {}\n}\n")?;
+    std::fs::write(
+        src.join("Alpha.java"),
+        "package p;\npublic class Alpha {\n    public void am() {}\n}\n",
+    )?;
+    std::fs::write(
+        src.join("Beta.java"),
+        "package p;\npublic class Beta {\n    public void bm() {}\n}\n",
+    )?;
 
     let shared_index = temp_dir.join(".axiom").join("index.json");
 
@@ -1428,7 +1749,11 @@ async fn test_e2e_unscanned_workspace_does_not_answer_from_a_fixture() -> Result
 
     // Whatever this workspace holds, it must not hold the demo fixture unless
     // something asked for it.
-    let res = extract_tool_result(&server.handle_request(query("auth::service::validate_token")).await);
+    let res = extract_tool_result(
+        &server
+            .handle_request(query("auth::service::validate_token"))
+            .await,
+    );
     assert!(
         res.get("error").is_some(),
         "the demo symbol must not be present until seed_demo_workspace is called, got {res:?}"
@@ -1437,7 +1762,11 @@ async fn test_e2e_unscanned_workspace_does_not_answer_from_a_fixture() -> Result
     // Asking for it explicitly is still supported, which is how the walkthrough
     // gets its data.
     server.seed_demo_workspace();
-    let res = extract_tool_result(&server.handle_request(query("auth::service::validate_token")).await);
+    let res = extract_tool_result(
+        &server
+            .handle_request(query("auth::service::validate_token"))
+            .await,
+    );
     assert_eq!(
         res.get("symbol_path").and_then(|v| v.as_str()),
         Some("auth::service::validate_token"),
@@ -1484,7 +1813,9 @@ async fn test_e2e_watch_notices_a_change_after_the_first_scan() -> Result<()> {
     // And re-scanning on that signal actually picks the new symbol up.
     idx.scan_directory(&temp_dir)?;
     assert!(
-        idx.list_symbols().iter().any(|n| n.symbol_path.contains("added_later")),
+        idx.list_symbols()
+            .iter()
+            .any(|n| n.symbol_path.contains("added_later")),
         "the symbol added after the first scan must be indexed"
     );
 
@@ -1519,9 +1850,22 @@ async fn test_e2e_rescan_purges_every_language_not_just_java() -> Result<()> {
     let idx = axiom_ast::AstIndex::new();
     idx.scan_directory(&temp_dir)?;
 
-    let present = |needle: &str| idx.list_symbols().iter().any(|n| n.symbol_path.contains(needle));
-    for needle in ["rust_symbol", "python_symbol", "tsSymbol", "GoSymbol", "javaSymbol"] {
-        assert!(present(needle), "{needle} must be indexed by the first scan");
+    let present = |needle: &str| {
+        idx.list_symbols()
+            .iter()
+            .any(|n| n.symbol_path.contains(needle))
+    };
+    for needle in [
+        "rust_symbol",
+        "python_symbol",
+        "tsSymbol",
+        "GoSymbol",
+        "javaSymbol",
+    ] {
+        assert!(
+            present(needle),
+            "{needle} must be indexed by the first scan"
+        );
     }
 
     for name in ["gone.rs", "gone.py", "gone.ts", "gone.go", "Gone.java"] {
@@ -1529,7 +1873,13 @@ async fn test_e2e_rescan_purges_every_language_not_just_java() -> Result<()> {
     }
     idx.scan_directory(&temp_dir)?;
 
-    for needle in ["rust_symbol", "python_symbol", "tsSymbol", "GoSymbol", "javaSymbol"] {
+    for needle in [
+        "rust_symbol",
+        "python_symbol",
+        "tsSymbol",
+        "GoSymbol",
+        "javaSymbol",
+    ] {
         assert!(
             !present(needle),
             "{needle} came from a deleted file and must not survive the re-scan"
@@ -1564,31 +1914,66 @@ async fn test_e2e_external_verification_can_back_a_record_but_says_who_ran_it() 
     };
 
     // Nothing recorded yet, so nothing can be attested.
-    let res = extract_tool_result(&server.handle_request(call("axiom_attest_commit", json!({
-        "prompt": "Restore the guard",
-        "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
-        "ctop_task_id": "mvn_run_01"
-    }))).await);
+    let res = extract_tool_result(
+        &server
+            .handle_request(call(
+                "axiom_attest_commit",
+                json!({
+                    "prompt": "Restore the guard",
+                    "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+                    "ctop_task_id": "mvn_run_01"
+                }),
+            ))
+            .await,
+    );
     assert!(
-        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("no verification recorded"),
+        res.get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("no verification recorded"),
         "attesting an unknown check must be refused, got {res:?}"
     );
 
     // An outcome with no verdict is not a verification.
-    let res = extract_tool_result(&server.handle_request(call("axiom_record_verification", json!({
-        "task_id": "mvn_run_01", "command": "mvn test"
-    }))).await);
-    assert!(res.get("error").is_some(), "passed must be required, got {res:?}");
+    let res = extract_tool_result(
+        &server
+            .handle_request(call(
+                "axiom_record_verification",
+                json!({
+                    "task_id": "mvn_run_01", "command": "mvn test"
+                }),
+            ))
+            .await,
+    );
+    assert!(
+        res.get("error").is_some(),
+        "passed must be required, got {res:?}"
+    );
 
     // A failed external check cannot back a record either.
-    server.handle_request(call("axiom_record_verification", json!({
-        "task_id": "mvn_failed", "passed": false, "command": "mvn test"
-    }))).await;
-    let res = extract_tool_result(&server.handle_request(call("axiom_attest_commit", json!({
-        "prompt": "p", "symbol_path": "s", "ctop_task_id": "mvn_failed"
-    }))).await);
+    server
+        .handle_request(call(
+            "axiom_record_verification",
+            json!({
+                "task_id": "mvn_failed", "passed": false, "command": "mvn test"
+            }),
+        ))
+        .await;
+    let res = extract_tool_result(
+        &server
+            .handle_request(call(
+                "axiom_attest_commit",
+                json!({
+                    "prompt": "p", "symbol_path": "s", "ctop_task_id": "mvn_failed"
+                }),
+            ))
+            .await,
+    );
     assert!(
-        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("did not pass"),
+        res.get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("did not pass"),
         "a failed check must not back a record, got {res:?}"
     );
 
@@ -1597,20 +1982,34 @@ async fn test_e2e_external_verification_can_back_a_record_but_says_who_ran_it() 
     let recorded = extract_tool_result(&server.handle_request(call("axiom_record_verification", json!({
         "task_id": "mvn_run_01", "passed": true, "command": "mvn -pl async-test-lib test -Dtest=ConcurrencyRunnerTest"
     }))).await);
-    assert_eq!(recorded.get("recorded_as").and_then(|v| v.as_str()), Some("reported"));
+    assert_eq!(
+        recorded.get("recorded_as").and_then(|v| v.as_str()),
+        Some("reported")
+    );
 
-    let sealed = extract_tool_result(&server.handle_request(call("axiom_attest_commit", json!({
-        "prompt": "Restore the guard",
-        "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
-        "ctop_task_id": "mvn_run_01"
-    }))).await);
+    let sealed = extract_tool_result(
+        &server
+            .handle_request(call(
+                "axiom_attest_commit",
+                json!({
+                    "prompt": "Restore the guard",
+                    "symbol_path": "se.deversity.asynctest.runner.ConcurrencyRunner",
+                    "ctop_task_id": "mvn_run_01"
+                }),
+            ))
+            .await,
+    );
     assert_eq!(
         sealed.get("verified_by").and_then(|v| v.as_str()),
         Some("reported"),
         "a record backed by an external check must not read as axiom's own work"
     );
     assert!(
-        sealed.get("verification_detail").and_then(|v| v.as_str()).unwrap_or("").contains("mvn"),
+        sealed
+            .get("verification_detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("mvn"),
         "the record must say what was run, got {sealed:?}"
     );
 
@@ -1680,7 +2079,10 @@ async fn test_e2e_symbol_lookup_refuses_names_it_cannot_pin_down() -> Result<()>
         idx.get_symbol("").is_none(),
         "an empty name matches every key under ends_with and must resolve to nothing"
     );
-    assert!(idx.get_symbol("   ").is_none(), "nor may whitespace stand in for a name");
+    assert!(
+        idx.get_symbol("   ").is_none(),
+        "nor may whitespace stand in for a name"
+    );
 
     assert!(
         idx.get_symbol("execute").is_none(),
@@ -1688,7 +2090,10 @@ async fn test_e2e_symbol_lookup_refuses_names_it_cannot_pin_down() -> Result<()>
     );
     assert_eq!(
         idx.candidates_for("execute"),
-        vec!["pkg.One::execute".to_string(), "pkg.Two::execute".to_string()],
+        vec![
+            "pkg.One::execute".to_string(),
+            "pkg.Two::execute".to_string()
+        ],
         "the candidates must be offered, in a stable order"
     );
 
@@ -1719,13 +2124,23 @@ async fn test_e2e_symbol_lookup_refuses_names_it_cannot_pin_down() -> Result<()>
 
     let res = extract_tool_result(&server.handle_request(call(json!({}))).await);
     assert!(
-        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("required"),
+        res.get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("required"),
         "a missing argument must be reported as such, got {res:?}"
     );
 
-    let res = extract_tool_result(&server.handle_request(call(json!({ "symbol_path": 123 }))).await);
+    let res = extract_tool_result(
+        &server
+            .handle_request(call(json!({ "symbol_path": 123 })))
+            .await,
+    );
     assert!(
-        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("must be a string"),
+        res.get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("must be a string"),
         "a number where a name belongs must be reported as such, got {res:?}"
     );
 
@@ -1743,37 +2158,58 @@ async fn test_e2e_symbol_lookup_refuses_names_it_cannot_pin_down() -> Result<()>
 async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> {
     let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
 
-    let mut record = axiom_proto::ProvenanceAttestation::generate(
-        "root_parent",
-        "root_commit",
-        "agent_axiom_v1",
-        "Tighten the guard",
-        "auth::service::validate_token",
-        "eval_7",
-        "sandbox",
-        "axiom sandbox, engine tier1_wasi_cranelift",
-        "",
-    );
+    let mut record = axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+        parent_merkle_root: "root_parent",
+        commit_merkle_root: "root_commit",
+        agent_identity: "agent_axiom_v1",
+        prompt: "Tighten the guard",
+        symbol_path: "auth::service::validate_token",
+        ctop_task_id: "eval_7",
+        verified_by: "sandbox",
+        verification_detail: "axiom sandbox, engine tier1_wasi_cranelift",
+        previous_seal: "",
+    });
 
     // An unsigned record is anonymous, and says so by carrying no key.
     assert!(record.signature.is_empty() && record.public_key.is_empty());
     assert!(
-        axiom_proto::signing::verify(&record, "auth::service::validate_token", "Tighten the guard").is_err(),
+        axiom_proto::signing::verify(
+            &record,
+            "auth::service::validate_token",
+            "Tighten the guard"
+        )
+        .is_err(),
         "an unsigned record must not verify as signed"
     );
 
     record
-        .sign_with("auth::service::validate_token", "Tighten the guard", &private_hex)
+        .sign_with(
+            "auth::service::validate_token",
+            "Tighten the guard",
+            &private_hex,
+        )
         .map_err(|e| anyhow::anyhow!(e))?;
-    assert_eq!(record.public_key, public_hex, "the record must carry the key that signed it");
+    assert_eq!(
+        record.public_key, public_hex,
+        "the record must carry the key that signed it"
+    );
 
-    axiom_proto::signing::verify(&record, "auth::service::validate_token", "Tighten the guard")
-        .expect("a freshly signed record must verify");
+    axiom_proto::signing::verify(
+        &record,
+        "auth::service::validate_token",
+        "Tighten the guard",
+    )
+    .expect("a freshly signed record must verify");
 
     // The signature covers the symbol and prompt, so it cannot be lifted onto a
     // record about something else.
     assert!(
-        axiom_proto::signing::verify(&record, "auth::service::validate_token", "a different prompt").is_err(),
+        axiom_proto::signing::verify(
+            &record,
+            "auth::service::validate_token",
+            "a different prompt"
+        )
+        .is_err(),
         "a signature must not carry over to another prompt"
     );
     assert!(
@@ -1786,7 +2222,12 @@ async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> 
     let mut tampered = record.clone();
     tampered.verification_detail = "pretend this was a full CI run".to_string();
     assert!(
-        axiom_proto::signing::verify(&tampered, "auth::service::validate_token", "Tighten the guard").is_err(),
+        axiom_proto::signing::verify(
+            &tampered,
+            "auth::service::validate_token",
+            "Tighten the guard"
+        )
+        .is_err(),
         "an edited record must not verify"
     );
 
@@ -1795,7 +2236,11 @@ async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> 
     assert_ne!(other_public, public_hex);
     let mut by_other = record.clone();
     by_other
-        .sign_with("auth::service::validate_token", "Tighten the guard", &other_private)
+        .sign_with(
+            "auth::service::validate_token",
+            "Tighten the guard",
+            &other_private,
+        )
         .map_err(|e| anyhow::anyhow!(e))?;
     assert_ne!(
         by_other.public_key, public_hex,
@@ -1832,17 +2277,17 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
     let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
 
     let make = |symbol: &str, prompt: &str| {
-        axiom_proto::ProvenanceAttestation::generate(
-            "root_parent",
-            "root_commit",
-            "agent_axiom_v1",
+        axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+            parent_merkle_root: "root_parent",
+            commit_merkle_root: "root_commit",
+            agent_identity: "agent_axiom_v1",
             prompt,
-            symbol,
-            "task_1",
-            "reported",
-            "cargo test",
-            "",
-        )
+            symbol_path: symbol,
+            ctop_task_id: "task_1",
+            verified_by: "reported",
+            verification_detail: "cargo test",
+            previous_seal: "",
+        })
     };
 
     // What an attacker with no key can produce: a well-formed, unsigned record.
@@ -1852,14 +2297,22 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
         "the seal is computable without a key, which is exactly the problem"
     );
     assert!(forged.signature.is_empty());
-    axiom_core::mcp::append_attestation_to(&ledger, &forged)?;
+    // Written unlinked on purpose: an attacker edits the file, they do not call
+    // the append helper, so the chain check that helper enforces is not in their way.
+    axiom_core::mcp::append_attestation_unlinked_to(&ledger, &forged)?;
 
     // And a genuine signed one for something else.
     let mut genuine = make("src/lib.rs::validate_token", "tighten the guard");
     genuine
-        .sign_with("src/lib.rs::validate_token", "tighten the guard", &private_hex)
+        .sign_with(
+            "src/lib.rs::validate_token",
+            "tighten the guard",
+            &private_hex,
+        )
         .map_err(|e| anyhow::anyhow!(e))?;
-    axiom_core::mcp::append_attestation_to(&ledger, &genuine)?;
+    // Also unlinked: this ledger is deliberately in a state a correct caller
+    // could not produce, which is the point of the test.
+    axiom_core::mcp::append_attestation_unlinked_to(&ledger, &genuine)?;
 
     let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
     assert_eq!(stored.len(), 2);
@@ -1880,14 +2333,22 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
         "an unsigned forgery must not satisfy a check that named its expected signer"
     );
     assert!(
-        satisfies("src/lib.rs::validate_token", "tighten the guard", &public_hex),
+        satisfies(
+            "src/lib.rs::validate_token",
+            "tighten the guard",
+            &public_hex
+        ),
         "the genuine signed record must still satisfy it"
     );
 
     // A different signer does not satisfy it either.
     let (_, other_public) = axiom_proto::signing::generate_keypair();
     assert!(
-        !satisfies("src/lib.rs::validate_token", "tighten the guard", &other_public),
+        !satisfies(
+            "src/lib.rs::validate_token",
+            "tighten the guard",
+            &other_public
+        ),
         "a record signed by one key must not satisfy a check demanding another"
     );
 
@@ -1906,21 +2367,27 @@ async fn test_e2e_removing_a_record_breaks_the_chain() -> Result<()> {
 
     let mut chain: Vec<axiom_proto::ProvenanceAttestation> = Vec::new();
     for name in ["one", "two", "three"] {
-        let previous = chain.last().map(|a: &axiom_proto::ProvenanceAttestation| a.seal.clone()).unwrap_or_default();
+        let previous = chain
+            .last()
+            .map(|a: &axiom_proto::ProvenanceAttestation| a.seal.clone())
+            .unwrap_or_default();
         let symbol = format!("src/lib.rs::{name}");
         let prompt = format!("change {name}");
-        let mut record = axiom_proto::ProvenanceAttestation::generate(
-            "root_parent",
-            "root_commit",
-            "agent_axiom_v1",
-            &prompt,
-            &symbol,
-            "task_1",
-            "reported",
-            "cargo test",
-            &previous,
-        );
-        record.sign_with(&symbol, &prompt, &private_hex).map_err(|e| anyhow::anyhow!(e))?;
+        let mut record =
+            axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+                parent_merkle_root: "root_parent",
+                commit_merkle_root: "root_commit",
+                agent_identity: "agent_axiom_v1",
+                prompt: &prompt,
+                symbol_path: &symbol,
+                ctop_task_id: "task_1",
+                verified_by: "reported",
+                verification_detail: "cargo test",
+                previous_seal: &previous,
+            });
+        record
+            .sign_with(&symbol, &prompt, &private_hex)
+            .map_err(|e| anyhow::anyhow!(e))?;
         chain.push(record);
     }
 
@@ -1955,7 +2422,592 @@ async fn test_e2e_removing_a_record_breaks_the_chain() -> Result<()> {
 
     // Reordering breaks it too, since the links no longer line up.
     let reordered: Vec<_> = [chain[0].clone(), chain[2].clone(), chain[1].clone()].to_vec();
-    assert!(axiom_proto::verify_chain(&reordered).is_err(), "reordering must be visible");
+    assert!(
+        axiom_proto::verify_chain(&reordered).is_err(),
+        "reordering must be visible"
+    );
 
     Ok(())
+}
+
+/// Seeding the demo workspace has to work in a workspace that already has an
+/// index, because that is where it is asked for.
+///
+/// The guard belonged to the version that ran automatically inside `new`. Kept
+/// after seeding became an explicit call, it made that call quietly do nothing
+/// wherever an index existed, so `axiom demo` queried a symbol it had not
+/// inserted and reported zero tests out of zero.
+#[tokio::test]
+async fn test_e2e_demo_seeding_works_in_a_populated_workspace() -> Result<()> {
+    let server = AxiomMcpServer::with_index(None)?;
+
+    // Something is already here, as in any real workspace.
+    server
+        .ast_index
+        .index_node("pkg.Existing::method", "method", "fn method() {}", vec![]);
+    assert!(server.ast_index.total_symbols_count() > 0);
+
+    server.seed_demo_workspace();
+
+    assert!(
+        server
+            .ast_index
+            .get_symbol("auth::service::validate_token")
+            .is_some(),
+        "seeding must insert the demo symbol even when the index is not empty"
+    );
+    assert!(
+        server
+            .ast_index
+            .get_symbol("pkg.Existing::method")
+            .is_some(),
+        "and must not remove what was already there"
+    );
+
+    // The blast radius the walkthrough prints has to be computable, or the demo
+    // reports numbers about a symbol it never inserted.
+    let radius = server
+        .ast_index
+        .compute_blast_radius("auth::service::validate_token", 5)
+        .expect("the seeded symbol must be resolvable");
+    assert!(
+        radius
+            .impacted_tests
+            .iter()
+            .any(|t| t.contains("test_auth_validation")),
+        "the seeded test must be reachable from the seeded symbol, got {:?}",
+        radius.impacted_tests
+    );
+
+    Ok(())
+}
+
+/// The Tree-CRDT has to leave the process that produced it, or the convergence
+/// it exists for never happens between real agents.
+///
+/// Each server started with an empty tree and saw only its own operations, so
+/// two agents working one workspace reported different Merkle roots and neither
+/// could see the other's nodes. There were no merge conflicts because there was
+/// no merge. Convergence was demonstrated only by the in-process swarm
+/// simulation, where every agent shares one tree by construction.
+///
+/// Operations are commutative, so a shared append-only log is enough: replaying
+/// it in whatever order it happens to hold converges to the same tree. That
+/// property is what this pins.
+#[tokio::test]
+async fn test_e2e_crdt_operations_converge_across_processes() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_crdt_log_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    // Start from nothing. The temp name is derived from an elapsed time that is
+    // near zero, so it repeats between runs, and a run that fails before its
+    // cleanup leaves a log the next run would append to.
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let log = temp_dir.join("crdt_ops.json");
+
+    // Three agents, each recording one operation, as separate replicas would.
+    let mut ops = Vec::new();
+    for (i, name) in ["alpha", "beta", "gamma"].iter().enumerate() {
+        let agent = axiom_crdt::TreeCrdt::new(100 + i as u32);
+        let op = agent.insert_node(
+            "root",
+            &format!("node_{name}"),
+            &format!("pkg::{name}"),
+            "function",
+            "fn f() {}",
+        );
+        axiom_core::mcp::append_crdt_op(&log, &op)?;
+        ops.push(op);
+    }
+
+    let stored = axiom_core::mcp::load_crdt_ops(&log);
+    assert_eq!(
+        stored.len(),
+        3,
+        "every agent's operation must reach the shared log"
+    );
+
+    // Replay in order, and reversed, and interleaved. A commutative log must not
+    // care, and a Merkle root that moved with ordering would not be one.
+    let replay = |sequence: Vec<axiom_crdt::TreeOp>| {
+        let replica = axiom_crdt::TreeCrdt::new(999);
+        for op in sequence {
+            replica.apply_op(op);
+        }
+        (
+            replica.active_nodes_count(),
+            replica.compute_tree_merkle_root(),
+        )
+    };
+
+    let forwards = replay(stored.clone());
+    let mut backwards_seq = stored.clone();
+    backwards_seq.reverse();
+    let backwards = replay(backwards_seq);
+    let shuffled = replay(vec![
+        stored[1].clone(),
+        stored[2].clone(),
+        stored[0].clone(),
+    ]);
+
+    assert_eq!(
+        forwards, backwards,
+        "replaying in reverse must reach the same tree"
+    );
+    assert_eq!(forwards, shuffled, "and so must any other order");
+    // Four, not three: TreeCrdt::new seeds a "root" module node that every
+    // replica starts with, and the three inserts hang beneath it.
+    assert_eq!(
+        forwards.0, 4,
+        "the root plus three inserted nodes, got {:?}",
+        forwards
+    );
+
+    // A replica that has seen nothing is not accidentally equal to one that has.
+    let empty = axiom_crdt::TreeCrdt::new(998);
+    assert_ne!(
+        empty.compute_tree_merkle_root(),
+        forwards.1,
+        "an empty replica must not share a root with one holding three nodes"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// A lock left by an agent that died must not stall the rest of them, and must
+/// not be released by whoever took it over.
+///
+/// The stale window used to be thirty seconds. Every operation it guards is a
+/// read, an edit and a write of one small file, single-digit milliseconds, so a
+/// single crashed agent cost every other agent half a minute per operation. Two
+/// seconds is still two orders of magnitude beyond the work being protected.
+#[tokio::test]
+async fn test_e2e_a_lock_left_by_a_dead_agent_is_taken_over() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_stale_lock_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let target = temp_dir.join("index.json");
+    let lock_file = target.with_extension("lock");
+
+    // What a crashed holder leaves behind: a lock nobody will ever release.
+    std::fs::write(&lock_file, "some-other-agent")?;
+
+    let waited = std::time::Instant::now();
+    let taken = axiom_ast::IndexLock::acquire(&target)?;
+    let elapsed = waited.elapsed();
+
+    assert!(
+        elapsed >= std::time::Duration::from_secs(1),
+        "taking over must not be instant, or a live holder would be robbed; waited {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a dead holder must not cost every other agent half a minute; waited {elapsed:?}"
+    );
+
+    // The taker owns it now, and the contents say so rather than still naming
+    // the agent that died.
+    let contents = std::fs::read_to_string(&lock_file)?;
+    assert_ne!(
+        contents, "some-other-agent",
+        "the lock must be re-taken, not inherited"
+    );
+
+    drop(taken);
+    assert!(!lock_file.exists(), "releasing must remove the lock");
+
+    // A lock that has been taken over by someone else is not ours to release.
+    let held = axiom_ast::IndexLock::acquire(&target)?;
+    std::fs::write(&lock_file, "taken-over-by-another-agent")?;
+    drop(held);
+    assert!(
+        lock_file.exists(),
+        "dropping a lock that another agent now holds must leave it alone, \
+         or releasing ours would release theirs"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// Replacing a file another agent is reading has to succeed eventually, and a
+/// reader that catches the swap has to see a whole document.
+///
+/// The ledger and the operation log are JSON arrays rewritten whole, so a
+/// process killed part-way through writing one loses every record in it rather
+/// than just the record being appended. Renaming a complete file over the target
+/// fixes that, and on Windows introduces the opposite problem: the rename fails
+/// with a sharing violation while any other process holds the destination open.
+/// Measured before the retry existed, twenty agents attesting while three
+/// threads read lost sixteen of twenty records to "Access is denied", which is
+/// worse than the tear it was meant to prevent.
+#[tokio::test]
+async fn test_e2e_writes_survive_a_reader_holding_the_file_open() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_atomic_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let target = temp_dir.join("records.json");
+
+    axiom_ast::write_atomically(&target, b"[1,2,3]")?;
+    assert_eq!(std::fs::read_to_string(&target)?, "[1,2,3]");
+
+    // A reader keeps the file open across a replacement, as a polling agent
+    // would. The write must still land.
+    let held_open = std::fs::File::open(&target)?;
+    axiom_ast::write_atomically(&target, b"[1,2,3,4]")?;
+    drop(held_open);
+
+    assert_eq!(
+        std::fs::read_to_string(&target)?,
+        "[1,2,3,4]",
+        "a write must not be lost because someone was reading"
+    );
+
+    // No temp file is left behind for the next reader to trip over.
+    let leftovers: Vec<_> = std::fs::read_dir(&temp_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains("tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp files must not accumulate, found {leftovers:?}"
+    );
+
+    // A reader always sees one complete document, never a splice of two.
+    for _ in 0..20 {
+        axiom_ast::write_atomically(&target, b"[9,9,9]")?;
+        let seen = std::fs::read_to_string(&target)?;
+        assert!(
+            seen == "[9,9,9]" || seen == "[1,2,3,4]",
+            "a reader must see one version or the other, saw {seen:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// An error that cannot clear must be reported at once, not waited out.
+///
+/// The retry loops added for Windows sharing violations originally retried every
+/// error. A rename that fails because the disk is full, or a lock that cannot be
+/// created because the directory is read-only, will not start working within the
+/// deadline, so retrying turns an immediate and accurate error into a long pause
+/// followed by the same error. On Unix that is exactly what EACCES means, and
+/// waiting thirty seconds per operation to be told a directory is not writable
+/// is worse than being told straight away.
+#[tokio::test]
+async fn test_e2e_unrecoverable_write_errors_are_not_waited_out() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_fastfail_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // A target whose parent does not exist can never be written, whatever the
+    // platform, so it stands in for the class of error that will not clear.
+    let impossible = temp_dir
+        .join("no")
+        .join("such")
+        .join("dir")
+        .join("records.json");
+
+    let started = std::time::Instant::now();
+    let result = axiom_ast::write_atomically(&impossible, b"[1]");
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.is_err(),
+        "writing into a missing directory must fail"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "a permanent error must be reported at once, not retried to the deadline; took {elapsed:?}"
+    );
+
+    // The same for the lock, though it takes a different impossible path:
+    // acquiring creates the directory it needs, by design, so a missing parent
+    // is not an error there. Nesting under a regular file is one that cannot be
+    // resolved by creating anything.
+    let blocker = temp_dir.join("a-file-not-a-directory");
+    std::fs::write(&blocker, b"x")?;
+    let under_a_file = blocker.join("nested").join("records.json");
+
+    let started = std::time::Instant::now();
+    let locked = axiom_ast::IndexLock::acquire(&under_a_file);
+    let elapsed = started.elapsed();
+
+    assert!(locked.is_err(), "locking beneath a regular file must fail");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "and must fail promptly; took {elapsed:?}"
+    );
+
+    // A write that can succeed still does, so the guard has not made the retry
+    // useless.
+    let fine = temp_dir.join("records.json");
+    axiom_ast::write_atomically(&fine, b"[1,2]")?;
+    assert_eq!(std::fs::read_to_string(&fine)?, "[1,2]");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// A test that reaches a symbol through another class must at least be visible,
+/// even though widening the reported set to include it is the wrong trade.
+///
+/// Measured on a 2,219-test suite, going from depth 1 to depth 2 took one symbol
+/// from 57 impacted tests to 146 with no recall gain, and lifted the overlap
+/// between the blast radii of unrelated symbols from 0.00 to 0.19. So the
+/// reported set stays at depth 1. What was missing is any way for a caller to
+/// know what widening would add: `AsyncTestInvocationInterceptorTest` exists to
+/// pin that the interceptor delegates to ConcurrencyRunner, and nothing in the
+/// answer mentioned it. The deeper layers are surveyed and returned separately.
+#[tokio::test]
+async fn test_e2e_deeper_dependents_are_surveyed_without_widening_the_answer() -> Result<()> {
+    let idx = axiom_ast::AstIndex::new();
+
+    // target <- middle <- a test two hops away, plus one directly on target.
+    idx.index_node("pkg.Target", "class", "class Target {}", vec![]);
+    idx.index_node(
+        "pkg.Middle",
+        "class",
+        "class Middle {}",
+        vec!["pkg.Target".into()],
+    );
+    idx.index_node(
+        "pkg.DirectTest",
+        "test",
+        "class DirectTest {}",
+        vec!["pkg.Target".into()],
+    );
+    idx.index_node(
+        "pkg.IndirectTest",
+        "test",
+        "class IndirectTest {}",
+        vec!["pkg.Middle".into()],
+    );
+
+    let radius = idx
+        .compute_blast_radius("pkg.Target", 1)
+        .expect("the symbol must resolve");
+
+    // The answer keeps its precision: only the direct dependent.
+    assert_eq!(
+        radius.impacted_tests,
+        vec!["pkg.DirectTest".to_string()],
+        "widening the reported set is the trade this deliberately does not make"
+    );
+
+    // But the two-hop test is visible, so a caller can decide to widen.
+    let depth_two = radius.tests_by_depth.get(&2).cloned().unwrap_or_default();
+    assert!(
+        depth_two.contains(&"pkg.IndirectTest".to_string()),
+        "a test reaching the symbol through another class must be surveyed; got {:?}",
+        radius.tests_by_depth
+    );
+
+    // A test appears once, at the shallowest depth that reaches it.
+    let depth_one = radius.tests_by_depth.get(&1).cloned().unwrap_or_default();
+    assert!(!depth_one.contains(&"pkg.IndirectTest".to_string()));
+    assert!(!depth_two.contains(&"pkg.DirectTest".to_string()));
+
+    // Asking for depth 2 explicitly moves it into the answer.
+    let wider = idx
+        .compute_blast_radius("pkg.Target", 2)
+        .expect("the symbol must resolve");
+    assert!(
+        wider
+            .impacted_tests
+            .contains(&"pkg.IndirectTest".to_string()),
+        "asking for more must deliver more, got {:?}",
+        wider.impacted_tests
+    );
+
+    // The pruning figure describes what was reported, not what was surveyed.
+    assert_eq!(radius.total_tests_in_repo, 2);
+    assert!(
+        radius.pruned_test_percentage > 0.0,
+        "one of two tests reported means something was pruned"
+    );
+
+    Ok(())
+}
+
+/// Appending a record built against a stale tail must be refused, not stored.
+///
+/// `seal` is a digest over `previous_seal`, so a mislinked record cannot be
+/// repaired after the fact: correcting the field would invalidate the seal.
+/// Storing it would leave a ledger that `verify_chain` rejects from then on,
+/// with nothing to say which append broke it.
+#[test]
+fn test_append_refuses_a_record_that_does_not_chain() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_chain_guard_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let ledger = temp_dir.join("attestations.json");
+
+    let build = |previous_seal: &str, prompt: &str| {
+        axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+            parent_merkle_root: "root_parent",
+            commit_merkle_root: "root_commit",
+            agent_identity: "agent_axiom_v1",
+            prompt,
+            symbol_path: "src/lib.rs::validate_token",
+            ctop_task_id: "task_1",
+            verified_by: "reported",
+            verification_detail: "cargo test",
+            previous_seal,
+        })
+    };
+
+    // First record links to nothing, which is what an empty ledger requires.
+    let first = build("", "tighten the guard");
+    axiom_core::mcp::append_attestation_to(&ledger, &first)?;
+
+    // A second record built as though the ledger were still empty. This is the
+    // shape a caller produces by reading the tail before taking the lock, or by
+    // not reading it at all.
+    let stale = build("", "widen the guard");
+    let refused = axiom_core::mcp::append_attestation_to(&ledger, &stale);
+    assert!(
+        refused.is_err(),
+        "a record naming the wrong predecessor must be refused"
+    );
+    let message = refused.unwrap_err().to_string();
+    assert!(
+        message.contains("does not chain"),
+        "the error should say the record does not chain, got: {message}"
+    );
+
+    // The refusal must not have written anything.
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(
+        stored.len(),
+        1,
+        "a refused append must leave the ledger untouched"
+    );
+    assert!(
+        axiom_proto::verify_chain(&stored).is_ok(),
+        "the ledger must still verify after a refused append"
+    );
+
+    // Built against the real tail, the same record is accepted.
+    let linked = build(&first.seal, "widen the guard");
+    axiom_core::mcp::append_attestation_to(&ledger, &linked)?;
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(stored.len(), 2);
+    assert!(
+        axiom_proto::verify_chain(&stored).is_ok(),
+        "two correctly linked records must verify as a chain"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(())
+}
+
+/// Many threads appending at once must produce one chain, not a fork.
+///
+/// Each thread reads the tail and appends under the ledger lock. If the link
+/// were chosen outside the lock, two threads would read the same tail, both
+/// name it as predecessor, and the ledger would fork; `verify_chain` catches
+/// that, because the second of the pair names a predecessor that is no longer
+/// the record before it.
+#[test]
+fn test_concurrent_appends_produce_one_unbroken_chain() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_chain_race_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let ledger = temp_dir.join("attestations.json");
+
+    const AGENTS: usize = 12;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(AGENTS));
+    let mut handles = Vec::new();
+
+    for agent in 0..AGENTS {
+        let ledger = ledger.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || -> Result<()> {
+            barrier.wait();
+            // No retry loop: the lock covers reading the tail, building the
+            // record against it and writing, so an agent that holds it cannot
+            // lose the race. That is the property under test — take the read
+            // outside the lock and every agent links to the same predecessor.
+            {
+                let lock = axiom_ast::IndexLock::acquire(&ledger)?;
+                let existing = axiom_core::mcp::load_attestations_from(&ledger)?;
+                let tail = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
+                let record =
+                    axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+                        parent_merkle_root: "root_parent",
+                        commit_merkle_root: "root_commit",
+                        agent_identity: "agent_axiom_v1",
+                        prompt: "concurrent work",
+                        symbol_path: "src/lib.rs::validate_token",
+                        ctop_task_id: "task_1",
+                        verified_by: "reported",
+                        verification_detail: "cargo test",
+                        previous_seal: &tail,
+                    });
+                let mut all = existing;
+                all.push(record);
+                axiom_ast::write_atomically(
+                    &ledger,
+                    serde_json::to_string_pretty(&all)?.as_bytes(),
+                )?;
+                drop(lock);
+            }
+            let _ = agent;
+            Ok(())
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("agent thread panicked")?;
+    }
+
+    let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
+    assert_eq!(
+        stored.len(),
+        AGENTS,
+        "every agent's record must survive; {} of {AGENTS} did",
+        stored.len()
+    );
+    verify_chain_or_report(&stored);
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(())
+}
+
+fn verify_chain_or_report(stored: &[axiom_proto::ProvenanceAttestation]) {
+    if let Err(e) = axiom_proto::verify_chain(stored) {
+        let links: Vec<String> = stored
+            .iter()
+            .enumerate()
+            .map(|(i, a)| format!("  {i}: seal={} prev={}", a.seal, a.previous_seal))
+            .collect();
+        panic!(
+            "concurrent appends forked the chain: {e}\nledger was:\n{}",
+            links.join("\n")
+        );
+    }
 }

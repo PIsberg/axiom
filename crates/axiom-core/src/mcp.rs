@@ -1,7 +1,8 @@
 use anyhow::Result;
 use axiom_ast::{AstIndex, SearchMode};
+pub use axiom_crdt;
 use axiom_crdt::TreeCrdt;
-use axiom_proto::{CtopStatus, ProvenanceAttestation};
+use axiom_proto::{CtopStatus, NewAttestation, ProvenanceAttestation};
 use axiom_vmm::{SandboxEngine, WasiEngine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -41,21 +42,59 @@ pub fn load_attestations() -> Result<Vec<ProvenanceAttestation>> {
 /// As above, from an explicit ledger. Kept separate so a caller that must not
 /// touch the working directory, a test above all, can point somewhere else.
 pub fn load_attestations_from(path: &std::path::Path) -> Result<Vec<ProvenanceAttestation>> {
-    if !path.exists() {
-        return Ok(Vec::new());
+    match read_json_settling(path) {
+        Some(raw) => Ok(serde_json::from_str(&raw)?),
+        None => Ok(Vec::new()),
     }
-    let raw = std::fs::read_to_string(path)?;
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(serde_json::from_str(&raw)?)
 }
 
-/// Append one attestation to the ledger.
+/// Read a file that another agent may be replacing as we look at it.
+///
+/// Writers rename a complete file over the target, so a reader either sees the
+/// old contents or the new ones. A reader that catches the moment in between
+/// still gets a document that does not parse, and readers here do not hold the
+/// lock: `verify` and startup both read without one. Retrying briefly turns that
+/// into the next consistent state rather than an error.
+///
+/// Returns None when there is nothing to read, which is different from a read
+/// that failed.
+fn read_json_settling(path: &std::path::Path) -> Option<String> {
+    for attempt in 0..5 {
+        if !path.exists() {
+            return None;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(raw) if raw.trim().is_empty() => return None,
+            Ok(raw) if serde_json::from_str::<serde_json::Value>(&raw).is_ok() => return Some(raw),
+            _ => std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1))),
+        }
+    }
+    // Give the caller the last read so a genuinely malformed file still reports
+    // as malformed rather than as absent.
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|r| !r.trim().is_empty())
+}
+
+/// Append one attestation to the ledger, refusing any record that does not
+/// chain onto the current tail.
 pub fn append_attestation(attestation: &ProvenanceAttestation) -> Result<()> {
     append_attestation_to(&attestation_ledger_path(), attestation)
 }
 
+/// Append one attestation, refusing any record that does not chain onto the
+/// current tail of `path`.
+///
+/// The check is not a formality. `seal` is a digest *over* `previous_seal`, so
+/// a record cannot be re-linked after it is generated: fixing up the field
+/// would invalidate the seal and any signature covering it. The link therefore
+/// has to be chosen when the record is built, and the only way to choose it
+/// correctly is to read the tail under the same lock that will do the write.
+///
+/// Appending a record built against a different tail leaves a ledger that
+/// `verify_chain` rejects from then on, and nothing about the failure points
+/// back at the append that caused it. Refusing here turns that silent, permanent
+/// corruption into an error at the call that is wrong.
 pub fn append_attestation_to(
     path: &std::path::Path,
     attestation: &ProvenanceAttestation,
@@ -65,11 +104,48 @@ pub fn append_attestation_to(
     }
 
     // Read-modify-write, so two agents appending at once would otherwise drop
-    // one of the records. The lock makes the sequence atomic.
+    // one of the records. The lock makes the sequence atomic, and it has to
+    // cover the link check too: a tail read before the lock can be stale by the
+    // time the write happens.
+    let _lock = axiom_ast::IndexLock::acquire(path)?;
+    let mut all = load_attestations_from(path).unwrap_or_default();
+
+    let tail = all.last().map(|a| a.seal.as_str()).unwrap_or("");
+    if attestation.previous_seal != tail {
+        anyhow::bail!(
+            "this record does not chain onto the ledger: it names predecessor {},              but the ledger currently ends at {}. Build the record against the tail              read under the ledger lock; the seal covers previous_seal, so it cannot              be corrected afterwards.",
+            if attestation.previous_seal.is_empty() {
+                "(none)"
+            } else {
+                &attestation.previous_seal
+            },
+            if tail.is_empty() { "(empty)" } else { tail },
+        );
+    }
+
+    all.push(attestation.clone());
+    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
+    Ok(())
+}
+
+/// Append a record without checking that it chains, for tests that need to put
+/// a ledger into a state a correct caller could not produce.
+///
+/// Real tampering happens by writing the file, not by calling this crate, so a
+/// test that simulates an attacker has to be able to bypass the check the same
+/// way an attacker does.
+#[doc(hidden)]
+pub fn append_attestation_unlinked_to(
+    path: &std::path::Path,
+    attestation: &ProvenanceAttestation,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let _lock = axiom_ast::IndexLock::acquire(path)?;
     let mut all = load_attestations_from(path).unwrap_or_default();
     all.push(attestation.clone());
-    std::fs::write(path, serde_json::to_string_pretty(&all)?)?;
+    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
     Ok(())
 }
 
@@ -120,6 +196,42 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
             }
         )),
     }
+}
+
+/// Where the Tree-CRDT operation log lives, beside the index it describes.
+pub fn crdt_op_log_path() -> PathBuf {
+    PathBuf::from(".axiom").join("crdt_ops.json")
+}
+
+/// Every operation recorded so far. A missing log is an empty one.
+pub fn load_crdt_ops(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
+    match read_json_settling(path) {
+        Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Append one operation.
+///
+/// Without this the CRDT never leaves the process that produced it. Each server
+/// started with an empty tree and saw only its own operations, so two agents
+/// working the same workspace reported different Merkle roots and neither could
+/// see the other's nodes. There were no merge conflicts because there was no
+/// merge: the convergence the type provides was only ever exercised by the
+/// in-process swarm simulation.
+///
+/// The operations are commutative, so replaying them in whatever order the file
+/// happens to hold converges to the same tree. That is the property the CRDT was
+/// chosen for, and it is what makes appending to a shared file enough.
+pub fn append_crdt_op(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _lock = axiom_ast::IndexLock::acquire(path)?;
+    let mut all = load_crdt_ops(path);
+    all.push(op.clone());
+    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
+    Ok(())
 }
 
 /// A check that was performed before a provenance record was issued.
@@ -191,6 +303,15 @@ impl AxiomMcpServer {
         // last-writer-wins rule cannot order a tie it cannot see.
         let tree_crdt = Arc::new(TreeCrdt::new(std::process::id()));
 
+        // Replay what other agents have recorded, so this server starts from the
+        // shared state rather than an empty tree of its own.
+        if let Some(index) = index_path {
+            let ops = load_crdt_ops(&index.with_file_name("crdt_ops.json"));
+            for op in ops {
+                tree_crdt.apply_op(op);
+            }
+        }
+
         Ok(Self {
             verifications: Arc::new(RwLock::new(HashMap::new())),
             ast_index,
@@ -199,7 +320,7 @@ impl AxiomMcpServer {
         })
     }
 
-/// Populate the workspace with the demo symbols the walkthrough uses.
+    /// Populate the workspace with the demo symbols the walkthrough uses.
     ///
     /// This used to run inside `new` whenever the index was empty, which made a
     /// workspace nobody had scanned answer confidently about
@@ -207,8 +328,13 @@ impl AxiomMcpServer {
     /// symbol is in no real codebase, and an agent following the usage guide,
     /// which uses exactly that name, had no way to tell it was talking to a
     /// fixture. Seeding is now something `axiom demo` asks for.
+    /// The empty-index guard this used to carry belonged to the version that ran
+    /// automatically. A caller that asks for the demo data means it whatever the
+    /// workspace already holds, and keeping the guard made the call quietly do
+    /// nothing wherever an index existed, so `axiom demo` then queried a symbol
+    /// it had not inserted and reported zeros.
     pub fn seed_demo_workspace(&self) {
-        if self.ast_index.total_symbols_count() == 0 {
+        {
             self.ast_index.index_node(
                 "auth::service::validate_token",
                 "function",
@@ -230,7 +356,6 @@ impl AxiomMcpServer {
                 "pub fn validate_token(t: &str) -> bool { t.len() > 10 }",
             );
         }
-
     }
 
     pub async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
@@ -260,7 +385,7 @@ impl AxiomMcpServer {
                     "tools": [
                         {
                             "name": "axiom_query_symbol",
-                            "description": "Inspect AST node definition and type signatures without disk clones",
+                            "description": "Look up one indexed symbol. A shorter name resolves when it identifies exactly one symbol; a name matching several returns the candidates instead of choosing.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -271,7 +396,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_get_blast_radius",
-                            "description": "Compute topological blast radius and impacted test targets for changed symbol",
+                            "description": "The tests that reach a symbol, so a change can be checked without running everything. impacted_tests holds what to run: direct dependents, and tests reaching the symbol through an accessor. tests_by_depth also lists tests that reach it through another class, at depth 2 and beyond, which are not in impacted_tests because including them costs more precision than it gains; widen max_depth to move them into the answer. An empty result means none were found in the index, which is not the same as nothing being affected.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -283,7 +408,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_eval_patch",
-                            "description": "Execute sub-15ms test validation inside isolated WASI/MicroVM sandbox",
+                            "description": "Compile and run a Rust snippet in process and report what happened. Takes a few hundred milliseconds, since it invokes rustc. A symbol from a language it cannot compile is refused rather than guessed at.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -295,7 +420,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_attest_commit",
-                            "description": "Generate SLSA Level 4+ cryptographic provenance seal for verified AST mutation",
+                            "description": "Record that a change to a symbol was checked, tying the prompt, the symbol and the check together. Only issued against a check that happened and passed. Signed when a signing key is configured.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -308,7 +433,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_apply_mutation",
-                            "description": "Apply commutative Tree-CRDT AST mutation across concurrent agent swarms",
+                            "description": "Apply a Tree-CRDT mutation to one symbol and persist it. Only that symbol is written, so a concurrent agent sharing the workspace does not lose its work.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -428,7 +553,10 @@ impl AxiomMcpServer {
             }
 
             "axiom_get_blast_radius" => {
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
                 if let Some(res) = self.ast_index.compute_blast_radius(symbol, depth) {
                     Ok(json!(res))
@@ -443,8 +571,14 @@ impl AxiomMcpServer {
             }
 
             "axiom_eval_patch" => {
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("anonymous");
-                let snippet = args.get("code_snippet").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("anonymous");
+                let snippet = args
+                    .get("code_snippet")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 // The sandbox compiles Rust. The indexer does not: it reads Java,
                 // Kotlin, Python, TypeScript and Go too, so a symbol from any of
@@ -488,7 +622,10 @@ impl AxiomMcpServer {
 
             "axiom_attest_commit" => {
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let task_id = match args.get("ctop_task_id").and_then(|v| v.as_str()) {
                     Some(t) if !t.is_empty() => t,
                     _ => {
@@ -529,22 +666,25 @@ impl AxiomMcpServer {
                 let ledger_path = attestation_ledger_path();
                 let _ledger_lock = match axiom_ast::IndexLock::acquire(&ledger_path) {
                     Ok(l) => l,
-                    Err(e) => return Ok(json!({ "error": format!("could not lock the ledger: {e}") })),
+                    Err(e) => {
+                        return Ok(json!({ "error": format!("could not lock the ledger: {e}") }))
+                    }
                 };
                 let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
                 let previous_seal = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
 
-                let attestation = ProvenanceAttestation::generate(
-                    "merkle_root_prev_77a1",
-                    &format!("merkle_root_{}", &root[..8]),
-                    "agent_axiom_v1",
+                let commit_root = format!("merkle_root_{}", &root[..8]);
+                let attestation = ProvenanceAttestation::generate(NewAttestation {
+                    parent_merkle_root: "merkle_root_prev_77a1",
+                    commit_merkle_root: &commit_root,
+                    agent_identity: "agent_axiom_v1",
                     prompt,
-                    symbol,
-                    task_id,
-                    &verification.kind,
-                    &verification.detail,
-                    &previous_seal,
-                );
+                    symbol_path: symbol,
+                    ctop_task_id: task_id,
+                    verified_by: &verification.kind,
+                    verification_detail: &verification.detail,
+                    previous_seal: &previous_seal,
+                });
 
                 // Sign when a key is configured. An unsigned record is still
                 // worth writing; it just cannot say who issued it.
@@ -561,12 +701,14 @@ impl AxiomMcpServer {
                 existing.push(attestation.clone());
                 let encoded = match serde_json::to_string_pretty(&existing) {
                     Ok(j) => j,
-                    Err(e) => return Ok(json!({ "error": format!("could not encode the ledger: {e}") })),
+                    Err(e) => {
+                        return Ok(json!({ "error": format!("could not encode the ledger: {e}") }))
+                    }
                 };
                 if let Some(parent) = ledger_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if let Err(e) = std::fs::write(&ledger_path, encoded) {
+                if let Err(e) = axiom_ast::write_atomically(&ledger_path, encoded.as_bytes()) {
                     return Ok(json!({
                         "error": format!("could not record the attestation: {e}")
                     }));
@@ -576,12 +718,28 @@ impl AxiomMcpServer {
             }
 
             "axiom_apply_mutation" => {
-                let node_id = args.get("node_id").and_then(|v| v.as_str()).unwrap_or("node_01");
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("module::fn");
+                let node_id = args
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("node_01");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("module::fn");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-                let op = self.tree_crdt.insert_node("root", node_id, symbol, "function", content);
-                self.ast_index.index_node(symbol, "function", content, vec![]);
+                let op = self
+                    .tree_crdt
+                    .insert_node("root", node_id, symbol, "function", content);
+
+                // Record it where the next agent will see it.
+                if let Err(e) = append_crdt_op(&crdt_op_log_path(), &op) {
+                    return Ok(json!({
+                        "error": format!("could not record the mutation: {e}")
+                    }));
+                }
+                self.ast_index
+                    .index_node(symbol, "function", content, vec![]);
                 let root = self.tree_crdt.compute_tree_merkle_root();
 
                 // Save updated index to disk
@@ -639,8 +797,14 @@ impl AxiomMcpServer {
 
             "axiom_search_regex" => {
                 let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let max = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                let requested = args.get("mode").and_then(|v| v.as_str()).unwrap_or("literal");
+                let max = args
+                    .get("max_results")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20) as usize;
+                let requested = args
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("literal");
 
                 let mode = match SearchMode::parse(requested) {
                     Ok(m) => m,
@@ -657,7 +821,9 @@ impl AxiomMcpServer {
                         "matches_count": matches.len(),
                         "matches": matches
                     })),
-                    Err(e) => Ok(json!({ "error": e, "query": query, "mode_requested": requested })),
+                    Err(e) => {
+                        Ok(json!({ "error": e, "query": query, "mode_requested": requested }))
+                    }
                 }
             }
 

@@ -16,10 +16,21 @@ use std::sync::RwLock;
 /// crashed process cannot release its own.
 pub struct IndexLock {
     path: PathBuf,
+    token: String,
 }
 
 impl IndexLock {
-    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+    /// How long a lock may sit untouched before another agent takes it over.
+    ///
+    /// Every operation this guards is a read, an edit and a write of one small
+    /// file, which takes single-digit milliseconds. Two seconds is already two
+    /// orders of magnitude beyond that, and it is what an agent waits after a
+    /// holder dies. Thirty seconds, the previous value, stalled every other
+    /// agent for half a minute per operation after a single crash.
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// How long to keep waiting for a live holder before giving up.
+    const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
     pub fn acquire(index_path: &Path) -> std::io::Result<Self> {
         let path = index_path.with_extension("lock");
@@ -27,26 +38,69 @@ impl IndexLock {
             std::fs::create_dir_all(parent)?;
         }
 
-        let deadline = std::time::Instant::now() + Self::STALE_AFTER;
+        // Written into the lock and read back, so an agent can tell its own lock
+        // from one another agent created in the same instant. Two waiters can
+        // both decide a lock is stale; only one wins the create, but without a
+        // token the loser cannot tell that it lost.
+        let token = format!("{}-{:?}", std::process::id(), std::thread::current().id());
+
+        let start = std::time::Instant::now();
+        let mut announced = false;
+
         loop {
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Ok(Self { path }),
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(token.as_bytes())?;
+                    drop(file);
+
+                    // Confirm the lock still says what we wrote. If another agent
+                    // judged ours stale and replaced it, we do not hold it.
+                    match std::fs::read_to_string(&path) {
+                        Ok(found) if found == token => return Ok(Self { path, token }),
+                        _ => continue,
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&path)
+                    let untouched_for = std::fs::metadata(&path)
                         .and_then(|m| m.modified())
-                        .map(|t| t.elapsed().unwrap_or_default() > Self::STALE_AFTER)
-                        .unwrap_or(false);
-                    if stale {
+                        .map(|t| t.elapsed().unwrap_or_default())
+                        .unwrap_or_default();
+
+                    if untouched_for > Self::STALE_AFTER {
+                        // The holder is gone or wedged. Take it over rather than
+                        // wait out a process that is never coming back.
                         let _ = std::fs::remove_file(&path);
                         continue;
                     }
-                    if std::time::Instant::now() > deadline {
+
+                    if start.elapsed() > Self::GIVE_UP_AFTER {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
-                            format!("timed out waiting for {:?}", path),
+                            format!(
+                                "gave up after {:?} waiting for {:?}, which another agent is holding",
+                                Self::GIVE_UP_AFTER, path
+                            ),
                         ));
                     }
+
+                    // A wait long enough to notice should not be silent.
+                    if !announced && start.elapsed() > std::time::Duration::from_millis(500) {
+                        announced = true;
+                        eprintln!("waiting for {path:?}, held by another agent");
+                    }
+
                     std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                // Creating the lock can hit the same transient sharing
+                // violation the rename does, when another agent is replacing
+                // the file this lock guards. Transient means retry, not fail.
+                Err(e) if worth_retrying(&e) && start.elapsed() < Self::GIVE_UP_AFTER => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(e) => return Err(e),
             }
@@ -56,20 +110,72 @@ impl IndexLock {
 
 impl Drop for IndexLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Only remove the lock if it is still ours. If another agent judged it
+        // stale and took over, deleting it here would release that agent's lock
+        // rather than our own.
+        match std::fs::read_to_string(&self.path) {
+            Ok(found) if found == self.token => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+            _ => {}
+        }
     }
+}
+
+/// Whether a filesystem error is worth trying again.
+///
+/// On Windows, replacing or creating a file another process holds open fails
+/// with a sharing violation that surfaces as PermissionDenied, and it clears as
+/// soon as that handle closes. On Unix there is no such rule: a rename succeeds
+/// with readers attached, and EACCES means the directory is not writable, which
+/// waiting will not change. Retrying it there converts an immediate, accurate
+/// error into a long pause followed by the same error.
+///
+/// Everything else is treated as final on both. A cross-device rename or a full
+/// disk will not start working within five seconds, and pretending otherwise
+/// only delays the report.
+fn worth_retrying(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::Interrupted {
+        return true;
+    }
+    cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 /// Write a file so a reader sees either the old contents or the new ones, never
 /// a half-written file: write beside the target, then rename over it.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+///
+/// This matters most for files that are rewritten whole. The ledger and the
+/// operation log are JSON arrays, so a process killed part-way through writing
+/// one leaves a document that does not parse, and every record in it is lost
+/// rather than just the one being appended.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, bytes)?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
+
+    // Renaming over a file another process currently has open fails on Windows
+    // with a sharing violation, and readers of these files are common: an agent
+    // polling the ledger is enough. The violation lasts only as long as that
+    // handle, so retry briefly rather than failing the write.
+    //
+    // Measured before this loop existed: twenty agents attesting while three
+    // threads read the ledger lost sixteen of the twenty records to "Access is
+    // denied", which is a worse outcome than the torn write the rename prevents.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut wait = std::time::Duration::from_millis(1);
+    loop {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) if worth_retrying(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(wait);
+                // Back off, but stay well below the deadline so a contended file
+                // still gets many attempts.
+                wait = (wait * 2).min(std::time::Duration::from_millis(20));
+                let _ = e;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
         }
     }
 }
@@ -130,6 +236,12 @@ pub struct AstIndex {
     parsing_file: RwLock<Option<String>>,
 }
 
+impl Default for AstIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AstIndex {
     pub fn new() -> Self {
         Self {
@@ -147,7 +259,13 @@ impl AstIndex {
     }
 
     /// Insert or update an AST Node into the Merkle index
-    pub fn index_node(&self, symbol: &str, kind: &str, content: &str, deps: Vec<String>) -> AstNode {
+    pub fn index_node(
+        &self,
+        symbol: &str,
+        kind: &str,
+        content: &str,
+        deps: Vec<String>,
+    ) -> AstNode {
         let normalized = content.trim();
         let mut hasher = blake3::Hasher::new();
         hasher.update(normalized.as_bytes());
@@ -321,13 +439,17 @@ impl AstIndex {
         };
 
         let compiled = match effective {
-            SearchMode::Regex => Some(Regex::new(query).map_err(|e| {
-                format!("{:?} is not a valid regular expression: {}", query, e)
-            })?),
+            SearchMode::Regex => Some(
+                Regex::new(query)
+                    .map_err(|e| format!("{:?} is not a valid regular expression: {}", query, e))?,
+            ),
             _ => None,
         };
 
-        Ok((effective, self.run_search(query, compiled.as_ref(), max_results)))
+        Ok((
+            effective,
+            self.run_search(query, compiled.as_ref(), max_results),
+        ))
     }
 
     fn run_search(
@@ -368,7 +490,7 @@ impl AstIndex {
         results
     }
 
-/// The file extension of the source a symbol came from, when the index knows
+    /// The file extension of the source a symbol came from, when the index knows
     /// it. Used to keep language-specific tooling from being pointed at a
     /// language it cannot handle.
     pub fn language_of_symbol(&self, symbol_path: &str) -> Option<String> {
@@ -383,7 +505,7 @@ impl AstIndex {
         None
     }
 
-/// A cheap summary of every source file under `root`: path, size and
+    /// A cheap summary of every source file under `root`: path, size and
     /// modification time. Comparing two of these says whether a re-scan is
     /// worth doing, at the cost of a stat per file rather than a parse.
     pub fn tree_fingerprint(&self, root: &Path) -> String {
@@ -394,8 +516,10 @@ impl AstIndex {
         let mut hasher = blake3::Hasher::new();
         for e in &entries {
             hasher.update(e.as_bytes());
-            hasher.update(b"
-");
+            hasher.update(
+                b"
+",
+            );
         }
         hasher.finalize().to_hex().to_string()
     }
@@ -409,12 +533,32 @@ impl AstIndex {
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with('.') || name == "target" || name == "node_modules" || name == "build" || name == "dist" {
+                if name.starts_with('.')
+                    || name == "target"
+                    || name == "node_modules"
+                    || name == "build"
+                    || name == "dist"
+                {
                     continue;
                 }
                 Self::fingerprint_dir(&path, out);
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if !matches!(ext, "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c" | "cpp" | "h" | "json" | "toml") {
+                if !matches!(
+                    ext,
+                    "java"
+                        | "rs"
+                        | "py"
+                        | "js"
+                        | "ts"
+                        | "go"
+                        | "kt"
+                        | "scala"
+                        | "c"
+                        | "cpp"
+                        | "h"
+                        | "json"
+                        | "toml"
+                ) {
                     continue;
                 }
                 let meta = match entry.metadata() {
@@ -427,16 +571,35 @@ impl AstIndex {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_nanos())
                     .unwrap_or(0);
-                out.push(format!("{}|{}|{}", path.to_string_lossy(), meta.len(), modified));
+                out.push(format!(
+                    "{}|{}|{}",
+                    path.to_string_lossy(),
+                    meta.len(),
+                    modified
+                ));
             }
         }
     }
 
     /// Predictive Blast-Radius Calculation with Accessor Return-Type Resolution
-    pub fn compute_blast_radius(&self, symbol_path: &str, max_depth: usize) -> Option<BlastRadiusResult> {
+    /// How far the traversal looks beyond what it reports, so a caller can see
+    /// which tests widening the depth would add.
+    const SURVEY_DEPTH: usize = 3;
+
+    pub fn compute_blast_radius(
+        &self,
+        symbol_path: &str,
+        max_depth: usize,
+    ) -> Option<BlastRadiusResult> {
         let symbol_node = self.get_symbol(symbol_path)?;
         let canonical_symbol = symbol_node.symbol_path;
-        let simple_name = canonical_symbol.split('.').last().unwrap_or(&canonical_symbol).split("::").next().unwrap_or(&canonical_symbol);
+        let simple_name = canonical_symbol
+            .split('.')
+            .next_back()
+            .unwrap_or(&canonical_symbol)
+            .split("::")
+            .next()
+            .unwrap_or(&canonical_symbol);
 
         let rev = self.reverse_deps.read().unwrap();
         let nodes = self.nodes.read().unwrap();
@@ -456,23 +619,44 @@ impl AstIndex {
             visited.insert(simple_name.to_string());
         }
 
-        let class_symbol = canonical_symbol.split("::").next().unwrap_or(&canonical_symbol);
+        let class_symbol = canonical_symbol
+            .split("::")
+            .next()
+            .unwrap_or(&canonical_symbol);
         if class_symbol != canonical_symbol && visited.insert(class_symbol.to_string()) {
             queue.push_back((class_symbol.to_string(), 0));
         }
 
         let mut tests_by_depth: HashMap<usize, Vec<String>> = HashMap::new();
 
+        // Walk further than is reported. `impacted_tests` stays at `max_depth`,
+        // because widening it costs precision: measured on a 2,219-test suite,
+        // going from depth 1 to depth 2 took one symbol from 57 impacted tests
+        // to 146 with no recall gain, and lifted the overlap between the blast
+        // radii of unrelated symbols from 0.00 to 0.19.
+        //
+        // But a test that reaches the symbol through another class is real, and
+        // reporting nothing about it leaves a caller unable to widen even when
+        // it wants to. So the deeper layers are computed and returned separately
+        // in `tests_by_depth`, and the caller decides. Traversal is cheap; it is
+        // running the tests that is not.
+        let survey_depth = max_depth.max(Self::SURVEY_DEPTH);
+
         while let Some((curr, depth)) = queue.pop_front() {
             if let Some(node) = nodes.get(&curr) {
-                if node.kind == "test" && !impacted_tests.contains(&curr) {
-                    impacted_tests.push(curr.clone());
+                if node.kind == "test" {
                     let d = depth.max(1);
-                    tests_by_depth.entry(d).or_default().push(curr.clone());
+                    let already = tests_by_depth.values().any(|v| v.contains(&curr));
+                    if !already {
+                        tests_by_depth.entry(d).or_default().push(curr.clone());
+                    }
+                    if d <= max_depth && !impacted_tests.contains(&curr) {
+                        impacted_tests.push(curr.clone());
+                    }
                 }
             }
 
-            if depth < max_depth {
+            if depth < survey_depth {
                 if let Some(callers) = rev.get(&curr) {
                     for caller in callers {
                         if visited.insert(caller.clone()) {
@@ -488,7 +672,7 @@ impl AstIndex {
         let mut accessor_names = Vec::new();
         for (m_name, ret_type) in mrt.iter() {
             if ret_type == simple_name || ret_type == &canonical_symbol {
-                let short_m = m_name.split('.').last().unwrap_or(m_name);
+                let short_m = m_name.split('.').next_back().unwrap_or(m_name);
                 accessor_names.push(short_m.to_string());
             }
         }
@@ -518,7 +702,11 @@ impl AstIndex {
         for test_sym in &impacted_tests {
             let prefix = format!("{}::", test_sym);
             for (sym, node) in nodes.iter() {
-                if node.kind == "test" && sym.starts_with(&prefix) && !impacted_tests.contains(sym) && !method_expansions.contains(sym) {
+                if node.kind == "test"
+                    && sym.starts_with(&prefix)
+                    && !impacted_tests.contains(sym)
+                    && !method_expansions.contains(sym)
+                {
                     method_expansions.push(sym.clone());
                     tests_by_depth.entry(1).or_default().push(sym.clone());
                 }
@@ -538,7 +726,7 @@ impl AstIndex {
             for (sym, node) in nodes.iter() {
                 if node.kind == "test" {
                     let sig = node.signature.as_deref().unwrap_or("");
-                    if sym.contains(&test_pattern_1)
+                    if (sym.contains(&test_pattern_1)
                         || sym.contains(&test_pattern_2)
                         || sym.contains(&canonical_symbol)
                         || sig.contains(&canonical_symbol)
@@ -546,18 +734,23 @@ impl AstIndex {
                         || sig.contains(&call_pattern_2)
                         || sig.contains(&call_pattern_3)
                         || sig.contains(&type_pattern)
-                        || node.dependencies.iter().any(|d| d == simple_name || d == &canonical_symbol)
+                        || node
+                            .dependencies
+                            .iter()
+                            .any(|d| d == simple_name || d == &canonical_symbol))
+                        && !impacted_tests.contains(sym)
                     {
-                        if !impacted_tests.contains(sym) {
-                            impacted_tests.push(sym.clone());
-                            tests_by_depth.entry(1).or_default().push(sym.clone());
-                        }
+                        impacted_tests.push(sym.clone());
+                        tests_by_depth.entry(1).or_default().push(sym.clone());
                     }
                 }
             }
         }
 
-        let direct_tests = tests_by_depth.get(&1).cloned().unwrap_or_else(|| impacted_tests.clone());
+        let direct_tests = tests_by_depth
+            .get(&1)
+            .cloned()
+            .unwrap_or_else(|| impacted_tests.clone());
         let total_tests = self.total_tests_count();
         let pruned_percentage = if total_tests > 0 && !impacted_tests.is_empty() {
             let executed = impacted_tests.len().min(total_tests);
@@ -598,7 +791,14 @@ impl AstIndex {
         // filesystem round trip per entry, measured at 24ms/file against
         // 3.2ms/file over a 459-file tree.
         let root_key = Self::canonical_key(root);
-        self.walk_dir(root, root, &root_key, &mut files_scanned, &mut nodes_extracted, &mut visited)?;
+        self.walk_dir(
+            root,
+            root,
+            &root_key,
+            &mut files_scanned,
+            &mut nodes_extracted,
+            &mut visited,
+        )?;
 
         // A scan is a statement about what the tree contains now, so anything
         // recorded from a file that has since disappeared has to go. Without
@@ -615,8 +815,7 @@ impl AstIndex {
         })
     }
 
-
-/// One canonical spelling for a file, so the same file scanned as "." and as
+    /// One canonical spelling for a file, so the same file scanned as "." and as
     /// an absolute root produces the same key. Without this the index holds two
     /// records for one file, and a purge keyed on the root prefix matches
     /// neither.
@@ -652,7 +851,10 @@ impl AstIndex {
     fn forget_file(&self, file_path: &str) {
         let previous = self.file_to_symbols.write().unwrap().remove(file_path);
         self.file_call_names.write().unwrap().remove(file_path);
-        self.forgotten_files.write().unwrap().insert(file_path.to_string());
+        self.forgotten_files
+            .write()
+            .unwrap()
+            .insert(file_path.to_string());
 
         if let Some(symbols) = previous {
             let mut nodes = self.nodes.write().unwrap();
@@ -673,7 +875,6 @@ impl AstIndex {
     /// to every recorded path makes one scan able to empty an unrelated project's
     /// entries out of a shared index.
     fn forget_missing_files(&self, root_prefix: &str, visited: &HashSet<String>) {
-
         let recorded: Vec<String> = self
             .file_to_symbols
             .read()
@@ -729,13 +930,19 @@ impl AstIndex {
             if path.is_dir() {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 // Skip hidden folders and build directories
-                if !dir_name.starts_with('.') && dir_name != "target" && dir_name != "node_modules" && dir_name != "build" && dir_name != "dist" {
+                if !dir_name.starts_with('.')
+                    && dir_name != "target"
+                    && dir_name != "node_modules"
+                    && dir_name != "build"
+                    && dir_name != "dist"
+                {
                     self.walk_dir(&path, root, root_key, files_count, nodes_count, visited)?;
                 }
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     match ext {
-                        "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c" | "cpp" | "h" | "json" | "toml" => {
+                        "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c"
+                        | "cpp" | "h" | "json" | "toml" => {
                             if let Ok(content) = std::fs::read_to_string(&path) {
                                 *files_count += 1;
                                 let rel = Self::key_under_root(root, root_key, &path);
@@ -747,7 +954,10 @@ impl AstIndex {
                                 self.forget_file(&rel);
 
                                 // Index into Zoekt Trigram store
-                                self.zoekt_index.write().unwrap().add_document(&rel, &content);
+                                self.zoekt_index
+                                    .write()
+                                    .unwrap()
+                                    .add_document(&rel, &content);
 
                                 // Index into AST CAS
                                 self.parse_file_content(&rel, ext, &content, nodes_count);
@@ -762,13 +972,25 @@ impl AstIndex {
         Ok(())
     }
 
-    fn parse_file_content(&self, file_path: &str, ext: &str, content: &str, nodes_count: &mut usize) {
+    fn parse_file_content(
+        &self,
+        file_path: &str,
+        ext: &str,
+        content: &str,
+        nodes_count: &mut usize,
+    ) {
         *self.parsing_file.write().unwrap() = Some(file_path.to_string());
         self.parse_by_language(file_path, ext, content, nodes_count);
         *self.parsing_file.write().unwrap() = None;
     }
 
-    fn parse_by_language(&self, file_path: &str, ext: &str, content: &str, nodes_count: &mut usize) {
+    fn parse_by_language(
+        &self,
+        file_path: &str,
+        ext: &str,
+        content: &str,
+        nodes_count: &mut usize,
+    ) {
         match ext {
             "java" | "kt" | "scala" => self.parse_java_content(file_path, content, nodes_count),
             "rs" => self.parse_rust_content(file_path, content, nodes_count),
@@ -779,90 +1001,108 @@ impl AstIndex {
         }
     }
 
-fn is_test_path_or_file(file_path: &str) -> bool {
-    let normalized = file_path.replace('\\', "/");
-    let file_name = normalized.split('/').last().unwrap_or("");
-    let fn_lower = file_name.to_lowercase();
-    let is_test_filename = fn_lower.starts_with("test_")
-        || fn_lower.ends_with("_test.rs")
-        || fn_lower.ends_with("_test.go")
-        || fn_lower.ends_with("_test.py")
-        || fn_lower.ends_with(".test.ts")
-        || fn_lower.ends_with(".spec.ts")
-        || fn_lower.ends_with(".test.js")
-        || fn_lower.ends_with(".spec.js")
-        || (file_name.ends_with("Test.java") || file_name.ends_with("Tests.java") || file_name.ends_with("TestCase.java") || file_name.ends_with("IT.java"));
+    fn is_test_path_or_file(file_path: &str) -> bool {
+        let normalized = file_path.replace('\\', "/");
+        let file_name = normalized.split('/').next_back().unwrap_or("");
+        let fn_lower = file_name.to_lowercase();
+        let is_test_filename = fn_lower.starts_with("test_")
+            || fn_lower.ends_with("_test.rs")
+            || fn_lower.ends_with("_test.go")
+            || fn_lower.ends_with("_test.py")
+            || fn_lower.ends_with(".test.ts")
+            || fn_lower.ends_with(".spec.ts")
+            || fn_lower.ends_with(".test.js")
+            || fn_lower.ends_with(".spec.js")
+            || (file_name.ends_with("Test.java")
+                || file_name.ends_with("Tests.java")
+                || file_name.ends_with("TestCase.java")
+                || file_name.ends_with("IT.java"));
 
-    // If file is in src/main/, it is never in a test directory
-    if normalized.contains("/src/main/") && !is_test_filename {
-        return false;
+        // If file is in src/main/, it is never in a test directory
+        if normalized.contains("/src/main/") && !is_test_filename {
+            return false;
+        }
+
+        let in_test_dir = normalized.contains("/src/test/")
+            || normalized.contains("/tests/")
+            || normalized.contains("/test/")
+            || normalized.contains("/__tests__/");
+
+        in_test_dir || is_test_filename
     }
 
-    let in_test_dir = normalized.contains("/src/test/")
-        || normalized.contains("/tests/")
-        || normalized.contains("/test/")
-        || normalized.contains("/__tests__/");
-
-    in_test_dir || is_test_filename
-}
-
-fn is_valid_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_alphabetic() || c == '_' => chars.all(|c| c.is_alphanumeric() || c == '_'),
-        _ => false,
+    fn is_valid_identifier(name: &str) -> bool {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_alphabetic() || c == '_' => {
+                chars.all(|c| c.is_alphanumeric() || c == '_')
+            }
+            _ => false,
+        }
     }
-}
 
-fn is_java_keyword(word: &str) -> bool {
-    matches!(
-        word,
-        "catch" | "return" | "super" | "this" | "synchronized" | "try" | "if" | "while"
-            | "for" | "switch" | "throw" | "new" | "else" | "finally" | "assert" | "case"
-            | "default" | "import" | "package" | "class" | "interface" | "enum" | "record"
-            | "break" | "continue" | "instanceof" | "do" | "goto" | "const" | "throws"
-            | "public" | "private" | "protected" | "static" | "final" | "abstract"
-    )
-}
+    fn is_java_keyword(word: &str) -> bool {
+        matches!(
+            word,
+            "catch"
+                | "return"
+                | "super"
+                | "this"
+                | "synchronized"
+                | "try"
+                | "if"
+                | "while"
+                | "for"
+                | "switch"
+                | "throw"
+                | "new"
+                | "else"
+                | "finally"
+                | "assert"
+                | "case"
+                | "default"
+                | "import"
+                | "package"
+                | "class"
+                | "interface"
+                | "enum"
+                | "record"
+                | "break"
+                | "continue"
+                | "instanceof"
+                | "do"
+                | "goto"
+                | "const"
+                | "throws"
+                | "public"
+                | "private"
+                | "protected"
+                | "static"
+                | "final"
+                | "abstract"
+        )
+    }
 
-fn strip_comments_and_strings(content: &str) -> String {
-    let mut result = String::with_capacity(content.len());
-    let chars: Vec<char> = content.chars().collect();
-    let mut i = 0;
+    fn strip_comments_and_strings(content: &str) -> String {
+        let mut result = String::with_capacity(content.len());
+        let chars: Vec<char> = content.chars().collect();
+        let mut i = 0;
 
-    while i < chars.len() {
-        if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '/' {
-            // Line comment: skip until newline
-            i += 2;
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            if i < chars.len() {
-                result.push('\n');
-                i += 1;
-            }
-        } else if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '*' {
-            // Block comment: skip until */
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                if chars[i] == '\n' {
-                    result.push('\n');
-                } else {
-                    result.push(' ');
+        while i < chars.len() {
+            if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '/' {
+                // Line comment: skip until newline
+                i += 2;
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
                 }
-                i += 1;
-            }
-            if i + 1 < chars.len() {
-                i += 2; // skip */
-            }
-        } else if chars[i] == '"' {
-            // String literal: skip until closing quote (accounting for escapes)
-            result.push(' ');
-            i += 1;
-            while i < chars.len() && chars[i] != '"' {
-                if chars[i] == '\\' && i + 1 < chars.len() {
-                    i += 2;
-                } else {
+                if i < chars.len() {
+                    result.push('\n');
+                    i += 1;
+                }
+            } else if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '*' {
+                // Block comment: skip until */
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
                     if chars[i] == '\n' {
                         result.push('\n');
                     } else {
@@ -870,34 +1110,52 @@ fn strip_comments_and_strings(content: &str) -> String {
                     }
                     i += 1;
                 }
-            }
-            if i < chars.len() {
-                i += 1; // skip closing quote
-            }
-            result.push(' ');
-        } else if chars[i] == '\'' {
-            // Char literal
-            result.push(' ');
-            i += 1;
-            while i < chars.len() && chars[i] != '\'' {
-                if chars[i] == '\\' && i + 1 < chars.len() {
-                    i += 2;
-                } else {
+                if i + 1 < chars.len() {
+                    i += 2; // skip */
+                }
+            } else if chars[i] == '"' {
+                // String literal: skip until closing quote (accounting for escapes)
+                result.push(' ');
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        i += 2;
+                    } else {
+                        if chars[i] == '\n' {
+                            result.push('\n');
+                        } else {
+                            result.push(' ');
+                        }
+                        i += 1;
+                    }
+                }
+                if i < chars.len() {
+                    i += 1; // skip closing quote
+                }
+                result.push(' ');
+            } else if chars[i] == '\'' {
+                // Char literal
+                result.push(' ');
+                i += 1;
+                while i < chars.len() && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if i < chars.len() {
                     i += 1;
                 }
-            }
-            if i < chars.len() {
+                result.push(' ');
+            } else {
+                result.push(chars[i]);
                 i += 1;
             }
-            result.push(' ');
-        } else {
-            result.push(chars[i]);
-            i += 1;
         }
-    }
 
-    result
-}
+        result
+    }
 
     fn parse_java_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let is_test_file = Self::is_test_path_or_file(file_path);
@@ -910,7 +1168,11 @@ fn strip_comments_and_strings(content: &str) -> String {
         for line in content.lines() {
             let tr = line.trim();
             if tr.starts_with("package ") {
-                package = tr.replace("package ", "").replace(';', "").trim().to_string();
+                package = tr
+                    .replace("package ", "")
+                    .replace(';', "")
+                    .trim()
+                    .to_string();
                 break;
             }
         }
@@ -925,13 +1187,18 @@ fn strip_comments_and_strings(content: &str) -> String {
                 if word.contains('.') {
                     let parts: Vec<&str> = word.split('.').collect();
                     for (idx, &part) in parts.iter().enumerate() {
-                        if !part.is_empty() && part.chars().next().unwrap().is_uppercase() && Self::is_valid_identifier(part) {
+                        if !part.is_empty()
+                            && part.chars().next().unwrap().is_uppercase()
+                            && Self::is_valid_identifier(part)
+                        {
                             referenced_types.insert(part.to_string());
                             let prefix = parts[..=idx].join(".");
                             referenced_types.insert(prefix);
                         }
                     }
-                } else if word.chars().next().unwrap().is_uppercase() && Self::is_valid_identifier(word) {
+                } else if word.chars().next().unwrap().is_uppercase()
+                    && Self::is_valid_identifier(word)
+                {
                     referenced_types.insert(word.to_string());
                     if !package.is_empty() {
                         referenced_types.insert(format!("{}.{}", package, word));
@@ -964,9 +1231,17 @@ fn strip_comments_and_strings(content: &str) -> String {
             }
 
             if trimmed.starts_with("import ") {
-                let imp = trimmed.replace("import ", "").replace("static ", "").replace(';', "").trim().to_string();
+                let imp = trimmed
+                    .replace("import ", "")
+                    .replace("static ", "")
+                    .replace(';', "")
+                    .trim()
+                    .to_string();
                 imports.push(imp);
-            } else if (trimmed.contains("class ") || trimmed.contains("interface ") || trimmed.contains("enum ") || trimmed.contains("record "))
+            } else if (trimmed.contains("class ")
+                || trimmed.contains("interface ")
+                || trimmed.contains("enum ")
+                || trimmed.contains("record "))
                 && (trimmed.starts_with("public ")
                     || trimmed.starts_with("private ")
                     || trimmed.starts_with("protected ")
@@ -980,9 +1255,16 @@ fn strip_comments_and_strings(content: &str) -> String {
                     || trimmed.starts_with("@interface "))
             {
                 let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-                if let Some(pos) = tokens.iter().position(|&t| t == "class" || t == "interface" || t == "enum" || t == "record") {
+                if let Some(pos) = tokens
+                    .iter()
+                    .position(|&t| t == "class" || t == "interface" || t == "enum" || t == "record")
+                {
                     if pos + 1 < tokens.len() {
-                        let raw_name = tokens[pos + 1].split('<').next().unwrap_or("").replace('{', "");
+                        let raw_name = tokens[pos + 1]
+                            .split('<')
+                            .next()
+                            .unwrap_or("")
+                            .replace('{', "");
                         let class_name = raw_name.trim();
                         if Self::is_valid_identifier(class_name) {
                             let open_c = trimmed.chars().filter(|&c| c == '{').count();
@@ -995,7 +1277,11 @@ fn strip_comments_and_strings(content: &str) -> String {
                                 format!("{}.{}", package, class_name)
                             };
 
-                            let kind = if is_test_file && (class_name.ends_with("Test") || class_name.ends_with("Tests") || class_name.ends_with("TestCase")) {
+                            let kind = if is_test_file
+                                && (class_name.ends_with("Test")
+                                    || class_name.ends_with("Tests")
+                                    || class_name.ends_with("TestCase"))
+                            {
                                 "test"
                             } else {
                                 "class"
@@ -1003,13 +1289,21 @@ fn strip_comments_and_strings(content: &str) -> String {
 
                             let mut node_deps = imports.clone();
                             for ref_t in &referenced_types {
-                                if !node_deps.contains(ref_t) && ref_t != &full_symbol && ref_t != class_name {
+                                if !node_deps.contains(ref_t)
+                                    && ref_t != &full_symbol
+                                    && ref_t != class_name
+                                {
                                     node_deps.push(ref_t.clone());
                                 }
                             }
 
                             self.index_node(&full_symbol, kind, trimmed, node_deps);
-                            self.file_to_symbols.write().unwrap().entry(file_path.to_string()).or_default().push(full_symbol.clone());
+                            self.file_to_symbols
+                                .write()
+                                .unwrap()
+                                .entry(file_path.to_string())
+                                .or_default()
+                                .push(full_symbol.clone());
                             *nodes_count += 1;
                         }
                     }
@@ -1038,7 +1332,8 @@ fn strip_comments_and_strings(content: &str) -> String {
                 && trimmed.contains('(')
             {
                 let mut full_sig = trimmed.to_string();
-                let is_annotated_test = full_sig.contains("@Test") || (i > 0 && lines[i - 1].trim().starts_with("@Test"));
+                let is_annotated_test = full_sig.contains("@Test")
+                    || (i > 0 && lines[i - 1].trim().starts_with("@Test"));
 
                 while !full_sig.contains(')') && i + 1 < lines.len() {
                     i += 1;
@@ -1047,7 +1342,12 @@ fn strip_comments_and_strings(content: &str) -> String {
                 }
 
                 let signature_clean = full_sig.split('{').next().unwrap_or(&full_sig).trim();
-                let sig_tokens: Vec<&str> = signature_clean.split('(').next().unwrap_or("").split_whitespace().collect();
+                let sig_tokens: Vec<&str> = signature_clean
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
 
                 let method_name = signature_clean
                     .split('(')
@@ -1061,20 +1361,33 @@ fn strip_comments_and_strings(content: &str) -> String {
                 let enclosing_class = class_stack.last().map(|(c, _)| c.as_str()).unwrap_or("");
                 let is_valid_name = Self::is_valid_identifier(method_name)
                     && !Self::is_java_keyword(method_name)
-                    && (method_name.chars().next().map_or(false, |c| c.is_lowercase() || c == '_' || c == '$')
+                    && (method_name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_lowercase() || c == '_' || c == '$')
                         || (!enclosing_class.is_empty() && enclosing_class == method_name));
 
                 if !enclosing_class.is_empty() && is_valid_name {
                     // Record return type for accessor resolution
                     if sig_tokens.len() >= 2 {
                         let raw_ret = sig_tokens[sig_tokens.len() - 2];
-                        let ret_clean = raw_ret.split('<').last().unwrap_or(raw_ret).replace('>', "").replace("[]", "");
+                        let ret_clean = raw_ret
+                            .split('<')
+                            .next_back()
+                            .unwrap_or(raw_ret)
+                            .replace('>', "")
+                            .replace("[]", "");
                         let ret_ident = ret_clean.trim();
-                        if Self::is_valid_identifier(ret_ident) && ret_ident.chars().next().map_or(false, |c| c.is_uppercase()) {
+                        if Self::is_valid_identifier(ret_ident)
+                            && ret_ident.chars().next().is_some_and(|c| c.is_uppercase())
+                        {
                             let mut mrt = self.method_return_types.write().unwrap();
                             mrt.insert(method_name.to_string(), ret_ident.to_string());
                             if !package.is_empty() {
-                                mrt.insert(format!("{}.{}", package, method_name), ret_ident.to_string());
+                                mrt.insert(
+                                    format!("{}.{}", package, method_name),
+                                    ret_ident.to_string(),
+                                );
                             }
                         }
                     }
@@ -1085,7 +1398,8 @@ fn strip_comments_and_strings(content: &str) -> String {
                         format!("{}::{}", enclosing_class, method_name)
                     };
 
-                    let is_test_method = is_annotated_test || (is_test_file && method_name.starts_with("test"));
+                    let is_test_method =
+                        is_annotated_test || (is_test_file && method_name.starts_with("test"));
                     let kind = if is_test_method { "test" } else { "method" };
 
                     let mut node_deps = imports.clone();
@@ -1096,7 +1410,12 @@ fn strip_comments_and_strings(content: &str) -> String {
                     }
 
                     self.index_node(&full_symbol, kind, signature_clean, node_deps);
-                    self.file_to_symbols.write().unwrap().entry(file_path.to_string()).or_default().push(full_symbol.clone());
+                    self.file_to_symbols
+                        .write()
+                        .unwrap()
+                        .entry(file_path.to_string())
+                        .or_default()
+                        .push(full_symbol.clone());
                     *nodes_count += 1;
                 }
             }
@@ -1106,7 +1425,7 @@ fn strip_comments_and_strings(content: &str) -> String {
             let open_count = curr_line.chars().filter(|&c| c == '{').count();
             let close_count = curr_line.chars().filter(|&c| c == '}').count();
 
-            current_brace_depth = current_brace_depth + open_count;
+            current_brace_depth += open_count;
             current_brace_depth = current_brace_depth.saturating_sub(close_count);
 
             while let Some((_, depth)) = class_stack.last() {
@@ -1136,8 +1455,20 @@ fn strip_comments_and_strings(content: &str) -> String {
             }
 
             if trimmed.starts_with("use ") {
-                uses.push(trimmed.replace("use ", "").replace(';', "").trim().to_string());
-            } else if trimmed.contains("fn ") && (trimmed.starts_with("fn ") || trimmed.starts_with("pub ") || trimmed.starts_with("async ") || trimmed.starts_with("pub async ") || trimmed.starts_with("pub(crate) ")) {
+                uses.push(
+                    trimmed
+                        .replace("use ", "")
+                        .replace(';', "")
+                        .trim()
+                        .to_string(),
+                );
+            } else if trimmed.contains("fn ")
+                && (trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub ")
+                    || trimmed.starts_with("async ")
+                    || trimmed.starts_with("pub async ")
+                    || trimmed.starts_with("pub(crate) "))
+            {
                 let name = trimmed
                     .split('(')
                     .next()
@@ -1156,13 +1487,17 @@ fn strip_comments_and_strings(content: &str) -> String {
                     self.index_node(&symbol, kind, trimmed, uses.clone());
                     *nodes_count += 1;
                 }
-            } else if trimmed.starts_with("struct ") || trimmed.starts_with("pub struct ") || trimmed.starts_with("pub(crate) struct ") || trimmed.starts_with("enum ") || trimmed.starts_with("pub enum ") {
+            } else if trimmed.starts_with("struct ")
+                || trimmed.starts_with("pub struct ")
+                || trimmed.starts_with("pub(crate) struct ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("pub enum ")
+            {
                 let name = trimmed
                     .split_whitespace()
                     .nth(if trimmed.starts_with("pub ") { 2 } else { 1 })
                     .unwrap_or("")
-                    .replace('{', "")
-                    .replace(';', "")
+                    .replace(['{', ';'], "")
                     .trim()
                     .to_string();
 
@@ -1192,11 +1527,22 @@ fn strip_comments_and_strings(content: &str) -> String {
             if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
                 imports.push(trimmed.to_string());
             } else if trimmed.starts_with("class ") {
-                let name = trimmed.replace("class ", "").split('(').next().unwrap_or("").replace(':', "").trim().to_string();
+                let name = trimmed
+                    .replace("class ", "")
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .replace(':', "")
+                    .trim()
+                    .to_string();
                 if Self::is_valid_identifier(&name) {
                     current_class = name.clone();
                     let symbol = format!("{}::{}", file_path, name);
-                    let kind = if name.contains("Test") { "test" } else { "class" };
+                    let kind = if name.contains("Test") {
+                        "test"
+                    } else {
+                        "class"
+                    };
                     self.index_node(&symbol, kind, trimmed, imports.clone());
                     *nodes_count += 1;
                 }
@@ -1233,7 +1579,10 @@ fn strip_comments_and_strings(content: &str) -> String {
             let trimmed = line.trim();
             if trimmed.starts_with("import ") {
                 imports.push(trimmed.to_string());
-            } else if trimmed.contains("function ") || trimmed.starts_with("export function ") || trimmed.starts_with("export async function ") {
+            } else if trimmed.contains("function ")
+                || trimmed.starts_with("export function ")
+                || trimmed.starts_with("export async function ")
+            {
                 let name = trimmed
                     .split('(')
                     .next()
@@ -1246,13 +1595,18 @@ fn strip_comments_and_strings(content: &str) -> String {
 
                 if !name.is_empty() {
                     let symbol = format!("{}::{}", file_path, name);
-                    let is_test = name.starts_with("test") || file_path.contains("test") || file_path.contains("spec");
+                    let is_test = name.starts_with("test")
+                        || file_path.contains("test")
+                        || file_path.contains("spec");
                     let kind = if is_test { "test" } else { "function" };
 
                     self.index_node(&symbol, kind, trimmed, imports.clone());
                     *nodes_count += 1;
                 }
-            } else if trimmed.starts_with("class ") || trimmed.starts_with("export class ") || trimmed.starts_with("export default class ") {
+            } else if trimmed.starts_with("class ")
+                || trimmed.starts_with("export class ")
+                || trimmed.starts_with("export default class ")
+            {
                 let name = trimmed
                     .split("class ")
                     .last()
@@ -1290,7 +1644,6 @@ fn strip_comments_and_strings(content: &str) -> String {
             }
         }
     }
-
 
     /// Identifiers appearing immediately before an opening parenthesis, i.e. the
     /// methods a file calls. Derived from already comment- and string-stripped
@@ -1337,8 +1690,7 @@ fn strip_comments_and_strings(content: &str) -> String {
             Err(struct_err) => {
                 let nodes: HashMap<String, AstNode> =
                     serde_json::from_str(&content).map_err(|bare_err| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        std::io::Error::other(
                             format!(
                                 "{path:?} parses as neither the current index format ({struct_err}) nor a legacy bare node map ({bare_err})"
                             ),
@@ -1373,9 +1725,12 @@ fn strip_comments_and_strings(content: &str) -> String {
             std::fs::create_dir_all(parent)?;
         }
 
-        let node = self
-            .get_symbol(symbol)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{symbol:?} is not indexed")))?;
+        let node = self.get_symbol(symbol).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{symbol:?} is not indexed"),
+            )
+        })?;
 
         let _lock = IndexLock::acquire(&abs_path)?;
 
@@ -1394,7 +1749,7 @@ fn strip_comments_and_strings(content: &str) -> String {
         payload.nodes.insert(symbol.to_string(), node);
 
         let json = serde_json::to_string_pretty(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         write_atomically(&abs_path, json.as_bytes())?;
         Ok(abs_path)
     }
@@ -1447,14 +1802,14 @@ fn strip_comments_and_strings(content: &str) -> String {
             .extend(self.file_to_symbols.read().unwrap().clone());
 
         let json = serde_json::to_string_pretty(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         write_atomically(&abs_path, json.as_bytes())?;
 
         // Recorded so the next save does not have to re-apply them.
         self.forgotten_symbols.write().unwrap().clear();
         self.forgotten_files.write().unwrap().clear();
-        
+
         // Verify write succeeded
         if !abs_path.exists() {
             return Err(std::io::Error::new(
@@ -1479,7 +1834,10 @@ fn strip_comments_and_strings(content: &str) -> String {
         let mut reverse_deps = HashMap::new();
         for (symbol, node) in &payload.nodes {
             for dep in &node.dependencies {
-                reverse_deps.entry(dep.clone()).or_insert_with(Vec::new).push(symbol.clone());
+                reverse_deps
+                    .entry(dep.clone())
+                    .or_insert_with(Vec::new)
+                    .push(symbol.clone());
             }
         }
 
@@ -1515,6 +1873,12 @@ pub struct ZoektIndex {
     trigrams: HashMap<[u8; 3], HashSet<String>>,
 }
 
+impl Default for ZoektIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ZoektIndex {
     pub fn new() -> Self {
         Self {
@@ -1529,12 +1893,20 @@ impl ZoektIndex {
         if bytes.len() >= 3 {
             for i in 0..bytes.len() - 2 {
                 let tri = [bytes[i], bytes[i + 1], bytes[i + 2]];
-                self.trigrams.entry(tri).or_default().insert(path.to_string());
+                self.trigrams
+                    .entry(tri)
+                    .or_default()
+                    .insert(path.to_string());
             }
         }
     }
 
-    pub fn search(&self, query: &str, compiled: Option<&Regex>, max_results: usize) -> Vec<ZoektMatch> {
+    pub fn search(
+        &self,
+        query: &str,
+        compiled: Option<&Regex>,
+        max_results: usize,
+    ) -> Vec<ZoektMatch> {
         let mut matches = Vec::new();
         let query_bytes = query.as_bytes();
 

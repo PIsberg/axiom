@@ -70,7 +70,10 @@ impl TreeCrdt {
                 symbol: "crate::root".to_string(),
                 kind: "module".to_string(),
                 content: String::new(),
-                last_updated: LamportTime { time: 0, agent_id: 0 },
+                last_updated: LamportTime {
+                    time: 0,
+                    agent_id: 0,
+                },
                 deleted: false,
                 children: Vec::new(),
             },
@@ -95,7 +98,14 @@ impl TreeCrdt {
     }
 
     /// Insert a new AST node locally
-    pub fn insert_node(&self, parent_id: &str, node_id: &str, symbol: &str, kind: &str, content: &str) -> TreeOp {
+    pub fn insert_node(
+        &self,
+        parent_id: &str,
+        node_id: &str,
+        symbol: &str,
+        kind: &str,
+        content: &str,
+    ) -> TreeOp {
         let ts = self.next_timestamp();
         let op = TreeOp::Insert {
             op_id: format!("op_ins_{}_{}", self.agent_id, ts.time),
@@ -218,9 +228,7 @@ impl TreeCrdt {
             }
 
             TreeOp::Delete {
-                node_id,
-                timestamp,
-                ..
+                node_id, timestamp, ..
             } => {
                 if let Some(node) = nodes.get_mut(&node_id) {
                     if timestamp > node.last_updated {
@@ -283,7 +291,10 @@ impl SwarmEngine {
     }
 
     /// Run concurrent simulated swarm mutations and verify 100% convergence
-    pub async fn simulate_concurrent_swarm(&mut self, operations_per_agent: usize) -> Result<SwarmConvergenceReport> {
+    pub async fn simulate_concurrent_swarm(
+        &mut self,
+        operations_per_agent: usize,
+    ) -> Result<SwarmConvergenceReport> {
         let start = std::time::Instant::now();
         let mut all_ops = Vec::new();
 
@@ -307,7 +318,12 @@ impl SwarmEngine {
                 // Concurrent update
                 if let Some(op2) = agent.update_node(
                     &node_id,
-                    &format!("pub fn calc_{}() -> u64 {{ {} }} // updated by agent {}", op_idx, agent_id * 20, agent_id),
+                    &format!(
+                        "pub fn calc_{}() -> u64 {{ {} }} // updated by agent {}",
+                        op_idx,
+                        agent_id * 20,
+                        agent_id
+                    ),
                 ) {
                     all_ops.push(op2);
                 }
@@ -332,7 +348,12 @@ impl SwarmEngine {
             let root = agent.compute_tree_merkle_root();
             if root != baseline_root {
                 converged = false;
-                eprintln!("Mismatch on agent {}: expected {}, got {}", idx + 1, baseline_root, root);
+                eprintln!(
+                    "Mismatch on agent {}: expected {}, got {}",
+                    idx + 1,
+                    baseline_root,
+                    root
+                );
             }
         }
 

@@ -1,4 +1,9 @@
 # AXIOM: Agent-Native Autonomous Software Engine
+
+> **This is a specification.** It describes what Axiom is designed to be.
+> For what is built, see the status table at the top of
+> [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## System Architecture Specification
 
 ---

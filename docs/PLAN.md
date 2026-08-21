@@ -1,5 +1,33 @@
 # AXIOM: Implementation Plan & Delivery Status
 
+> **Status of this document.** The heading below says 100% implemented. That is
+> true of most of it and not all, and the difference is worth stating rather than
+> leaving to be discovered.
+>
+> Built and exercised against a real 2,220-test repository: the polyglot index
+> and its persistence, blast-radius pruning, literal and regex search, the
+> Tree-CRDT, concurrent access to one workspace, and the provenance record with
+> Ed25519 signing and chaining.
+>
+> Not built, though listed below as completed:
+>
+> * **Tier 2 MicroVM adapter.** No `micro-init`, no `AF_VSOCK`, no `userfaultfd`.
+>   Evaluation is `rustc` and `wasmtime` in process.
+> * **High-fidelity AST parsing.** Parsing is line-based heuristics per language,
+>   not a parser. It handles the shapes it was tested against and misses others.
+>
+> Overstated rather than absent:
+>
+> * **Instant execution.** A snippet is compiled and run: median around 175ms.
+>   The sub-millisecond figures date from when evaluation matched substrings and
+>   ran nothing.
+> * **Zero false positives.** The sandbox reports `EvaluatorUnavailable` instead
+>   of a verdict when it cannot run something, which is what that phrase should
+>   mean here. It says nothing about the accuracy of the blast radius, which has
+>   both false positives and false negatives; see the README.
+
+
+
 ---
 
 ### Status: 100% IMPLEMENTED, VERIFIED & PASSING
@@ -32,7 +60,7 @@ All architectural phases, dual execution engines, polyglot Merkle AST parser, Zo
 ---
 
 ### Phase 3: Tree-CRDT Swarms & Cross-Process Persistence — [COMPLETED ✅]
-* **Tree-CRDT Concurrency**: Deterministic LWW-Lamport tree mutations with 0 merge conflicts across 50+ concurrent agents.
+* **Tree-CRDT Concurrency**: Deterministic LWW-Lamport tree mutations with 0 merge conflicts across concurrent agents. Agents in separate processes converge through a shared operation log; the 50-agent figure comes from the in-process simulation.
 * **Robust Persistence**: Atomic disk synchronization to `.axiom/index.json` with multi-ancestor directory traversal discovery on server startup.
 * **Precise Test Classification**: Strict heuristic preventing `src/main/` production classes from inflating test counts.
 

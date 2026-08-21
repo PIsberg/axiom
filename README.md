@@ -26,7 +26,7 @@ agent pays on every iteration.
 * **In-Process Sandbox**: a Rust snippet is compiled and run in place, so a hypothesis is checked without a CI round trip. Measure it on your own machine with `axiom bench`; on the development machine the median is around 175ms, which is `rustc` rather than the harness. A snippet in a language the sandbox cannot compile is refused rather than guessed at.
 * **Predictive Blast-Radius Test Pruning**: Transitive reverse dependency reachability prunes $\ge 99.9\%$ of irrelevant tests across 5,000+ test repositories.
 * **Ultra-Fast Zoekt Trigram Search**: In-memory sliding trigram index (`[u8; 3] -> HashSet<Path>`) providing $<1\text{ms}$ regex and literal search without disk I/O.
-* **Tree-CRDT Multi-Agent Swarm Concurrency**: Commutative LWW-Lamport tree operations enabling 50+ concurrent AI agents to mutate code without merge conflicts.
+* **Concurrent Agents on One Workspace**: mutations are recorded to a shared, commutative operation log, so agents in separate processes converge on the same tree whatever order their work lands in. Measured with twelve agents mutating at once: twelve operations recorded, none lost or duplicated, and one identical Merkle root across four replay orders.
 * **Recorded Provenance**: every attested change ties a prompt, a symbol, the sandbox run that checked it, and the Merkle roots either side into a record you can read back later. Issued only after the run it names has passed.
 
 ---
@@ -44,8 +44,8 @@ Run `axiom demo` to see the autonomous agent self-healing loop in action:
    ↳ Received AST Node: 'auth::service::validate_token' in 0.035 ms
 
 🔹 [Step 2/5] Calculating topological blast radius across Merkle DAG...
-   ↳ Total repo tests: 5,000 | Targeted tests: 1 ('test_auth_validation')
-   ↳ Pruned scope: 99.98% of test suite bypassed in 0.023 ms
+   ↳ Tests in this workspace: 1 | Targeted: 1
+   ↳ Pruned 0.00% of them, computed in 0.031 ms
 
 🔹 [Step 3/5] Simulating Agent testing a BUGGY hypothesis (empty token) in sandbox...
    ↳ Sandbox Caught Bug: ❌ CTOP_STATUS = FAILED (Sandbox latency: 171.402 ms)
@@ -60,17 +60,22 @@ Run `axiom demo` to see the autonomous agent self-healing loop in action:
 ================================================================================
                          📊 PERFORMANCE BENCHMARK MATRIX
 ================================================================================
- Metric                    Legacy Git + CI (GitHub)      AXIOM Engine
+ Measured on async-test-lib: 459 files, 5,934 symbols, 2,219 tests
  -------------------------------------------------------------------------------
- Workspace Sync            git clone (500 MB / ~12s)     MCP Graph Query (2 KB / 0.04 ms)
- Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)
- Sandbox Feedback Loop     300,000 ms (5 minutes)        ~175 ms (compile and run, measured)
- Self-Correction Total     600,000 ms (10 minutes)       ~350 ms (two sandbox rounds)
- Provenance Security       Unsigned text commit          Prompt, symbol and sandbox result recorded together
- Speedup Multiplier        1.0x (Baseline)               ~1700x on this stage
+ Index the tree            1.5 s warm, 3.8 s cold, producing a 49 MB index
+ Server startup            1.1 s, once per session
+ Symbol search             0.2 to 0.4 ms warm  (grep over the same tree: 52 ms)
+ Blast radius              1.2 to 1.4 ms warm, selecting 32 of 2,219 tests
+ Evaluate a snippet        176 ms median, rustc dominating
+ Provenance record         Prompt, symbol and check recorded together, signed if
+                           a key is configured, chained so a deletion shows
 ================================================================================
 
-🎯 VERDICT: Autonomous AI Coding Agents iterate at MACHINE SPEED with ZERO merge conflicts.
+The saving is in what does not run: 26 tests instead of 2,219 for a one-method
+change, verified by breaking that method and watching the two tests that cover
+it fail. Search is faster than grep only once the index is warm, and the fixed
+cost takes about 50 queries to repay. Figures and method:
+docs/axiom_speed_comparison_report.md.
 ```
 
 ---
@@ -127,14 +132,14 @@ cd axiom
   ```
 
 The compiled binary will be located at:
-* **Windows**: `target/x86_64-pc-windows-msvc/release/axiom.exe`
+* **Windows**: `target/release/axiom.exe`
 * **Linux / macOS**: `target/release/axiom`
 
 ### 3. Add to System PATH (Optional)
 To use `axiom` globally across any project directory, add the release folder to your system `PATH` or copy the binary:
 ```bash
 # Windows PowerShell
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$PWD\target\x86_64-pc-windows-msvc\release", "User")
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$PWD\target\release", "User")
 
 # Linux / macOS
 cp target/release/axiom /usr/local/bin/

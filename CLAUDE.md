@@ -23,9 +23,9 @@ cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
 
-`.cargo/config.toml` pins `target = "x86_64-pc-windows-msvc"`, so **the binary lands in
-`target/x86_64-pc-windows-msvc/release/axiom.exe`, not `target/release/`**. Scripts that assume the
-default path silently use a stale binary or none at all.
+The binary is at `target/release/axiom`, for whatever the host target is. A pin to
+`x86_64-pc-windows-msvc` used to live in `.cargo/config.toml`; it put the binary somewhere else and
+made `cargo build` fail on any machine that is not Windows, which CI caught on its first run.
 
 On Windows the C toolchain must be on the path before cargo runs, or `zstd-sys`, `wasmtime-fiber`
 and `ittapi-sys` fail inside their build scripts:
@@ -41,7 +41,7 @@ JSON-RPC lines into `axiom serve` gives a full session:
 printf '%s\n' \
  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"p","version":"1"}}}' \
  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"axiom_query_symbol","arguments":{"symbol_path":"pkg.Class"}}}' \
- | ./target/x86_64-pc-windows-msvc/release/axiom.exe serve
+ | ./target/release/axiom serve
 ```
 
 ## Architecture
@@ -125,6 +125,21 @@ scan-then-query test passes with persistence completely broken.
 **The Merkle root that `scan` prints comes from the CRDT tree, not the AST index.** Keep the two
 apart when reading output. `test_e2e_dynamic_merkle_root_uniqueness` pins that the root actually
 varies with scanned content.
+
+**Retries are for errors that can clear, and the set differs by platform.**
+Windows fails a rename or an exclusive create with a sharing violation while
+another process holds the file open, surfacing as `PermissionDenied`, and it
+clears when that handle closes. Unix has no such rule: a rename succeeds with
+readers attached, and `EACCES` means the directory is not writable, which waiting
+will not change. `worth_retrying` in `axiom-ast` encodes that difference, and
+everything outside it is treated as final. Retrying a full disk or a
+cross-device rename only delays an accurate error, and retrying `EACCES` on Unix
+turns an immediate report into a thirty-second pause followed by the same report.
+
+**All measurement in this repository so far is from Windows.** The concurrency
+numbers quoted in commit messages, and the sharing-violation behaviour the retry
+loops exist for, were observed there. The retries are written to be correct on
+Unix rather than merely harmless, but that has been reasoned rather than run.
 
 ## Repository state
 

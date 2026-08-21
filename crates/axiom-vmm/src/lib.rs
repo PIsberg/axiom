@@ -148,7 +148,10 @@ impl SandboxEngine for WasiEngine {
                     expected: Some(format!("Exported function '{}'", entrypoint)),
                     actual: Some("Missing Export".to_string()),
                     stack_trace_ast_nodes: vec![],
-                    hint: Some("Ensure function is marked #[no_mangle] or exported in WASM module".to_string()),
+                    hint: Some(
+                        "Ensure function is marked #[no_mangle] or exported in WASM module"
+                            .to_string(),
+                    ),
                 }],
                 String::new(),
                 format!("Symbol '{}' not found in WASI module", entrypoint),
@@ -185,7 +188,8 @@ impl SandboxEngine for WasiEngine {
                                 "tier1_wasi_cranelift".to_string(),
                                 dur,
                                 1,
-                                "WebAssembly WAT module compiled and executed via Wasmtime".to_string(),
+                                "WebAssembly WAT module compiled and executed via Wasmtime"
+                                    .to_string(),
                             ));
                         }
                         Err(e) => {
@@ -264,10 +268,19 @@ impl SandboxEngine for WasiEngine {
         // 3. Real Rust/Native Sandbox Execution via rustc
         static EVAL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let seq = EVAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temp_dir = std::env::temp_dir().join(format!("axiom_eval_{}_{}_{:x}", std::process::id(), seq, start.elapsed().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "axiom_eval_{}_{}_{:x}",
+            std::process::id(),
+            seq,
+            start.elapsed().as_nanos()
+        ));
         let _ = std::fs::create_dir_all(&temp_dir);
         let src_file = temp_dir.join("eval_main.rs");
-        let bin_file = temp_dir.join(if cfg!(windows) { "eval_main.exe" } else { "eval_main" });
+        let bin_file = temp_dir.join(if cfg!(windows) {
+            "eval_main.exe"
+        } else {
+            "eval_main"
+        });
 
         // Format code into runnable harness
         let source_code = if code_snippet.contains("fn main") {
@@ -339,7 +352,10 @@ fn main() {{
                             "tier1_wasi_cranelift".to_string(),
                             dur,
                             assert_count,
-                            format!("Sandbox evaluated successfully: {}", code_snippet.lines().next().unwrap_or("")),
+                            format!(
+                                "Sandbox evaluated successfully: {}",
+                                code_snippet.lines().next().unwrap_or("")
+                            ),
                         ));
                     } else {
                         let stderr = String::from_utf8_lossy(&r_out.stderr).to_string();
@@ -379,7 +395,10 @@ fn main() {{
                 expected: Some("Native sandbox execution".to_string()),
                 actual: Some("Failed to invoke native compiler sandbox in environment".to_string()),
                 stack_trace_ast_nodes: vec![symbol_path.to_string()],
-                hint: Some("Verify compiler (rustc) is available and temp directory is writable".to_string()),
+                hint: Some(
+                    "Verify compiler (rustc) is available and temp directory is writable"
+                        .to_string(),
+                ),
             }],
             passed_checks_count: 0,
             stdout: String::new(),

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    # Everything in this repository was measured on Windows. The Unix behaviour
+    # of the file locking and the atomic writes was reasoned about rather than
+    # run, so both platforms are tested rather than the cheaper one.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --release --all-targets
+
+      - name: Build the binary
+        run: cargo build --release --bin axiom
+
+      - name: Concurrent agents keep their work (Unix)
+        if: runner.os != 'Windows'
+        run: python3 .github/scripts/concurrent_agents_check.py "$PWD/target/release/axiom"
+
+      - name: Concurrent agents keep their work (Windows)
+        if: runner.os == 'Windows'
+        run: python .github/scripts/concurrent_agents_check.py "$env:GITHUB_WORKSPACE\target\release\axiom.exe"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings

@@ -1,6 +1,23 @@
 # AXIOM: Architecture & Systems Deep Dive
 ## The Agent-Native Autonomous Software Engine
 
+> **Status of this document.** It describes the architecture Axiom is designed
+> around, and parts of it are not built. Where the two differ, the code wins.
+>
+> | Described | Actually |
+> |---|---|
+> | Tree-sitter parsing into normalised syntax nodes | Line-based heuristics per language. No Tree-sitter dependency. |
+> | Tier 2 MicroVM snapshot engine, KVM/Firecracker | Not built. Evaluation is `rustc` plus `wasmtime` in process. |
+> | Sub-millisecond sandbox, `<0.1ms`, `<15ms` | A snippet is compiled and run: median around 175ms on the development machine. Measure with `axiom bench`. |
+> | 99.98% of tests pruned | 97 to 99% against a real 2,220-test suite, and the figure depends entirely on the symbol. |
+> | SLSA Level 4+ attestation, Ed25519 seal | A provenance record tying a prompt, a symbol and a check together. Ed25519 signing is real and optional; nothing here rebuilds an artifact or establishes a hermetic build, so it is not SLSA. |
+>
+> What is built and measured: the symbol index and its persistence, blast-radius
+> pruning at depth 1, literal and regex search over source text, the Tree-CRDT
+> and its convergence, concurrent access to one workspace, and the provenance
+> record with signing and chaining. The README describes those as they behave.
+
+
 ---
 
 ## Part 1: High-Level Intuitive Overview (The "ELI5")
