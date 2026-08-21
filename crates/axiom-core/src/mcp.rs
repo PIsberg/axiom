@@ -63,6 +63,10 @@ pub fn append_attestation_to(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // Read-modify-write, so two agents appending at once would otherwise drop
+    // one of the records. The lock makes the sequence atomic.
+    let _lock = axiom_ast::IndexLock::acquire(path)?;
     let mut all = load_attestations_from(path).unwrap_or_default();
     all.push(attestation.clone());
     std::fs::write(path, serde_json::to_string_pretty(&all)?)?;
@@ -106,7 +110,10 @@ impl AxiomMcpServer {
         };
 
         let wasi_engine = Arc::new(WasiEngine::new()?);
-        let tree_crdt = Arc::new(TreeCrdt::new(1));
+        // Each server is a distinct replica. Sharing one id across processes
+        // makes concurrent agents produce identical Lamport stamps, and a
+        // last-writer-wins rule cannot order a tie it cannot see.
+        let tree_crdt = Arc::new(TreeCrdt::new(std::process::id()));
 
         // If index is empty, seed with standard starter nodes
         if ast_index.total_symbols_count() == 0 {
@@ -427,7 +434,13 @@ impl AxiomMcpServer {
                 let root = self.tree_crdt.compute_tree_merkle_root();
 
                 // Save updated index to disk
-                if let Err(e) = self.ast_index.save_to_disk(std::path::Path::new(".axiom/index.json")) {
+                // Persist just this symbol. Writing the whole in-memory index
+                // here would also write back every other symbol as this process
+                // last saw it, discarding what another agent recorded meanwhile.
+                if let Err(e) = self
+                    .ast_index
+                    .persist_symbol(std::path::Path::new(".axiom/index.json"), symbol)
+                {
                     eprintln!("Warning: Failed to save .axiom/index.json: {}", e);
                 }
 

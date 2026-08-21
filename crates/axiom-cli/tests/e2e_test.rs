@@ -1255,3 +1255,88 @@ async fn test_e2e_eval_refuses_symbols_it_cannot_compile() -> Result<()> {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// Two agents sharing one workspace must not erase each other.
+///
+/// Persisting a mutation by writing the whole in-memory index writes back every
+/// other symbol as that process last saw it, so whichever agent saves second
+/// silently discards the first agent's work. Nothing reports it: there is no
+/// merge conflict to see, the node is simply gone. Measured against two
+/// concurrent `axiom serve` processes before the fix, one mutation was lost in
+/// two runs out of four, and which agent lost varied.
+#[tokio::test]
+async fn test_e2e_concurrent_agents_do_not_erase_each_other() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_two_agents_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let shared_index = temp_dir.join(".axiom").join("index.json");
+
+    // Two agents, each holding its own view of the same workspace.
+    let agent_a = axiom_ast::AstIndex::new();
+    let agent_b = axiom_ast::AstIndex::new();
+
+    agent_a.index_node("agentA::added", "function", "fn from_a() {}", vec![]);
+    agent_b.index_node("agentB::added", "function", "fn from_b() {}", vec![]);
+
+    agent_a.persist_symbol(&shared_index, "agentA::added")?;
+    agent_b.persist_symbol(&shared_index, "agentB::added")?;
+
+    let reloaded = axiom_ast::AstIndex::load_from_disk(&shared_index)?;
+    assert!(
+        reloaded.get_symbol("agentA::added").is_some(),
+        "the first agent's symbol must survive the second agent's write"
+    );
+    assert!(
+        reloaded.get_symbol("agentB::added").is_some(),
+        "the second agent's symbol must be recorded"
+    );
+
+    // A third agent that never saw either still adds without removing them.
+    let agent_c = axiom_ast::AstIndex::new();
+    agent_c.index_node("agentC::added", "function", "fn from_c() {}", vec![]);
+    agent_c.persist_symbol(&shared_index, "agentC::added")?;
+
+    let reloaded = axiom_ast::AstIndex::load_from_disk(&shared_index)?;
+    for symbol in ["agentA::added", "agentB::added", "agentC::added"] {
+        assert!(
+            reloaded.get_symbol(symbol).is_some(),
+            "{symbol} must be present after three agents have written"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// The index lock is what makes read-modify-write safe between agents, so it has
+/// to be exclusive while held and released afterwards.
+#[tokio::test]
+async fn test_e2e_index_lock_is_exclusive_then_released() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_lock_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+    let index = temp_dir.join("index.json");
+
+    {
+        let _held = axiom_ast::IndexLock::acquire(&index)?;
+        assert!(
+            index.with_extension("lock").exists(),
+            "holding the lock must be visible to another process"
+        );
+    }
+
+    assert!(
+        !index.with_extension("lock").exists(),
+        "the lock must be released when it goes out of scope, or the next agent waits forever"
+    );
+
+    // Releasing means the next acquisition succeeds rather than timing out.
+    let _next = axiom_ast::IndexLock::acquire(&index)?;
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

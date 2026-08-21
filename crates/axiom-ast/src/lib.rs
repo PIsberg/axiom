@@ -4,6 +4,76 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+/// Hold an exclusive lock beside the index while it is read and rewritten.
+///
+/// Two agents sharing one workspace both load the index, both write it whole,
+/// and the second write erases the first agent's node. That is not a merge
+/// conflict anyone can see: the work simply disappears. Serialising the
+/// read-modify-write is what stops it.
+///
+/// The lock is a file created exclusively, so acquiring it is atomic. A lock
+/// older than the timeout is taken over rather than waited on forever, since a
+/// crashed process cannot release its own.
+pub struct IndexLock {
+    path: PathBuf,
+}
+
+impl IndexLock {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+    pub fn acquire(index_path: &Path) -> std::io::Result<Self> {
+        let path = index_path.with_extension("lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let deadline = std::time::Instant::now() + Self::STALE_AFTER;
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().unwrap_or_default() > Self::STALE_AFTER)
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("timed out waiting for {:?}", path),
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Write a file so a reader sees either the old contents or the new ones, never
+/// a half-written file: write beside the target, then rename over it.
+fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 /// On-disk index format version. Bumped when the shape below changes in a way
 /// an older reader could misinterpret.
 const INDEX_FORMAT_VERSION: u32 = 2;
@@ -1122,6 +1192,80 @@ fn strip_comments_and_strings(content: &str) -> String {
         names
     }
 
+    /// Parse an index file.
+    ///
+    /// The current format carries the resolution side tables alongside the
+    /// nodes. Indexes written before those tables existed are a bare node map;
+    /// they still load, only without accessor resolution until the next scan.
+    fn load_payload(path: &Path) -> std::io::Result<PersistedIndex> {
+        let content = std::fs::read_to_string(path)?;
+        match serde_json::from_str::<PersistedIndex>(&content) {
+            Ok(p) => Ok(p),
+            Err(struct_err) => {
+                let nodes: HashMap<String, AstNode> =
+                    serde_json::from_str(&content).map_err(|bare_err| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!(
+                                "{path:?} parses as neither the current index format ({struct_err}) nor a legacy bare node map ({bare_err})"
+                            ),
+                        )
+                    })?;
+                Ok(PersistedIndex {
+                    format_version: 1,
+                    nodes,
+                    method_return_types: HashMap::new(),
+                    file_call_names: HashMap::new(),
+                    file_to_symbols: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    /// Record one symbol into the index on disk without overwriting anything
+    /// else in it.
+    ///
+    /// A mutation is a change to one node. Persisting it by writing this
+    /// process's entire in-memory index would also write back every other symbol
+    /// as this process last saw it, undoing whatever another agent recorded in
+    /// the meantime. So the current file is re-read under the lock, the one node
+    /// is inserted, and the result is written atomically.
+    pub fn persist_symbol(&self, file_path: &Path, symbol: &str) -> std::io::Result<PathBuf> {
+        let abs_path = if file_path.is_absolute() {
+            file_path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(file_path)
+        };
+        if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let node = self
+            .get_symbol(symbol)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{symbol:?} is not indexed")))?;
+
+        let _lock = IndexLock::acquire(&abs_path)?;
+
+        let mut payload = match Self::load_payload(&abs_path) {
+            Ok(p) => p,
+            Err(_) => PersistedIndex {
+                format_version: INDEX_FORMAT_VERSION,
+                nodes: HashMap::new(),
+                method_return_types: HashMap::new(),
+                file_call_names: HashMap::new(),
+                file_to_symbols: HashMap::new(),
+            },
+        };
+
+        payload.format_version = INDEX_FORMAT_VERSION;
+        payload.nodes.insert(symbol.to_string(), node);
+
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        write_atomically(&abs_path, json.as_bytes())?;
+        Ok(abs_path)
+    }
+
     /// Persist the Merkle AST CAS index to disk (.axiom/index.json)
     pub fn save_to_disk(&self, file_path: &Path) -> std::io::Result<PathBuf> {
         let abs_path = if file_path.is_absolute() {
@@ -1144,7 +1288,8 @@ fn strip_comments_and_strings(content: &str) -> String {
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         
-        std::fs::write(&abs_path, json.as_bytes())?;
+        let _lock = IndexLock::acquire(&abs_path)?;
+        write_atomically(&abs_path, json.as_bytes())?;
         
         // Verify write succeeded
         if !abs_path.exists() {
@@ -1165,33 +1310,7 @@ fn strip_comments_and_strings(content: &str) -> String {
             std::env::current_dir()?.join(file_path)
         };
 
-        let content = std::fs::read_to_string(&abs_path)?;
-
-        // Current format carries the resolution side tables alongside the nodes.
-        // Indexes written before those tables existed are a bare node map; they
-        // still load, only without accessor resolution until the next scan.
-        let payload: PersistedIndex = match serde_json::from_str::<PersistedIndex>(&content) {
-            Ok(p) => p,
-            Err(struct_err) => {
-                let nodes: HashMap<String, AstNode> =
-                    serde_json::from_str(&content).map_err(|bare_err| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!(
-                                "{:?} parses as neither the current index format ({})                                  nor a legacy bare node map ({})",
-                                abs_path, struct_err, bare_err
-                            ),
-                        )
-                    })?;
-                PersistedIndex {
-                    format_version: 1,
-                    nodes,
-                    method_return_types: HashMap::new(),
-                    file_call_names: HashMap::new(),
-                    file_to_symbols: HashMap::new(),
-                }
-            }
-        };
+        let payload = Self::load_payload(&abs_path)?;
 
         let mut reverse_deps = HashMap::new();
         for (symbol, node) in &payload.nodes {
