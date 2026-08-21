@@ -35,7 +35,7 @@ impl IndexLock {
     pub fn acquire(index_path: &Path) -> std::io::Result<Self> {
         let path = index_path.with_extension("lock");
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| explain_denied(parent, e))?;
         }
 
         // Written into the lock and read back, so an agent can tell its own lock
@@ -148,9 +148,37 @@ fn worth_retrying(e: &std::io::Error) -> bool {
 /// operation log are JSON arrays, so a process killed part-way through writing
 /// one leaves a document that does not parse, and every record in it is lost
 /// rather than just the one being appended.
+/// Turn a bare "Access is denied" into the diagnosis it almost always has on
+/// Windows.
+///
+/// A process launched from a file carrying a Low mandatory integrity label runs
+/// at low integrity: it reads anything and creates nothing, so every write fails
+/// with this error wherever it points, including directories the same user can
+/// plainly write to from a shell. A binary inherits that label from the
+/// directory it was built into, and a cargo output directory first created by a
+/// sandboxed process carries it, as does every artifact cargo later writes
+/// there. The bare error sends the reader hunting for a filesystem permission
+/// problem that is not there; naming the cause costs one string.
+pub fn explain_denied(path: &Path, error: std::io::Error) -> std::io::Error {
+    if error.kind() != std::io::ErrorKind::PermissionDenied {
+        return error;
+    }
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "cannot write {}: {error}. If this process cannot write anywhere, not \
+             just here, the binary is probably running at low integrity: run \
+             `icacls` on the directory holding the executable and look for \
+             `Mandatory Label\\Low Mandatory Level`. Rebuilding into a directory \
+             without that label clears it; raising the label in place needs \
+             SeRelabelPrivilege.",
+            path.display()
+        ),
+    )
+}
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
+    std::fs::write(&tmp, bytes).map_err(|e| explain_denied(&tmp, e))?;
 
     // Renaming over a file another process currently has open fails on Windows
     // with a sharing violation, and readers of these files are common: an agent
@@ -1722,7 +1750,7 @@ impl AstIndex {
             std::env::current_dir()?.join(file_path)
         };
         if let Some(parent) = abs_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| explain_denied(parent, e))?;
         }
 
         let node = self.get_symbol(symbol).ok_or_else(|| {
@@ -1732,7 +1760,7 @@ impl AstIndex {
             )
         })?;
 
-        let _lock = IndexLock::acquire(&abs_path)?;
+        let _lock = IndexLock::acquire(&abs_path).map_err(|e| explain_denied(&abs_path, e))?;
 
         let mut payload = match Self::load_payload(&abs_path) {
             Ok(p) => p,
@@ -1750,7 +1778,7 @@ impl AstIndex {
 
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        write_atomically(&abs_path, json.as_bytes())?;
+        write_atomically(&abs_path, json.as_bytes()).map_err(|e| explain_denied(&abs_path, e))?;
         Ok(abs_path)
     }
 
@@ -1763,10 +1791,10 @@ impl AstIndex {
         };
 
         if let Some(parent) = abs_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| explain_denied(parent, e))?;
         }
 
-        let _lock = IndexLock::acquire(&abs_path)?;
+        let _lock = IndexLock::acquire(&abs_path).map_err(|e| explain_denied(&abs_path, e))?;
 
         // Merge over whatever is on disk now rather than replacing it. Another
         // agent may have recorded a symbol since this process loaded, and
@@ -1804,7 +1832,7 @@ impl AstIndex {
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        write_atomically(&abs_path, json.as_bytes())?;
+        write_atomically(&abs_path, json.as_bytes()).map_err(|e| explain_denied(&abs_path, e))?;
 
         // Recorded so the next save does not have to re-apply them.
         self.forgotten_symbols.write().unwrap().clear();
