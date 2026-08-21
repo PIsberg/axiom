@@ -23,9 +23,9 @@ cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
 
-`.cargo/config.toml` pins `target = "x86_64-pc-windows-msvc"`, so **the binary lands in
-`target/x86_64-pc-windows-msvc/release/axiom.exe`, not `target/release/`**. Scripts that assume the
-default path silently use a stale binary or none at all.
+The binary is at `target/release/axiom`, for whatever the host target is. A pin to
+`x86_64-pc-windows-msvc` used to live in `.cargo/config.toml`; it put the binary somewhere else and
+made `cargo build` fail on any machine that is not Windows, which CI caught on its first run.
 
 On Windows the C toolchain must be on the path before cargo runs, or `zstd-sys`, `wasmtime-fiber`
 and `ittapi-sys` fail inside their build scripts:
@@ -41,7 +41,7 @@ JSON-RPC lines into `axiom serve` gives a full session:
 printf '%s\n' \
  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"p","version":"1"}}}' \
  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"axiom_query_symbol","arguments":{"symbol_path":"pkg.Class"}}}' \
- | ./target/x86_64-pc-windows-msvc/release/axiom.exe serve
+ | ./target/release/axiom serve
 ```
 
 ## Architecture

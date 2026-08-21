@@ -12,7 +12,7 @@ To enable an AI agent to use Axiom for zero-clone code navigation and sub-millis
 {
   "mcpServers": {
     "axiom": {
-      "command": "C:/dev/private/axiom/target/x86_64-pc-windows-msvc/release/axiom.exe",
+      "command": "C:/path/to/axiom/target/release/axiom.exe",
       "args": ["serve"]
     }
   }

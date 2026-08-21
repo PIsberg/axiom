@@ -132,14 +132,14 @@ cd axiom
   ```
 
 The compiled binary will be located at:
-* **Windows**: `target/x86_64-pc-windows-msvc/release/axiom.exe`
+* **Windows**: `target/release/axiom.exe`
 * **Linux / macOS**: `target/release/axiom`
 
 ### 3. Add to System PATH (Optional)
 To use `axiom` globally across any project directory, add the release folder to your system `PATH` or copy the binary:
 ```bash
 # Windows PowerShell
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$PWD\target\x86_64-pc-windows-msvc\release", "User")
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$PWD\target\release", "User")
 
 # Linux / macOS
 cp target/release/axiom /usr/local/bin/
