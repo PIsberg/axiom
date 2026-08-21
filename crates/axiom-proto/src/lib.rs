@@ -78,6 +78,16 @@ pub struct ProvenanceAttestation {
     #[serde(default)]
     pub verification_detail: String,
 
+    /// The seal of the record written before this one, empty for the first.
+    ///
+    /// Signatures stop a record being forged or edited; they do nothing about
+    /// one being removed, because what is left still verifies. Each record
+    /// committing to its predecessor makes a deletion visible: the record after
+    /// the hole points at a seal that is no longer there, and repairing the
+    /// chain would need the signing key.
+    #[serde(default)]
+    pub previous_seal: String,
+
     /// Ed25519 signature over this record, when one was made. Empty when no
     /// signing key was configured, in which case the record is tamper-evident
     /// through `seal` but says nothing about who issued it.
@@ -117,6 +127,7 @@ impl ProvenanceAttestation {
         ctop_task_id: &str,
         verified_by: &str,
         verification_detail: &str,
+        previous_seal: &str,
     ) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(parent_merkle_root.as_bytes());
@@ -125,9 +136,11 @@ impl ProvenanceAttestation {
         hasher.update(prompt.as_bytes());
         hasher.update(symbol_path.as_bytes());
         hasher.update(ctop_task_id.as_bytes());
+        hasher.update(previous_seal.as_bytes());
         let digest = hasher.finalize().to_hex().to_string();
 
         Self {
+            previous_seal: previous_seal.to_string(),
             // Filled in by sign_with when a signing key is configured; a record
             // with no key stays tamper-evident through `seal` and anonymous.
             signature: String::new(),
@@ -170,6 +183,7 @@ impl ProvenanceAttestation {
         hasher.update(prompt.as_bytes());
         hasher.update(expected_symbol.as_bytes());
         hasher.update(self.ctop_proof_hash.as_bytes());
+        hasher.update(self.previous_seal.as_bytes());
         let digest = hasher.finalize().to_hex().to_string();
 
         let expected = format!("blake3_seal_{}", &digest[32..]);
@@ -249,6 +263,7 @@ pub mod signing {
             attestation.verified_by.as_str(),
             attestation.verification_detail.as_str(),
             attestation.timestamp.as_str(),
+            attestation.previous_seal.as_str(),
             symbol_path,
             prompt,
         ] {
@@ -337,4 +352,43 @@ pub mod signing {
             )
             .map_err(|_| "signature does not match this record".to_string())
     }
+}
+
+/// Check that a ledger's records still form an unbroken chain.
+///
+/// Each record after the first names the seal of the one before it. A record
+/// removed from the middle leaves the next one pointing at a seal that is no
+/// longer present, which is what makes the deletion visible.
+///
+/// This does not detect a ledger truncated at the end. Nothing points at the
+/// last record, so removing it leaves a chain that is internally consistent.
+/// Catching that needs the expected head recorded somewhere the writer of the
+/// ledger cannot reach, which is outside what this file can do for itself.
+pub fn verify_chain(records: &[ProvenanceAttestation]) -> Result<(), String> {
+    for (i, window) in records.windows(2).enumerate() {
+        let (before, after) = (&window[0], &window[1]);
+        if after.previous_seal != before.seal {
+            return Err(format!(
+                "chain breaks between record {} and record {}: record {} names predecessor {}, \
+                 but the record before it seals as {}. A record has been removed or reordered.",
+                i,
+                i + 1,
+                i + 1,
+                if after.previous_seal.is_empty() { "(none)" } else { &after.previous_seal },
+                before.seal
+            ));
+        }
+    }
+
+    if let Some(first) = records.first() {
+        if !first.previous_seal.is_empty() {
+            return Err(format!(
+                "chain starts mid-way: the first record names predecessor {}, which is not in the ledger. \
+                 Records before it have been removed.",
+                first.previous_seal
+            ));
+        }
+    }
+
+    Ok(())
 }

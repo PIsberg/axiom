@@ -429,6 +429,11 @@ async fn main() -> Result<()> {
                     .unwrap_or_else(|_| k.trim().to_string())
             });
 
+            // A record can be genuine and the ledger still be wrong, if one of
+            // its neighbours has been removed. Report that before reporting the
+            // record, because it changes what the record is worth.
+            let chain = axiom_proto::verify_chain(&ledger);
+
             let matching: Vec<&axiom_proto::ProvenanceAttestation> =
                 ledger.iter().filter(|a| a.verify(&symbol, &prompt)).collect();
 
@@ -493,6 +498,13 @@ async fn main() -> Result<()> {
                 }
             };
 
+            if chain.is_err() && expected.is_some() {
+                println!("❌ LEDGER ALTERED: {}", chain.unwrap_err());
+                println!("   Refusing to report a record as trusted from a ledger that has had");
+                println!("   records removed. Verify without --trusted-key to inspect it anyway.");
+                std::process::exit(1);
+            }
+
             println!("✅ ATTESTATION VALID");
             println!("   Symbol:        {}", chosen.symbol_path);
             println!("   Checked by:    {} ({})", chosen.verified_by, chosen.verification_detail);
@@ -517,6 +529,17 @@ async fn main() -> Result<()> {
                 println!("   The signature matches the key inside the record, which shows the two");
                 println!("   agree and nothing more. Pass --trusted-key to require a signer you");
                 println!("   already know.");
+            }
+
+            match &chain {
+                Ok(()) => println!("   Ledger:        chain intact across {} record(s)", ledger.len()),
+                Err(e) => {
+                    println!();
+                    println!("⚠  LEDGER ALTERED: {e}");
+                    println!("   This record verifies on its own, but the ledger it sits in has had");
+                    println!("   a record removed or reordered, so treat what it says about history");
+                    println!("   as incomplete.");
+                }
             }
 
             if chosen.verified_by == "reported" {

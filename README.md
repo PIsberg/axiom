@@ -315,6 +315,29 @@ record must be signed by that key to count.
 With no key configured, records are still written and still tamper-evident; they
 are anonymous, and `verify` says so rather than implying more.
 
+### The ledger is a chain
+
+A signature stops a record being forged or edited. It does nothing about one
+being *removed*: what is left still verifies, and the history just looks shorter
+than it was. So each record names the seal of the record before it, and both the
+seal and the signature cover that link. Removing a record leaves the next one
+pointing at something that is no longer there:
+
+```
+LEDGER ALTERED: chain breaks between record 0 and record 1: record 1 names
+predecessor blake3_seal_0df065..., but the record before it seals as
+blake3_seal_0147bb.... A record has been removed or reordered.
+```
+
+`verify` reports the chain alongside the record, and refuses to call a record
+trusted when `--trusted-key` was given and the ledger has been altered.
+
+**One deletion this cannot catch:** truncating the tail. Nothing points at the
+last record, so removing it leaves a chain that is internally consistent.
+Catching that needs the expected head written down somewhere the person who can
+write the ledger cannot reach, which is outside what a single file can do for
+itself.
+
 None of this is a reproducible-build attestation. It does not rebuild anything or
 establish that a build was hermetic.
 

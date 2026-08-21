@@ -521,6 +521,19 @@ impl AxiomMcpServer {
                 };
 
                 let root = self.tree_crdt.compute_tree_merkle_root();
+
+                // Link, seal, sign and append under one lock. The chain link has
+                // to be known before the record is sealed, and the seal before it
+                // is signed, so reading the tail and writing the record cannot be
+                // two separate steps without a second agent slipping between them.
+                let ledger_path = attestation_ledger_path();
+                let _ledger_lock = match axiom_ast::IndexLock::acquire(&ledger_path) {
+                    Ok(l) => l,
+                    Err(e) => return Ok(json!({ "error": format!("could not lock the ledger: {e}") })),
+                };
+                let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
+                let previous_seal = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
+
                 let attestation = ProvenanceAttestation::generate(
                     "merkle_root_prev_77a1",
                     &format!("merkle_root_{}", &root[..8]),
@@ -530,6 +543,7 @@ impl AxiomMcpServer {
                     task_id,
                     &verification.kind,
                     &verification.detail,
+                    &previous_seal,
                 );
 
                 // Sign when a key is configured. An unsigned record is still
@@ -544,9 +558,17 @@ impl AxiomMcpServer {
                 }
 
                 // Persist it, or verification later has nothing to look up.
-                if let Err(e) = append_attestation(&attestation) {
+                existing.push(attestation.clone());
+                let encoded = match serde_json::to_string_pretty(&existing) {
+                    Ok(j) => j,
+                    Err(e) => return Ok(json!({ "error": format!("could not encode the ledger: {e}") })),
+                };
+                if let Some(parent) = ledger_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(&ledger_path, encoded) {
                     return Ok(json!({
-                        "error": format!("could not record the attestation: {}", e)
+                        "error": format!("could not record the attestation: {e}")
                     }));
                 }
 

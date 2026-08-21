@@ -1199,6 +1199,7 @@ async fn test_e2e_attestation_ledger_binds_symbol_and_prompt() -> Result<()> {
         "eval_7",
         "sandbox",
         "axiom sandbox, engine tier1_wasi_cranelift",
+        "",
     );
     axiom_core::mcp::append_attestation_to(&ledger, &seal)?;
 
@@ -1751,6 +1752,7 @@ async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> 
         "eval_7",
         "sandbox",
         "axiom sandbox, engine tier1_wasi_cranelift",
+        "",
     );
 
     // An unsigned record is anonymous, and says so by carrying no key.
@@ -1839,6 +1841,7 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
             "task_1",
             "reported",
             "cargo test",
+            "",
         )
     };
 
@@ -1889,5 +1892,70 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+/// Signing stops a record being forged or edited. It does nothing about one
+/// being removed: whatever is left still verifies, and the history simply looks
+/// shorter than it was. Each record naming its predecessor's seal is what makes
+/// a deletion visible, and the seal and the signature both cover that link, so
+/// repairing the chain after removing a record needs the signing key.
+#[tokio::test]
+async fn test_e2e_removing_a_record_breaks_the_chain() -> Result<()> {
+    let (private_hex, _public_hex) = axiom_proto::signing::generate_keypair();
+
+    let mut chain: Vec<axiom_proto::ProvenanceAttestation> = Vec::new();
+    for name in ["one", "two", "three"] {
+        let previous = chain.last().map(|a: &axiom_proto::ProvenanceAttestation| a.seal.clone()).unwrap_or_default();
+        let symbol = format!("src/lib.rs::{name}");
+        let prompt = format!("change {name}");
+        let mut record = axiom_proto::ProvenanceAttestation::generate(
+            "root_parent",
+            "root_commit",
+            "agent_axiom_v1",
+            &prompt,
+            &symbol,
+            "task_1",
+            "reported",
+            "cargo test",
+            &previous,
+        );
+        record.sign_with(&symbol, &prompt, &private_hex).map_err(|e| anyhow::anyhow!(e))?;
+        chain.push(record);
+    }
+
+    axiom_proto::verify_chain(&chain).expect("an untouched ledger must verify");
+
+    // Remove the middle record: the one after it now points at a seal that is
+    // no longer present.
+    let without_middle: Vec<_> = [chain[0].clone(), chain[2].clone()].to_vec();
+    let err = axiom_proto::verify_chain(&without_middle)
+        .expect_err("removing a record from the middle must be visible");
+    assert!(err.contains("chain breaks"), "got {err}");
+
+    // Remove the first: the chain no longer starts at the beginning.
+    let without_first: Vec<_> = [chain[1].clone(), chain[2].clone()].to_vec();
+    let err = axiom_proto::verify_chain(&without_first)
+        .expect_err("removing the first record must be visible");
+    assert!(err.contains("starts mid-way"), "got {err}");
+
+    // The records themselves are untouched and still verify individually, which
+    // is the point: each is genuine, and the ledger around them is not.
+    axiom_proto::signing::verify(&chain[2], "src/lib.rs::three", "change three")
+        .expect("a genuine record still verifies even when its neighbours are gone");
+
+    // Truncating the tail is not detectable from inside the ledger, and this
+    // pins that as a known limit rather than leaving it to be discovered.
+    let truncated: Vec<_> = [chain[0].clone(), chain[1].clone()].to_vec();
+    assert!(
+        axiom_proto::verify_chain(&truncated).is_ok(),
+        "nothing points at the last record, so removing it leaves a consistent chain; \
+         catching that needs the expected head held outside the ledger"
+    );
+
+    // Reordering breaks it too, since the links no longer line up.
+    let reordered: Vec<_> = [chain[0].clone(), chain[2].clone(), chain[1].clone()].to_vec();
+    assert!(axiom_proto::verify_chain(&reordered).is_err(), "reordering must be visible");
+
     Ok(())
 }
