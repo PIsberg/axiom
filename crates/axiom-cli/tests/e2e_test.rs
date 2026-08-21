@@ -1730,3 +1730,82 @@ async fn test_e2e_symbol_lookup_refuses_names_it_cannot_pin_down() -> Result<()>
 
     Ok(())
 }
+
+/// Signing a provenance record, and the limits of what a signature shows.
+///
+/// The seal is a digest over public inputs, so it proves a record is unaltered
+/// and nothing about who wrote it. A signature separates those. It is only worth
+/// having if the key can live away from the records it signs: the threat is
+/// someone who can write the ledger, and a key stored beside it is readable by
+/// that same person.
+#[tokio::test]
+async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> {
+    let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
+
+    let mut record = axiom_proto::ProvenanceAttestation::generate(
+        "root_parent",
+        "root_commit",
+        "agent_axiom_v1",
+        "Tighten the guard",
+        "auth::service::validate_token",
+        "eval_7",
+        "sandbox",
+        "axiom sandbox, engine tier1_wasi_cranelift",
+    );
+
+    // An unsigned record is anonymous, and says so by carrying no key.
+    assert!(record.signature.is_empty() && record.public_key.is_empty());
+    assert!(
+        axiom_proto::signing::verify(&record, "auth::service::validate_token", "Tighten the guard").is_err(),
+        "an unsigned record must not verify as signed"
+    );
+
+    record
+        .sign_with("auth::service::validate_token", "Tighten the guard", &private_hex)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    assert_eq!(record.public_key, public_hex, "the record must carry the key that signed it");
+
+    axiom_proto::signing::verify(&record, "auth::service::validate_token", "Tighten the guard")
+        .expect("a freshly signed record must verify");
+
+    // The signature covers the symbol and prompt, so it cannot be lifted onto a
+    // record about something else.
+    assert!(
+        axiom_proto::signing::verify(&record, "auth::service::validate_token", "a different prompt").is_err(),
+        "a signature must not carry over to another prompt"
+    );
+    assert!(
+        axiom_proto::signing::verify(&record, "some::other::symbol", "Tighten the guard").is_err(),
+        "nor to another symbol"
+    );
+
+    // Altering a stored field breaks it, which is the point of signing the
+    // record's own contents rather than just its identity.
+    let mut tampered = record.clone();
+    tampered.verification_detail = "pretend this was a full CI run".to_string();
+    assert!(
+        axiom_proto::signing::verify(&tampered, "auth::service::validate_token", "Tighten the guard").is_err(),
+        "an edited record must not verify"
+    );
+
+    // A different key does not verify, which is what makes anchoring meaningful.
+    let (other_private, other_public) = axiom_proto::signing::generate_keypair();
+    assert_ne!(other_public, public_hex);
+    let mut by_other = record.clone();
+    by_other
+        .sign_with("auth::service::validate_token", "Tighten the guard", &other_private)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    assert_ne!(
+        by_other.public_key, public_hex,
+        "a record signed by another key must be distinguishable from one signed by this key"
+    );
+
+    // Rubbish keys are refused rather than panicking.
+    assert!(record
+        .clone()
+        .sign_with("s", "p", "not-hex-at-all")
+        .is_err());
+    assert!(record.clone().sign_with("s", "p", "abcd").is_err());
+
+    Ok(())
+}

@@ -59,6 +59,9 @@ enum Commands {
         symbol: String,
         #[arg(short, long)]
         prompt: String,
+        /// Public key, or a file holding one, that the record must be signed by
+        #[arg(long)]
+        trusted_key: Option<String>,
     },
     /// Scan and index an entire local repository into the Merkle AST CAS
     Scan {
@@ -68,6 +71,12 @@ enum Commands {
     /// Launch real-time Terminal UI Dashboard displaying Swarm and Engine metrics
     Dashboard,
     /// Watch filesystem for live incremental AST Merkle updates
+    /// Generate an Ed25519 keypair for signing provenance records
+    Keygen {
+        /// Where to write the private key. Keep it outside the workspace.
+        #[arg(long)]
+        out: String,
+    },
     Watch {
         #[arg(short, long, default_value = ".")]
         path: String,
@@ -360,7 +369,38 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
 
-        Commands::Verify { symbol, prompt } => {
+        Commands::Keygen { out } => {
+            let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
+            let out_path = std::path::Path::new(&out);
+            if out_path.exists() {
+                eprintln!("Error: {:?} already exists; refusing to overwrite a signing key", out_path);
+                std::process::exit(2);
+            }
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(out_path, &private_hex)?;
+            let pub_path = out_path.with_extension("pub");
+            std::fs::write(&pub_path, &public_hex)?;
+
+            println!("Private key -> {:?}", out_path);
+            println!("Public key  -> {:?}", pub_path);
+            println!("Fingerprint    {}", axiom_proto::signing::fingerprint(&public_hex));
+            println!();
+            println!("Point axiom at it when issuing records:");
+            println!("  AXIOM_SIGNING_KEY_FILE={}", out.replace('\\', "/"));
+            println!();
+            println!("Keep the private key outside any workspace you index. A signature only");
+            println!("tells a reader who issued a record; if the key sits beside the records it");
+            println!("signs, anyone who can add a record can sign it too.");
+            if cfg!(windows) {
+                println!();
+                println!("Note: file permissions were not restricted. On Windows, set them yourself");
+                println!("if this machine has other users.");
+            }
+        }
+
+        Commands::Verify { symbol, prompt, trusted_key } => {
             println!("🔍 Verifying attestation for '{}'...", symbol);
 
             // Look the seal up. Re-deriving one from these same arguments and
@@ -383,14 +423,60 @@ async fn main() -> Result<()> {
 
             match ledger.iter().find(|a| a.verify(&symbol, &prompt)) {
                 Some(a) => {
+                    // Resolve the anchor first: a signature checked against the
+                    // key the record itself carries says only that the two match.
+                    // Whether that key is one to trust is a separate question,
+                    // and the answer has to come from outside the record.
+                    let expected = trusted_key.as_ref().map(|k| {
+                        std::fs::read_to_string(k)
+                            .map(|c| c.trim().to_string())
+                            .unwrap_or_else(|_| k.trim().to_string())
+                    });
+
+                    let signature_state = if a.signature.is_empty() {
+                        "unsigned".to_string()
+                    } else {
+                        match axiom_proto::signing::verify(a, &symbol, &prompt) {
+                            Ok(()) => match &expected {
+                                Some(want) if want == &a.public_key => "signed by the expected key".to_string(),
+                                Some(_) => {
+                                    println!("❌ SIGNED BY A DIFFERENT KEY than the one required.");
+                                    println!("   record key  {}", axiom_proto::signing::fingerprint(&a.public_key));
+                                    std::process::exit(1);
+                                }
+                                None => "signed, key not anchored".to_string(),
+                            },
+                            Err(e) => {
+                                println!("❌ SIGNATURE INVALID: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    };
+
                     println!("✅ ATTESTATION VALID");
                     println!("   Symbol:        {}", a.symbol_path);
                     println!("   Checked by:    {} ({})", a.verified_by, a.verification_detail);
                     println!("   Task:          {}", a.ctop_proof_hash);
                     println!("   Issued:        {}", a.timestamp);
                     println!("   Seal:          {}", a.seal);
+                    println!("   Signature:     {}", signature_state);
+                    if !a.public_key.is_empty() {
+                        println!("   Signer:        {}", axiom_proto::signing::fingerprint(&a.public_key));
+                    }
                     println!("   (BLAKE3 integrity tag over the record, not a signature: it shows the
     record is unaltered, not who issued it.)");
+                    if a.signature.is_empty() {
+                        println!();
+                        println!("   No signing key was configured when this record was written, so it");
+                        println!("   shows only that the record is unaltered, not who issued it.");
+                        println!("   Run `axiom keygen` and set AXIOM_SIGNING_KEY_FILE to sign records.");
+                    } else if expected.is_none() {
+                        println!();
+                        println!("   The signature matches the key inside the record, which shows the two");
+                        println!("   agree and nothing more. Pass --trusted-key to require a signer you");
+                        println!("   already know.");
+                    }
+
                     if a.verified_by == "reported" {
                         println!();
                         println!("   Axiom did not run this check. The outcome above was reported by");

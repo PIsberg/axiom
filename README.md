@@ -199,6 +199,7 @@ Copy the generated configuration into your AI client's settings:
 | `axiom demo` | Runs live end-to-end self-healing agent demonstration |
 | `axiom swarm --agents <N> --ops <M>` | Runs multi-agent Tree-CRDT swarm concurrency simulation |
 | `axiom verify --symbol <SYM> --prompt <P>` | Looks up the provenance record for a symbol and prompt, and checks it is unaltered |
+| `axiom keygen --out <PATH>` | Generates an Ed25519 keypair for signing provenance records. Keep the private key outside any workspace you index |
 | `axiom mcp-config` | Outputs ready-to-copy JSON configuration for AI IDEs |
 | `axiom watch --path <DIR>` | Watches filesystem for live incremental AST Merkle updates |
 | `axiom git-export` | Exports current Merkle state to a Git-compatible commit summary |
@@ -272,13 +273,44 @@ axiom verify --symbol "auth::service::validate_token" --prompt "Tighten the guar
 This looks the record up. A symbol nothing was attested for, or the right symbol
 with a prompt that record was not issued for, exits non-zero and says which.
 
-**What this is not.** The `seal` field is a BLAKE3 digest over the record's own
-fields. It is an integrity tag, not a signature: no private key is involved, so
-anyone holding the same inputs can recompute it. It will tell you a stored record
-has been altered. It will not tell you who wrote one, and it does not stop
-someone who can write the ledger from adding a record that looks genuine. Making
-that a real signature needs a keypair and somewhere to keep it, which this does
-not yet have.
+### Signing
+
+The `seal` field is a BLAKE3 digest over the record's own fields. It shows a
+stored record has not been altered, and nothing about who wrote it: anyone
+holding the same inputs recomputes it.
+
+Signing separates those two claims. Generate a keypair and point axiom at it:
+
+```bash
+axiom keygen --out ~/.config/axiom/agent.key
+export AXIOM_SIGNING_KEY_FILE=~/.config/axiom/agent.key
+```
+
+Records issued after that carry an Ed25519 signature over the record's contents
+together with the symbol and prompt, so a signature cannot be moved onto a
+different record, and editing a stored one breaks it.
+
+**Keep the key away from the workspace, and note what that buys.** The threat is
+someone who can write `.axiom/attestations.json`. A key sitting beside the
+records it signs is readable by exactly that person, so signing with it would add
+nothing the digest did not already give you. What a signature is good for is a
+record that stays checkable elsewhere: a reader holding only the public key can
+tell whether a given signer issued it.
+
+That reader has to say which signer they expect. Checking a signature against the
+key inside the record shows only that the two agree, which is why `axiom verify`
+reports "signed, key not anchored" unless you name one:
+
+```bash
+axiom verify --symbol "auth::service::validate_token"              --prompt "Tighten the guard"              --trusted-key ~/.config/axiom/agent.pub
+```
+
+A record signed by a different key, or altered since it was written, exits
+non-zero and says which. With no key configured, records are still written and
+still tamper-evident; they are simply anonymous, and `verify` says so.
+
+None of this is a reproducible-build attestation. It does not rebuild anything or
+establish that a build was hermetic.
 
 Nor is any of this a reproducible-build attestation in the SLSA sense. Nothing
 here rebuilds your artifact independently or proves the build was hermetic. It

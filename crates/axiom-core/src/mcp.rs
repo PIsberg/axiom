@@ -73,6 +73,32 @@ pub fn append_attestation_to(
     Ok(())
 }
 
+/// Where the signing key comes from, if anywhere.
+///
+/// `AXIOM_SIGNING_KEY` holds the key itself; `AXIOM_SIGNING_KEY_FILE` names a
+/// file holding it. Neither defaults to anywhere inside the workspace, and that
+/// is deliberate. The threat a signature addresses is someone who can write
+/// `.axiom/attestations.json`, and a key stored beside that file is readable by
+/// the same person, so it would prove nothing the digest did not already.
+///
+/// With no key configured, records are still written and still tamper-evident
+/// through `seal`. They are simply anonymous, and say so.
+pub fn configured_signing_key() -> Option<String> {
+    if let Ok(key) = std::env::var("AXIOM_SIGNING_KEY") {
+        if !key.trim().is_empty() {
+            return Some(key.trim().to_string());
+        }
+    }
+    if let Ok(path) = std::env::var("AXIOM_SIGNING_KEY_FILE") {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if !contents.trim().is_empty() {
+                return Some(contents.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Read a required string argument, or say why it is unusable.
 ///
 /// Defaulting a missing argument to "" turned a malformed request into a lookup
@@ -505,6 +531,17 @@ impl AxiomMcpServer {
                     &verification.kind,
                     &verification.detail,
                 );
+
+                // Sign when a key is configured. An unsigned record is still
+                // worth writing; it just cannot say who issued it.
+                let mut attestation = attestation;
+                if let Some(key) = configured_signing_key() {
+                    if let Err(e) = attestation.sign_with(symbol, prompt, &key) {
+                        return Ok(json!({
+                            "error": format!("could not sign the record: {e}")
+                        }));
+                    }
+                }
 
                 // Persist it, or verification later has nothing to look up.
                 if let Err(e) = append_attestation(&attestation) {
