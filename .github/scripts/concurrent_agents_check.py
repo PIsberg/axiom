@@ -10,6 +10,11 @@ Two scenarios run here.
 `uniform` is the original: N agents each apply one mutation. It covers the
 read-modify-write on the index and the operation log.
 
+`chained` covers the provenance ledger: agents attest at once, and the records
+must come out as one chain rather than a fork. Every agent sends the same
+prompt and task id, so `previous_seal` is the only input to the seal that
+differs between them; distinct seals therefore mean distinct chain positions.
+
 `mixed` adds scanners. A scan rewrites the index for a whole tree, so it is the
 operation with the widest write, and it runs beside agents persisting single
 symbols. This is the shape that broke before, and the uniform scenario does not
@@ -31,6 +36,7 @@ from pathlib import Path
 AGENTS = 6
 MUTATORS = 8
 SCANNERS = 3
+ATTESTERS = 10
 REPEATS = 5
 
 INIT = ('{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
@@ -150,9 +156,75 @@ def mixed(binary):
     return f"{len(kept)}/{MUTATORS} mutations survived {SCANNERS} scans", problems
 
 
+def chained(binary):
+    """Agents attest at once. The ledger must be one chain, not a fork.
+
+    `seal` is a digest over `previous_seal`, so a record cannot be re-linked
+    after it is built: the tail has to be read under the lock that does the
+    write. Every agent here sends the same prompt and task id, which leaves
+    `previous_seal` as the only differing input to the seal. If two agents read
+    the same tail, they produce the same seal, and the duplicate is the fork.
+    """
+    work = new_workspace(binary)
+    start = threading.Barrier(ATTESTERS)
+    problems = []
+
+    def attester(i):
+        record = json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "axiom_record_verification", "arguments": {
+                "task_id": "task_shared", "passed": True, "command": "cargo test"}},
+        })
+        attest = json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "axiom_attest_commit", "arguments": {
+                "prompt": "identical work",
+                "symbol_path": "src/lib.rs::validate_token",
+                "ctop_task_id": "task_shared"}},
+        })
+        start.wait()
+        p = subprocess.Popen([binary, "serve"], cwd=work, stdin=subprocess.PIPE,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             text=True, encoding="utf-8", errors="replace")
+        p.communicate(INIT + "\n" + record + "\n" + attest + "\n")
+        if p.returncode != 0:
+            problems.append(f"attester {i} exited {p.returncode}")
+
+    threads = [threading.Thread(target=attester, args=(i,)) for i in range(ATTESTERS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ledger = work / ".axiom" / "attestations.json"
+    if not ledger.exists():
+        return "no ledger", ["no ledger was written at all"]
+    records = json.loads(ledger.read_text(encoding="utf-8"))
+
+    if len(records) != ATTESTERS:
+        problems.append(f"records lost: {len(records)} of {ATTESTERS}")
+    if records and records[0]["previous_seal"]:
+        problems.append("the first record names a predecessor that is not in the ledger")
+    for i in range(1, len(records)):
+        if records[i]["previous_seal"] != records[i - 1]["seal"]:
+            problems.append(
+                f"chain breaks between record {i - 1} and {i}: "
+                f"it names {records[i]['previous_seal'][:20] or '(none)'}, "
+                f"the record before seals as {records[i - 1]['seal'][:20]}"
+            )
+            break
+    distinct = len({r["seal"] for r in records})
+    if distinct != len(records):
+        problems.append(
+            f"only {distinct} distinct seals among {len(records)} records, "
+            "so agents shared a chain position"
+        )
+    return f"{len(records)}/{ATTESTERS} records, {distinct} distinct seals", problems
+
+
 def main(binary: str) -> int:
     failures = []
-    for name, scenario in (("uniform", uniform), ("mixed", mixed)):
+    for name, scenario in (("uniform", uniform), ("mixed", mixed), ("chained", chained)):
         for attempt in range(1, REPEATS + 1):
             summary, problems = scenario(binary)
             status = "ok" if not problems else "FAILED"
