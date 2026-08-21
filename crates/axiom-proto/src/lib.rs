@@ -8,6 +8,13 @@ pub enum CtopStatus {
     Failed,
     Timeout,
     CompilationError,
+    /// Nothing was run, so nothing is known. The toolchain was missing, the
+    /// language has no evaluator, or the work directory could not be written.
+    ///
+    /// Distinct from `CompilationError`, which says the code was read and
+    /// rejected. Collapsing the two tells an agent its snippet is wrong when
+    /// the truth is that nobody looked at it.
+    EvaluatorUnavailable,
 }
 
 /// A specific failure check in CTOP

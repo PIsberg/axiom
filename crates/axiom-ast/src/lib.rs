@@ -521,10 +521,18 @@ impl AstIndex {
     /// The file extension of the source a symbol came from, when the index knows
     /// it. Used to keep language-specific tooling from being pointed at a
     /// language it cannot handle.
+    /// The extension of the file a symbol was indexed from.
+    ///
+    /// The name is resolved first, so a caller that asked about `is_open`
+    /// rather than the full key gets the same answer. Comparing the caller's
+    /// spelling directly against the stored keys returned `None` for every
+    /// short name, and a `None` here reads as "no language known", which sends
+    /// a Python symbol to the Rust compiler.
     pub fn language_of_symbol(&self, symbol_path: &str) -> Option<String> {
+        let canonical = self.get_symbol(symbol_path)?.symbol_path;
         let file_syms = self.file_to_symbols.read().unwrap();
         for (file, symbols) in file_syms.iter() {
-            if symbols.iter().any(|s| s == symbol_path) {
+            if symbols.iter().any(|s| s == &canonical) {
                 return Path::new(file)
                     .extension()
                     .map(|e| e.to_string_lossy().to_string());

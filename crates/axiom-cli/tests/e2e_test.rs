@@ -194,8 +194,11 @@ fn test_token_validation() {
         Some(0)
     );
 
-    // 8b. A symbol from a language the sandbox cannot compile is named as such,
-    // rather than handed to rustc so the error blames the caller's syntax.
+    // 8b. A Java symbol is evaluated by the Java toolchain, not by rustc. The
+    // snippet below is Rust, so the right answer is a Java compilation error
+    // from javac, or a refusal naming javac when there is no JDK. What it must
+    // never be is a rustc error, which blamed the caller for the wrong syntax,
+    // and must never be a pass.
     let wrong_lang_req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id: Some(json!(51)),
@@ -209,10 +212,22 @@ fn test_token_validation() {
         })),
     };
     let wrong_lang_res = extract_tool_result(&server.handle_request(wrong_lang_req).await);
-    assert_eq!(
+    assert_ne!(
+        wrong_lang_res.get("engine").and_then(|v| v.as_str()),
+        Some("tier1_wasi_cranelift"),
+        "a Java symbol must not be answered by the Rust tier, got {wrong_lang_res:?}"
+    );
+    assert_ne!(
         wrong_lang_res.get("status").and_then(|v| v.as_str()),
-        Some("EVALUATOR_UNAVAILABLE"),
-        "a Java symbol must not be compiled as Rust, got {wrong_lang_res:?}"
+        Some("PASSED"),
+        "Rust syntax is not valid Java, got {wrong_lang_res:?}"
+    );
+    assert_eq!(
+        wrong_lang_res
+            .get("passed_checks_count")
+            .and_then(|v| v.as_u64()),
+        Some(0),
+        "{wrong_lang_res:?}"
     );
 
     // 9. Probe failing assertion -> Must return FAILED

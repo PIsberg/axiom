@@ -23,7 +23,7 @@ agent pays on every iteration.
 ## 🚀 Key Features
 
 * **Repository as an Active MCP Server**: Direct structured AST and semantic graph navigation over JSON-RPC 2.0 (`stdio`), eliminating local file clones.
-* **In-Process Sandbox**: a Rust snippet is compiled and run in place, so a hypothesis is checked without a CI round trip. Measure it on your own machine with `axiom bench`; on the development machine the median is around 175ms, which is `rustc` rather than the harness. A snippet in a language the sandbox cannot compile is refused rather than guessed at.
+* **Snippet Evaluation in the Symbol's Own Language**: a hypothesis is checked without a CI round trip. Rust goes to `rustc`, WebAssembly to wasmtime, and Python, JavaScript, TypeScript, Go and Java to their own toolchains. Measure it on your own machine with `axiom bench`; on the development machine the Rust median is around 175ms, which is `rustc` rather than the harness. A language with no evaluator, or a toolchain that is not installed, is refused rather than guessed at, and a snippet that does not terminate is killed rather than allowed to hold the session.
 * **Predictive Blast-Radius Test Pruning**: Transitive reverse dependency reachability prunes $\ge 99.9\%$ of irrelevant tests across 5,000+ test repositories.
 * **Ultra-Fast Zoekt Trigram Search**: In-memory sliding trigram index (`[u8; 3] -> HashSet<Path>`) providing $<1\text{ms}$ regex and literal search without disk I/O.
 * **Concurrent Agents on One Workspace**: mutations are recorded to a shared, commutative operation log, so agents in separate processes converge on the same tree whatever order their work lands in. Measured with twelve agents mutating at once: twelve operations recorded, none lost or duplicated, and one identical Merkle root across four replay orders.
@@ -106,6 +106,11 @@ as measurements of the current build.
 ## 🛠️ Prerequisites & System Requirements
 
 * **Rust**: `1.75+` (with `cargo` and `rustc` in your system `PATH`)
+* **Optional, per language you want `axiom_eval_patch` to run**: `python3` or
+  `python`, `node`, `deno` or `tsc`, `go`, a JDK for `javac` and `java`. Each is
+  looked for on `PATH` when it is first needed; a missing one produces
+  `EVALUATOR_UNAVAILABLE` naming it, never a verdict. `AXIOM_EVAL_NATIVE=off`
+  refuses to run any of them.
 * **C++ Build Tools**:
   * **Windows**: Visual Studio 2019/2022 C++ Build Tools (`vcvars64.bat` / MSVC)
   * **Linux / WSL2**: `build-essential`, `clang`, `libssl-dev`

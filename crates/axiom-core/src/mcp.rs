@@ -408,7 +408,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_eval_patch",
-                            "description": "Compile and run a Rust snippet in process and report what happened. Takes a few hundred milliseconds, since it invokes rustc. A symbol from a language it cannot compile is refused rather than guessed at.",
+                            "description": "Run a snippet and report what happened. The snippet is written in the language of the file the symbol came from, and is run by that language's toolchain: rustc for Rust, wasmtime for a WAT or wasm snippet, and python, node, deno or tsc, go and javac for the rest. Takes a few hundred milliseconds, since it invokes a real compiler. engine says which one answered. A language with no evaluator, a toolchain that is not installed, and a name matching several symbols are all refused rather than guessed at, and a snippet that does not terminate is killed and reported as TIMEOUT. Never returns PASSED for something that did not run.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -580,29 +580,43 @@ impl AxiomMcpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
-                // The sandbox compiles Rust. The indexer does not: it reads Java,
-                // Kotlin, Python, TypeScript and Go too, so a symbol from any of
-                // those would be handed to rustc and come back with a syntax
-                // error that blames the caller instead of naming the real limit.
-                if let Some(lang) = self.ast_index.language_of_symbol(symbol) {
-                    if lang != "rs" {
+                // The snippet is evaluated in the language of the file the
+                // symbol was indexed from. Handing a Java symbol to rustc came
+                // back with a syntax error that blamed the caller instead of
+                // naming the real limit, so the extension travels with the call
+                // and the engine picks the toolchain. A language with no
+                // toolchain still refuses rather than guessing.
+                let language = self.ast_index.language_of_symbol(symbol);
+
+                // An ambiguous name resolves to no language, and no language
+                // means Rust, which is how `isOpen` in a repository holding
+                // Java, Kotlin and JavaScript got compiled by rustc and came
+                // back as a syntax error. Say the name matches several things
+                // instead of picking a compiler on the caller's behalf.
+                if language.is_none() {
+                    let candidates = self.ast_index.candidates_for(symbol);
+                    if candidates.len() > 1 {
                         return Ok(json!({
-                            "task_id": "eval_unsupported_language",
+                            "task_id": "eval_ambiguous_symbol",
                             "status": "EVALUATOR_UNAVAILABLE",
-                            "engine": "tier1_wasi_cranelift",
+                            "engine": "tier2_native",
                             "passed_checks_count": 0,
                             "failed_checks": [{
                                 "symbol": symbol,
-                                "error_type": "UnsupportedLanguage",
-                                "expected": "a Rust snippet",
-                                "actual": format!("{:?} is defined in a .{} file", symbol, lang),
-                                "hint": "The sandbox compiles Rust only. Run this symbol's own test suite instead; axiom_get_blast_radius will name the tests to run."
-                            }]
+                                "error_type": "AmbiguousSymbol",
+                                "expected": "one symbol, so its language is known",
+                                "actual": format!("{:?} matches {} symbols", symbol, candidates.len()),
+                                "hint": "Name one of the candidates. Which language the snippet is evaluated in follows from which symbol was meant."
+                            }],
+                            "candidates": candidates.iter().take(10).collect::<Vec<_>>()
                         }));
                     }
                 }
 
-                let report = self.wasi_engine.execute_eval(symbol, snippet).await?;
+                let report = self
+                    .wasi_engine
+                    .execute_eval_in(symbol, snippet, language.as_deref())
+                    .await?;
 
                 // Record the outcome so an attestation can be checked against a
                 // run that genuinely happened, rather than against a task id the
