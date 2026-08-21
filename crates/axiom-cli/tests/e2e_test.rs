@@ -2071,3 +2071,59 @@ async fn test_e2e_crdt_operations_converge_across_processes() -> Result<()> {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// A lock left by an agent that died must not stall the rest of them, and must
+/// not be released by whoever took it over.
+///
+/// The stale window used to be thirty seconds. Every operation it guards is a
+/// read, an edit and a write of one small file, single-digit milliseconds, so a
+/// single crashed agent cost every other agent half a minute per operation. Two
+/// seconds is still two orders of magnitude beyond the work being protected.
+#[tokio::test]
+async fn test_e2e_a_lock_left_by_a_dead_agent_is_taken_over() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_stale_lock_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let target = temp_dir.join("index.json");
+    let lock_file = target.with_extension("lock");
+
+    // What a crashed holder leaves behind: a lock nobody will ever release.
+    std::fs::write(&lock_file, "some-other-agent")?;
+
+    let waited = std::time::Instant::now();
+    let taken = axiom_ast::IndexLock::acquire(&target)?;
+    let elapsed = waited.elapsed();
+
+    assert!(
+        elapsed >= std::time::Duration::from_secs(1),
+        "taking over must not be instant, or a live holder would be robbed; waited {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a dead holder must not cost every other agent half a minute; waited {elapsed:?}"
+    );
+
+    // The taker owns it now, and the contents say so rather than still naming
+    // the agent that died.
+    let contents = std::fs::read_to_string(&lock_file)?;
+    assert_ne!(contents, "some-other-agent", "the lock must be re-taken, not inherited");
+
+    drop(taken);
+    assert!(!lock_file.exists(), "releasing must remove the lock");
+
+    // A lock that has been taken over by someone else is not ours to release.
+    let held = axiom_ast::IndexLock::acquire(&target)?;
+    std::fs::write(&lock_file, "taken-over-by-another-agent")?;
+    drop(held);
+    assert!(
+        lock_file.exists(),
+        "dropping a lock that another agent now holds must leave it alone, \
+         or releasing ours would release theirs"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

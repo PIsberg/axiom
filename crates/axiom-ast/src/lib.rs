@@ -16,10 +16,21 @@ use std::sync::RwLock;
 /// crashed process cannot release its own.
 pub struct IndexLock {
     path: PathBuf,
+    token: String,
 }
 
 impl IndexLock {
-    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+    /// How long a lock may sit untouched before another agent takes it over.
+    ///
+    /// Every operation this guards is a read, an edit and a write of one small
+    /// file, which takes single-digit milliseconds. Two seconds is already two
+    /// orders of magnitude beyond that, and it is what an agent waits after a
+    /// holder dies. Thirty seconds, the previous value, stalled every other
+    /// agent for half a minute per operation after a single crash.
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// How long to keep waiting for a live holder before giving up.
+    const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
     pub fn acquire(index_path: &Path) -> std::io::Result<Self> {
         let path = index_path.with_extension("lock");
@@ -27,25 +38,58 @@ impl IndexLock {
             std::fs::create_dir_all(parent)?;
         }
 
-        let deadline = std::time::Instant::now() + Self::STALE_AFTER;
+        // Written into the lock and read back, so an agent can tell its own lock
+        // from one another agent created in the same instant. Two waiters can
+        // both decide a lock is stale; only one wins the create, but without a
+        // token the loser cannot tell that it lost.
+        let token = format!("{}-{:?}", std::process::id(), std::thread::current().id());
+
+        let start = std::time::Instant::now();
+        let mut announced = false;
+
         loop {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Ok(Self { path }),
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(token.as_bytes())?;
+                    drop(file);
+
+                    // Confirm the lock still says what we wrote. If another agent
+                    // judged ours stale and replaced it, we do not hold it.
+                    match std::fs::read_to_string(&path) {
+                        Ok(found) if found == token => return Ok(Self { path, token }),
+                        _ => continue,
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&path)
+                    let untouched_for = std::fs::metadata(&path)
                         .and_then(|m| m.modified())
-                        .map(|t| t.elapsed().unwrap_or_default() > Self::STALE_AFTER)
-                        .unwrap_or(false);
-                    if stale {
+                        .map(|t| t.elapsed().unwrap_or_default())
+                        .unwrap_or_default();
+
+                    if untouched_for > Self::STALE_AFTER {
+                        // The holder is gone or wedged. Take it over rather than
+                        // wait out a process that is never coming back.
                         let _ = std::fs::remove_file(&path);
                         continue;
                     }
-                    if std::time::Instant::now() > deadline {
+
+                    if start.elapsed() > Self::GIVE_UP_AFTER {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
-                            format!("timed out waiting for {:?}", path),
+                            format!(
+                                "gave up after {:?} waiting for {:?}, which another agent is holding",
+                                Self::GIVE_UP_AFTER, path
+                            ),
                         ));
                     }
+
+                    // A wait long enough to notice should not be silent.
+                    if !announced && start.elapsed() > std::time::Duration::from_millis(500) {
+                        announced = true;
+                        eprintln!("waiting for {path:?}, held by another agent");
+                    }
+
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(e) => return Err(e),
@@ -56,7 +100,15 @@ impl IndexLock {
 
 impl Drop for IndexLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Only remove the lock if it is still ours. If another agent judged it
+        // stale and took over, deleting it here would release that agent's lock
+        // rather than our own.
+        match std::fs::read_to_string(&self.path) {
+            Ok(found) if found == self.token => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+            _ => {}
+        }
     }
 }
 
