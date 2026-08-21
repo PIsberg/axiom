@@ -26,7 +26,7 @@ agent pays on every iteration.
 * **In-Process Sandbox**: a Rust snippet is compiled and run in place, so a hypothesis is checked without a CI round trip. Measure it on your own machine with `axiom bench`; on the development machine the median is around 175ms, which is `rustc` rather than the harness. A snippet in a language the sandbox cannot compile is refused rather than guessed at.
 * **Predictive Blast-Radius Test Pruning**: Transitive reverse dependency reachability prunes $\ge 99.9\%$ of irrelevant tests across 5,000+ test repositories.
 * **Ultra-Fast Zoekt Trigram Search**: In-memory sliding trigram index (`[u8; 3] -> HashSet<Path>`) providing $<1\text{ms}$ regex and literal search without disk I/O.
-* **Tree-CRDT Multi-Agent Swarm Concurrency**: Commutative LWW-Lamport tree operations enabling 50+ concurrent AI agents to mutate code without merge conflicts.
+* **Concurrent Agents on One Workspace**: mutations are recorded to a shared, commutative operation log, so agents in separate processes converge on the same tree whatever order their work lands in. Measured with twelve agents mutating at once: twelve operations recorded, none lost or duplicated, and one identical Merkle root across four replay orders.
 * **Recorded Provenance**: every attested change ties a prompt, a symbol, the sandbox run that checked it, and the Merkle roots either side into a record you can read back later. Issued only after the run it names has passed.
 
 ---

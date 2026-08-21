@@ -2000,3 +2000,74 @@ async fn test_e2e_demo_seeding_works_in_a_populated_workspace() -> Result<()> {
 
     Ok(())
 }
+
+/// The Tree-CRDT has to leave the process that produced it, or the convergence
+/// it exists for never happens between real agents.
+///
+/// Each server started with an empty tree and saw only its own operations, so
+/// two agents working one workspace reported different Merkle roots and neither
+/// could see the other's nodes. There were no merge conflicts because there was
+/// no merge. Convergence was demonstrated only by the in-process swarm
+/// simulation, where every agent shares one tree by construction.
+///
+/// Operations are commutative, so a shared append-only log is enough: replaying
+/// it in whatever order it happens to hold converges to the same tree. That
+/// property is what this pins.
+#[tokio::test]
+async fn test_e2e_crdt_operations_converge_across_processes() -> Result<()> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "axiom_crdt_log_{:x}",
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    // Start from nothing. The temp name is derived from an elapsed time that is
+    // near zero, so it repeats between runs, and a run that fails before its
+    // cleanup leaves a log the next run would append to.
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let log = temp_dir.join("crdt_ops.json");
+
+    // Three agents, each recording one operation, as separate replicas would.
+    let mut ops = Vec::new();
+    for (i, name) in ["alpha", "beta", "gamma"].iter().enumerate() {
+        let agent = axiom_crdt::TreeCrdt::new(100 + i as u32);
+        let op = agent.insert_node("root", &format!("node_{name}"), &format!("pkg::{name}"), "function", "fn f() {}");
+        axiom_core::mcp::append_crdt_op(&log, &op)?;
+        ops.push(op);
+    }
+
+    let stored = axiom_core::mcp::load_crdt_ops(&log);
+    assert_eq!(stored.len(), 3, "every agent's operation must reach the shared log");
+
+    // Replay in order, and reversed, and interleaved. A commutative log must not
+    // care, and a Merkle root that moved with ordering would not be one.
+    let replay = |sequence: Vec<axiom_crdt::TreeOp>| {
+        let replica = axiom_crdt::TreeCrdt::new(999);
+        for op in sequence {
+            replica.apply_op(op);
+        }
+        (replica.active_nodes_count(), replica.compute_tree_merkle_root())
+    };
+
+    let forwards = replay(stored.clone());
+    let mut backwards_seq = stored.clone();
+    backwards_seq.reverse();
+    let backwards = replay(backwards_seq);
+    let shuffled = replay(vec![stored[1].clone(), stored[2].clone(), stored[0].clone()]);
+
+    assert_eq!(forwards, backwards, "replaying in reverse must reach the same tree");
+    assert_eq!(forwards, shuffled, "and so must any other order");
+    // Four, not three: TreeCrdt::new seeds a "root" module node that every
+    // replica starts with, and the three inserts hang beneath it.
+    assert_eq!(forwards.0, 4, "the root plus three inserted nodes, got {:?}", forwards);
+
+    // A replica that has seen nothing is not accidentally equal to one that has.
+    let empty = axiom_crdt::TreeCrdt::new(998);
+    assert_ne!(
+        empty.compute_tree_merkle_root(),
+        forwards.1,
+        "an empty replica must not share a root with one holding three nodes"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

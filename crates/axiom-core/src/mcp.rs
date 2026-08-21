@@ -1,6 +1,7 @@
 use anyhow::Result;
 use axiom_ast::{AstIndex, SearchMode};
 use axiom_crdt::TreeCrdt;
+pub use axiom_crdt;
 use axiom_proto::{CtopStatus, ProvenanceAttestation};
 use axiom_vmm::{SandboxEngine, WasiEngine};
 use serde::{Deserialize, Serialize};
@@ -122,6 +123,42 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
     }
 }
 
+/// Where the Tree-CRDT operation log lives, beside the index it describes.
+pub fn crdt_op_log_path() -> PathBuf {
+    PathBuf::from(".axiom").join("crdt_ops.json")
+}
+
+/// Every operation recorded so far. A missing log is an empty one.
+pub fn load_crdt_ops(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Append one operation.
+///
+/// Without this the CRDT never leaves the process that produced it. Each server
+/// started with an empty tree and saw only its own operations, so two agents
+/// working the same workspace reported different Merkle roots and neither could
+/// see the other's nodes. There were no merge conflicts because there was no
+/// merge: the convergence the type provides was only ever exercised by the
+/// in-process swarm simulation.
+///
+/// The operations are commutative, so replaying them in whatever order the file
+/// happens to hold converges to the same tree. That is the property the CRDT was
+/// chosen for, and it is what makes appending to a shared file enough.
+pub fn append_crdt_op(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _lock = axiom_ast::IndexLock::acquire(path)?;
+    let mut all = load_crdt_ops(path);
+    all.push(op.clone());
+    std::fs::write(path, serde_json::to_string_pretty(&all)?)?;
+    Ok(())
+}
+
 /// A check that was performed before a provenance record was issued.
 #[derive(Debug, Clone)]
 pub struct Verification {
@@ -190,6 +227,15 @@ impl AxiomMcpServer {
         // makes concurrent agents produce identical Lamport stamps, and a
         // last-writer-wins rule cannot order a tie it cannot see.
         let tree_crdt = Arc::new(TreeCrdt::new(std::process::id()));
+
+        // Replay what other agents have recorded, so this server starts from the
+        // shared state rather than an empty tree of its own.
+        if let Some(index) = index_path {
+            let ops = load_crdt_ops(&index.with_file_name("crdt_ops.json"));
+            for op in ops {
+                tree_crdt.apply_op(op);
+            }
+        }
 
         Ok(Self {
             verifications: Arc::new(RwLock::new(HashMap::new())),
@@ -586,6 +632,13 @@ impl AxiomMcpServer {
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
                 let op = self.tree_crdt.insert_node("root", node_id, symbol, "function", content);
+
+                // Record it where the next agent will see it.
+                if let Err(e) = append_crdt_op(&crdt_op_log_path(), &op) {
+                    return Ok(json!({
+                        "error": format!("could not record the mutation: {e}")
+                    }));
+                }
                 self.ast_index.index_node(symbol, "function", content, vec![]);
                 let root = self.tree_crdt.compute_tree_merkle_root();
 

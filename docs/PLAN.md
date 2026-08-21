@@ -60,7 +60,7 @@ All architectural phases, dual execution engines, polyglot Merkle AST parser, Zo
 ---
 
 ### Phase 3: Tree-CRDT Swarms & Cross-Process Persistence — [COMPLETED ✅]
-* **Tree-CRDT Concurrency**: Deterministic LWW-Lamport tree mutations with 0 merge conflicts across 50+ concurrent agents.
+* **Tree-CRDT Concurrency**: Deterministic LWW-Lamport tree mutations with 0 merge conflicts across concurrent agents. Agents in separate processes converge through a shared operation log; the 50-agent figure comes from the in-process simulation.
 * **Robust Persistence**: Atomic disk synchronization to `.axiom/index.json` with multi-ancestor directory traversal discovery on server startup.
 * **Precise Test Classification**: Strict heuristic preventing `src/main/` production classes from inflating test counts.
 
