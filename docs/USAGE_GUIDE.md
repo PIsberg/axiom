@@ -126,12 +126,38 @@ suite. That is direct references plus calls through an accessor returning the
 type.
 
 `tests_by_depth` goes further than `impacted_tests` does. Depth 2 and beyond are
-tests that reach the symbol through another class; they are surveyed but left out
-of the answer, because including them costs more precision than it gains. Read
-them when a change looks risky and widen `max_depth` to move them in.
+tests that reach the symbol through another function or class; they are surveyed
+but left out of the answer, because including them costs more precision than it
+gains. Read them when a change looks risky and widen `max_depth` to move them in.
+The survey runs to depth 3 whatever `max_depth` is, so a symbol that no test
+names directly still says where its callers are tested.
 
 An empty `impacted_tests` means the index found no dependents. That is not the
-same as nothing being affected: if the change matters, run the suite.
+same as nothing being affected: if the change matters, run the suite. It is the
+usual answer for a private helper several calls below anything a test names:
+check `tests_by_depth` before concluding nothing covers it.
+
+### What the graph is built from
+
+Two mechanisms, and which one applies depends on the language.
+
+Java, Kotlin and Scala symbols are keyed by package, `pkg.Class::method`, and
+the edges come from imports, from same-package and fully-qualified references,
+and from accessor return-type inference, so a test calling
+`ctx.sharedRaceConditionDetector()` still reaches `RaceConditionDetector`.
+
+Rust, Python, TypeScript, JavaScript and Go symbols are keyed by file path,
+`src/lib.rs::write_atomically`, and the edges come from call sites and type
+mentions in comment-stripped source, attributed to the function they sit in
+rather than to the file. Attribution by line is wrong for a nested function; the
+error it makes is charging a sibling rather than charging every test in the file.
+
+Measured on this repository, 154 non-test symbols against 49 tests: a mean of
+3.1 impacted tests, 93.7% pruned, mean pairwise overlap between the radii of two
+symbols 0.07, and no symbol returning the whole suite. On a sample of ten symbols
+paired with a test that plainly exercises them, nine were found within the
+survey, seven of them at depth 1. The tenth is a private helper five calls below
+any test, which is past the survey.
 
 ---
 

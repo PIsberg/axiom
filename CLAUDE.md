@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 18 tests: 10 e2e, 5 mcp, 3 crdt
+cargo test                            # 61 tests across e2e, mcp, crdt, persistence, blast radius
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -96,15 +96,38 @@ writing machine-absolute file paths into symbol names. Each is now pinned by a t
 language or loosening a match, assume those failure modes are one edit away, and check the resulting
 index for symbols whose owner is not a valid identifier.
 
-**Dependency resolution has three mechanisms, and precision trades against recall.** Edges come from
-imports, from same-package and fully-qualified references, and from accessor return-type inference
-(a test calling `ctx.sharedRaceConditionDetector()` never names the type). Comments and string
-literals are stripped first, because matching raw file text turned every javadoc mention into a
-dependency. `test_e2e_comment_stripping_and_class_literal_dependencies`,
+**Dependency resolution has three mechanisms for Java and a fourth for everything else, and
+precision trades against recall.** Java edges come from imports, from same-package and
+fully-qualified references, and from accessor return-type inference (a test calling
+`ctx.sharedRaceConditionDetector()` never names the type). Comments and string literals are stripped
+first, because matching raw file text turned every javadoc mention into a dependency.
+`test_e2e_comment_stripping_and_class_literal_dependencies`,
 `test_e2e_same_package_dependencies_blast_radius` and
 `test_e2e_accessor_return_type_dependency_resolution` pin the three. Widening any of them re-admits
 comment noise; narrowing drops real dependents. Judge a change by measuring both directions against
 a real repository, not by the size of the result set.
+
+Rust, Python, TypeScript, JavaScript and Go had none of that: their parsers recorded each file's
+`use`/`import` lines verbatim as every node's dependencies, so `reverse_deps` was keyed by strings
+like `anyhow::Result` and nothing ever resolved to an indexed symbol. `record_references` and
+`resolve_reference_edges` supply the missing pass: references are collected per line while parsing,
+then, once the whole tree is read, each is charged to the last symbol declared above it and kept
+only if some indexed symbol answers to that name. The pass runs at the end of `scan_directory`
+because a file that references a symbol defined further down the walk cannot be resolved when it is
+read. `crates/axiom-ast/tests/blast_radius.rs` pins it.
+
+**A symbol's short name is not its last dot-separated segment.** `simple_name_of` distinguishes a
+package-keyed symbol, `pkg.Class::method` to `Class`, from a file-keyed one,
+`src/lib.rs::write_atomically` to `write_atomically`. Splitting on the last dot unconditionally took
+the file extension for a package separator: every Rust symbol reduced to `rs`, and since
+`index_node` stores the symbol path in `signature`, the fallback search matched `rs::` against every
+Rust symbol in the index. The blast radius for anything in this repository was all 49 tests. A
+Java-only fixture suite cannot catch this, which is why the new tests scan Rust and Python side by
+side.
+
+**`reverse_deps` is keyed by the name a caller writes, and its values are full symbol paths.** The
+traversal therefore has to look up both on each hop. Looking up only the path found nothing after
+the first step, so every transitive layer was silently empty for the file-keyed languages.
 
 **`axiom_eval_patch` must never return a verdict it did not earn.** Three tiers in `execute_eval`: a
 WAT or wasm snippet compiles and runs through wasmtime Cranelift; anything else is written to a temp
@@ -143,11 +166,13 @@ Unix rather than merely harmless, but that has been reasoned rather than run.
 
 ## Repository state
 
-There is no git repository here (`git status` fails) and no CI. `cargo test` is the only gate, so it
-is the whole verification story before and after a change.
+The gates are `cargo test --release --all-targets`, `cargo fmt --all --check` and
+`cargo clippy --all-targets -- -D warnings`, and `.github/workflows/ci.yml` runs all three plus
+`.github/scripts/concurrent_agents_check.py` on ubuntu and windows. Run them before opening a PR;
+the lint job fails the build on a single warning.
 
-`README.md` describes the intended product and its performance claims; treat its numbers as targets
-rather than measurements. It also lists six e2e tests where the suite now has ten.
+`README.md` mixes measurements with design goals. The blast-radius and eval numbers were taken on
+this repository and say so; treat anything quoting a figure for other repositories as a target.
 
 ## Building in a sandboxed session
 
