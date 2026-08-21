@@ -1,6 +1,29 @@
 # Axiom Zero-Trust Security Framework
 ### Verifiable Threat Containment and Cryptographic Provenance for AI-Native Coding Swarms
 
+> **Status of this document.** It describes the security model Axiom is designed
+> around. Most of it is not built. Read it as intent, not as protection you have.
+>
+> What exists today:
+>
+> | Layer | Claim | Built? |
+> |---|---|---|
+> | 1 | Intercepting proxy sanitising tool calls and paths | **No.** Nothing sits between an agent and the server. |
+> | 2 | Ephemeral sandbox, zero egress, seccomp, KVM microVM | **Partly.** Snippets compile and run through `rustc` and `wasmtime`; there is no egress restriction, no seccomp filtering and no microVM. |
+> | 3 | Immutable content-addressed AST core | **Partly.** Nodes are BLAKE3-hashed and content-addressed, but parsing is line-based heuristics rather than Tree-sitter, and the index is an ordinary JSON file that anything with write access can edit. |
+>
+> The provenance record is real and its limits are stated in the README: it ties a
+> prompt, a symbol and a check together, is signed when a key is configured, and
+> chains so a deleted record is visible. It does not establish that code is
+> correct, and it does not stop someone who can write the ledger from truncating
+> it at the end.
+>
+> The threat table in section 3 says PREVENTED against several vectors. Those
+> should be read as what the design intends to prevent once the layers exist. As
+> things stand, an agent talking to this server has the same access to the host
+> that the process it runs in has.
+
+
 Traditional software development and version control systems (like Git and GitHub Actions) were designed with a fundamental assumption: **human developers are the primary actors.** Security is typically enforced via peer review (Pull Requests) and centralized, asynchronous CI environments.
 
 In the agentic age, this model completely breaks down. Autonomous AI coding agents can generate high volumes of code and execute code modifications in milliseconds [1, 25]. If an agent is compromised, experiences a prompt injection, or hallucinates highly destructive code, traditional systems have no way of containing the threat in real time before it spreads.

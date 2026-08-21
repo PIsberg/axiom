@@ -415,7 +415,7 @@ async fn main() -> Result<()> {
             println!(" -------------------------------------------------------------------------------");
             println!(" Workspace Sync            git clone (500 MB / ~12s)     MCP Graph Query (2 KB / {:.2} ms)", el1);
             println!(" Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)", );
-            println!(" Sandbox Feedback Loop     300,000 ms (5 minutes)        {:.2} ms (Tier-1 WASI / MicroVM)", el4);
+            println!(" Sandbox Feedback Loop     300,000 ms (5 minutes)        {:.2} ms (compile and run)", el4);
             println!(" Self-Correction Total     600,000 ms (10 minutes)       {:.2} ms (End-to-End)", total_loop_ms);
             println!(" Provenance Security       Unsigned text commit          Prompt, symbol and check recorded together");
             println!(" Speedup Multiplier        1.0x (Baseline)               {:.0}x FASTER", 600000.0 / total_loop_ms.max(0.1));

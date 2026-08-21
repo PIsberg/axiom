@@ -260,7 +260,7 @@ impl AxiomMcpServer {
                     "tools": [
                         {
                             "name": "axiom_query_symbol",
-                            "description": "Inspect AST node definition and type signatures without disk clones",
+                            "description": "Look up one indexed symbol. A shorter name resolves when it identifies exactly one symbol; a name matching several returns the candidates instead of choosing.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -271,7 +271,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_get_blast_radius",
-                            "description": "Compute topological blast radius and impacted test targets for changed symbol",
+                            "description": "The tests that reach a symbol, so a change can be checked without running everything. An empty result means none were found in the index, which is not the same as nothing being affected.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -283,7 +283,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_eval_patch",
-                            "description": "Execute sub-15ms test validation inside isolated WASI/MicroVM sandbox",
+                            "description": "Compile and run a Rust snippet in process and report what happened. Takes a few hundred milliseconds, since it invokes rustc. A symbol from a language it cannot compile is refused rather than guessed at.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -295,7 +295,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_attest_commit",
-                            "description": "Generate SLSA Level 4+ cryptographic provenance seal for verified AST mutation",
+                            "description": "Record that a change to a symbol was checked, tying the prompt, the symbol and the check together. Only issued against a check that happened and passed. Signed when a signing key is configured.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -308,7 +308,7 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_apply_mutation",
-                            "description": "Apply commutative Tree-CRDT AST mutation across concurrent agent swarms",
+                            "description": "Apply a Tree-CRDT mutation to one symbol and persist it. Only that symbol is written, so a concurrent agent sharing the workspace does not lose its work.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
