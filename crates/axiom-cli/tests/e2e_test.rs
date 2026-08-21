@@ -1498,17 +1498,17 @@ async fn test_e2e_attestation_ledger_binds_symbol_and_prompt() -> Result<()> {
     // Nothing attested yet: an empty ledger proves nothing.
     assert!(axiom_core::mcp::load_attestations_from(&ledger)?.is_empty());
 
-    let seal = axiom_proto::ProvenanceAttestation::generate(
-        "root_parent",
-        "root_commit",
-        "agent_axiom_v1",
-        "Tighten the guard",
-        "auth::service::validate_token",
-        "eval_7",
-        "sandbox",
-        "axiom sandbox, engine tier1_wasi_cranelift",
-        "",
-    );
+    let seal = axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+        parent_merkle_root: "root_parent",
+        commit_merkle_root: "root_commit",
+        agent_identity: "agent_axiom_v1",
+        prompt: "Tighten the guard",
+        symbol_path: "auth::service::validate_token",
+        ctop_task_id: "eval_7",
+        verified_by: "sandbox",
+        verification_detail: "axiom sandbox, engine tier1_wasi_cranelift",
+        previous_seal: "",
+    });
     axiom_core::mcp::append_attestation_to(&ledger, &seal)?;
 
     let stored = axiom_core::mcp::load_attestations_from(&ledger)?;
@@ -2158,17 +2158,17 @@ async fn test_e2e_symbol_lookup_refuses_names_it_cannot_pin_down() -> Result<()>
 async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> {
     let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
 
-    let mut record = axiom_proto::ProvenanceAttestation::generate(
-        "root_parent",
-        "root_commit",
-        "agent_axiom_v1",
-        "Tighten the guard",
-        "auth::service::validate_token",
-        "eval_7",
-        "sandbox",
-        "axiom sandbox, engine tier1_wasi_cranelift",
-        "",
-    );
+    let mut record = axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+        parent_merkle_root: "root_parent",
+        commit_merkle_root: "root_commit",
+        agent_identity: "agent_axiom_v1",
+        prompt: "Tighten the guard",
+        symbol_path: "auth::service::validate_token",
+        ctop_task_id: "eval_7",
+        verified_by: "sandbox",
+        verification_detail: "axiom sandbox, engine tier1_wasi_cranelift",
+        previous_seal: "",
+    });
 
     // An unsigned record is anonymous, and says so by carrying no key.
     assert!(record.signature.is_empty() && record.public_key.is_empty());
@@ -2277,17 +2277,17 @@ async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Resul
     let (private_hex, public_hex) = axiom_proto::signing::generate_keypair();
 
     let make = |symbol: &str, prompt: &str| {
-        axiom_proto::ProvenanceAttestation::generate(
-            "root_parent",
-            "root_commit",
-            "agent_axiom_v1",
+        axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+            parent_merkle_root: "root_parent",
+            commit_merkle_root: "root_commit",
+            agent_identity: "agent_axiom_v1",
             prompt,
-            symbol,
-            "task_1",
-            "reported",
-            "cargo test",
-            "",
-        )
+            symbol_path: symbol,
+            ctop_task_id: "task_1",
+            verified_by: "reported",
+            verification_detail: "cargo test",
+            previous_seal: "",
+        })
     };
 
     // What an attacker with no key can produce: a well-formed, unsigned record.
@@ -2369,17 +2369,18 @@ async fn test_e2e_removing_a_record_breaks_the_chain() -> Result<()> {
             .unwrap_or_default();
         let symbol = format!("src/lib.rs::{name}");
         let prompt = format!("change {name}");
-        let mut record = axiom_proto::ProvenanceAttestation::generate(
-            "root_parent",
-            "root_commit",
-            "agent_axiom_v1",
-            &prompt,
-            &symbol,
-            "task_1",
-            "reported",
-            "cargo test",
-            &previous,
-        );
+        let mut record =
+            axiom_proto::ProvenanceAttestation::generate(axiom_proto::NewAttestation {
+                parent_merkle_root: "root_parent",
+                commit_merkle_root: "root_commit",
+                agent_identity: "agent_axiom_v1",
+                prompt: &prompt,
+                symbol_path: &symbol,
+                ctop_task_id: "task_1",
+                verified_by: "reported",
+                verification_detail: "cargo test",
+                previous_seal: &previous,
+            });
         record
             .sign_with(&symbol, &prompt, &private_hex)
             .map_err(|e| anyhow::anyhow!(e))?;

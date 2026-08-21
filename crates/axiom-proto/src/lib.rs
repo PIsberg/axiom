@@ -117,18 +117,39 @@ pub struct ProvenanceAttestation {
     pub seal: String,
 }
 
+/// What a provenance record is issued about.
+///
+/// These arrived as nine positional arguments, which is enough for a caller to
+/// transpose two strings and never find out. Naming them at the call site makes
+/// that mistake visible while writing it.
+pub struct NewAttestation<'a> {
+    pub parent_merkle_root: &'a str,
+    pub commit_merkle_root: &'a str,
+    pub agent_identity: &'a str,
+    pub prompt: &'a str,
+    pub symbol_path: &'a str,
+    pub ctop_task_id: &'a str,
+    /// "sandbox" when axiom ran the check, "reported" when it was told.
+    pub verified_by: &'a str,
+    pub verification_detail: &'a str,
+    /// Seal of the record before this one, empty for the first.
+    pub previous_seal: &'a str,
+}
+
 impl ProvenanceAttestation {
-    pub fn generate(
-        parent_merkle_root: &str,
-        commit_merkle_root: &str,
-        agent_identity: &str,
-        prompt: &str,
-        symbol_path: &str,
-        ctop_task_id: &str,
-        verified_by: &str,
-        verification_detail: &str,
-        previous_seal: &str,
-    ) -> Self {
+    pub fn generate(details: NewAttestation<'_>) -> Self {
+        let NewAttestation {
+            parent_merkle_root,
+            commit_merkle_root,
+            agent_identity,
+            prompt,
+            symbol_path,
+            ctop_task_id,
+            verified_by,
+            verification_detail,
+            previous_seal,
+        } = details;
+
         let mut hasher = blake3::Hasher::new();
         hasher.update(parent_merkle_root.as_bytes());
         hasher.update(commit_merkle_root.as_bytes());

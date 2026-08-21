@@ -135,11 +135,10 @@ impl Drop for IndexLock {
 /// disk will not start working within five seconds, and pretending otherwise
 /// only delays the report.
 fn worth_retrying(e: &std::io::Error) -> bool {
-    match e.kind() {
-        std::io::ErrorKind::Interrupted => true,
-        std::io::ErrorKind::PermissionDenied => cfg!(windows),
-        _ => false,
+    if e.kind() == std::io::ErrorKind::Interrupted {
+        return true;
     }
+    cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 /// Write a file so a reader sees either the old contents or the new ones, never
@@ -235,6 +234,12 @@ pub struct AstIndex {
     /// by looking up what a file owned, and for those languages the answer was
     /// always nothing.
     parsing_file: RwLock<Option<String>>,
+}
+
+impl Default for AstIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AstIndex {
@@ -590,7 +595,7 @@ impl AstIndex {
         let canonical_symbol = symbol_node.symbol_path;
         let simple_name = canonical_symbol
             .split('.')
-            .last()
+            .next_back()
             .unwrap_or(&canonical_symbol)
             .split("::")
             .next()
@@ -667,7 +672,7 @@ impl AstIndex {
         let mut accessor_names = Vec::new();
         for (m_name, ret_type) in mrt.iter() {
             if ret_type == simple_name || ret_type == &canonical_symbol {
-                let short_m = m_name.split('.').last().unwrap_or(m_name);
+                let short_m = m_name.split('.').next_back().unwrap_or(m_name);
                 accessor_names.push(short_m.to_string());
             }
         }
@@ -721,7 +726,7 @@ impl AstIndex {
             for (sym, node) in nodes.iter() {
                 if node.kind == "test" {
                     let sig = node.signature.as_deref().unwrap_or("");
-                    if sym.contains(&test_pattern_1)
+                    if (sym.contains(&test_pattern_1)
                         || sym.contains(&test_pattern_2)
                         || sym.contains(&canonical_symbol)
                         || sig.contains(&canonical_symbol)
@@ -732,12 +737,11 @@ impl AstIndex {
                         || node
                             .dependencies
                             .iter()
-                            .any(|d| d == simple_name || d == &canonical_symbol)
+                            .any(|d| d == simple_name || d == &canonical_symbol))
+                        && !impacted_tests.contains(sym)
                     {
-                        if !impacted_tests.contains(sym) {
-                            impacted_tests.push(sym.clone());
-                            tests_by_depth.entry(1).or_default().push(sym.clone());
-                        }
+                        impacted_tests.push(sym.clone());
+                        tests_by_depth.entry(1).or_default().push(sym.clone());
                     }
                 }
             }
@@ -999,7 +1003,7 @@ impl AstIndex {
 
     fn is_test_path_or_file(file_path: &str) -> bool {
         let normalized = file_path.replace('\\', "/");
-        let file_name = normalized.split('/').last().unwrap_or("");
+        let file_name = normalized.split('/').next_back().unwrap_or("");
         let fn_lower = file_name.to_lowercase();
         let is_test_filename = fn_lower.starts_with("test_")
             || fn_lower.ends_with("_test.rs")
@@ -1360,7 +1364,7 @@ impl AstIndex {
                     && (method_name
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_lowercase() || c == '_' || c == '$')
+                        .is_some_and(|c| c.is_lowercase() || c == '_' || c == '$')
                         || (!enclosing_class.is_empty() && enclosing_class == method_name));
 
                 if !enclosing_class.is_empty() && is_valid_name {
@@ -1369,13 +1373,13 @@ impl AstIndex {
                         let raw_ret = sig_tokens[sig_tokens.len() - 2];
                         let ret_clean = raw_ret
                             .split('<')
-                            .last()
+                            .next_back()
                             .unwrap_or(raw_ret)
                             .replace('>', "")
                             .replace("[]", "");
                         let ret_ident = ret_clean.trim();
                         if Self::is_valid_identifier(ret_ident)
-                            && ret_ident.chars().next().map_or(false, |c| c.is_uppercase())
+                            && ret_ident.chars().next().is_some_and(|c| c.is_uppercase())
                         {
                             let mut mrt = self.method_return_types.write().unwrap();
                             mrt.insert(method_name.to_string(), ret_ident.to_string());
@@ -1421,7 +1425,7 @@ impl AstIndex {
             let open_count = curr_line.chars().filter(|&c| c == '{').count();
             let close_count = curr_line.chars().filter(|&c| c == '}').count();
 
-            current_brace_depth = current_brace_depth + open_count;
+            current_brace_depth += open_count;
             current_brace_depth = current_brace_depth.saturating_sub(close_count);
 
             while let Some((_, depth)) = class_stack.last() {
@@ -1493,8 +1497,7 @@ impl AstIndex {
                     .split_whitespace()
                     .nth(if trimmed.starts_with("pub ") { 2 } else { 1 })
                     .unwrap_or("")
-                    .replace('{', "")
-                    .replace(';', "")
+                    .replace(['{', ';'], "")
                     .trim()
                     .to_string();
 
@@ -1687,8 +1690,7 @@ impl AstIndex {
             Err(struct_err) => {
                 let nodes: HashMap<String, AstNode> =
                     serde_json::from_str(&content).map_err(|bare_err| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        std::io::Error::other(
                             format!(
                                 "{path:?} parses as neither the current index format ({struct_err}) nor a legacy bare node map ({bare_err})"
                             ),
@@ -1747,7 +1749,7 @@ impl AstIndex {
         payload.nodes.insert(symbol.to_string(), node);
 
         let json = serde_json::to_string_pretty(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         write_atomically(&abs_path, json.as_bytes())?;
         Ok(abs_path)
     }
@@ -1800,7 +1802,7 @@ impl AstIndex {
             .extend(self.file_to_symbols.read().unwrap().clone());
 
         let json = serde_json::to_string_pretty(&payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         write_atomically(&abs_path, json.as_bytes())?;
 
@@ -1869,6 +1871,12 @@ impl AstIndex {
 pub struct ZoektIndex {
     files: HashMap<String, String>,
     trigrams: HashMap<[u8; 3], HashSet<String>>,
+}
+
+impl Default for ZoektIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ZoektIndex {

@@ -300,7 +300,7 @@ async fn main() -> Result<()> {
                 "Measuring axiom_eval_patch over {} iterations...",
                 iterations
             );
-            let mut timings: Vec<f64> = Vec::with_capacity(iterations as usize);
+            let mut timings: Vec<f64> = Vec::with_capacity(iterations);
 
             for i in 0..iterations {
                 let start = Instant::now();
@@ -741,8 +741,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            if chain.is_err() && expected.is_some() {
-                println!("❌ LEDGER ALTERED: {}", chain.unwrap_err());
+            if let (Err(broken), Some(_)) = (&chain, &expected) {
+                println!("❌ LEDGER ALTERED: {broken}");
                 println!("   Refusing to report a record as trusted from a ledger that has had");
                 println!("   records removed. Verify without --trusted-key to inspect it anyway.");
                 std::process::exit(1);

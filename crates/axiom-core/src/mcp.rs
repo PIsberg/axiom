@@ -2,7 +2,7 @@ use anyhow::Result;
 use axiom_ast::{AstIndex, SearchMode};
 pub use axiom_crdt;
 use axiom_crdt::TreeCrdt;
-use axiom_proto::{CtopStatus, ProvenanceAttestation};
+use axiom_proto::{CtopStatus, NewAttestation, ProvenanceAttestation};
 use axiom_vmm::{SandboxEngine, WasiEngine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -622,17 +622,18 @@ impl AxiomMcpServer {
                 let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
                 let previous_seal = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
 
-                let attestation = ProvenanceAttestation::generate(
-                    "merkle_root_prev_77a1",
-                    &format!("merkle_root_{}", &root[..8]),
-                    "agent_axiom_v1",
+                let commit_root = format!("merkle_root_{}", &root[..8]);
+                let attestation = ProvenanceAttestation::generate(NewAttestation {
+                    parent_merkle_root: "merkle_root_prev_77a1",
+                    commit_merkle_root: &commit_root,
+                    agent_identity: "agent_axiom_v1",
                     prompt,
-                    symbol,
-                    task_id,
-                    &verification.kind,
-                    &verification.detail,
-                    &previous_seal,
-                );
+                    symbol_path: symbol,
+                    ctop_task_id: task_id,
+                    verified_by: &verification.kind,
+                    verification_detail: &verification.detail,
+                    previous_seal: &previous_seal,
+                });
 
                 // Sign when a key is configured. An unsigned record is still
                 // worth writing; it just cannot say who issued it.
