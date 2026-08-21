@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axiom_ast::{AstIndex, SearchMode};
-use axiom_crdt::TreeCrdt;
 pub use axiom_crdt;
+use axiom_crdt::TreeCrdt;
 use axiom_proto::{CtopStatus, ProvenanceAttestation};
 use axiom_vmm::{SandboxEngine, WasiEngine};
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,9 @@ fn read_json_settling(path: &std::path::Path) -> Option<String> {
     }
     // Give the caller the last read so a genuinely malformed file still reports
     // as malformed rather than as absent.
-    std::fs::read_to_string(path).ok().filter(|r| !r.trim().is_empty())
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|r| !r.trim().is_empty())
 }
 
 /// Append one attestation to the ledger.
@@ -267,7 +269,7 @@ impl AxiomMcpServer {
         })
     }
 
-/// Populate the workspace with the demo symbols the walkthrough uses.
+    /// Populate the workspace with the demo symbols the walkthrough uses.
     ///
     /// This used to run inside `new` whenever the index was empty, which made a
     /// workspace nobody had scanned answer confidently about
@@ -303,7 +305,6 @@ impl AxiomMcpServer {
                 "pub fn validate_token(t: &str) -> bool { t.len() > 10 }",
             );
         }
-
     }
 
     pub async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
@@ -501,7 +502,10 @@ impl AxiomMcpServer {
             }
 
             "axiom_get_blast_radius" => {
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
                 if let Some(res) = self.ast_index.compute_blast_radius(symbol, depth) {
                     Ok(json!(res))
@@ -516,8 +520,14 @@ impl AxiomMcpServer {
             }
 
             "axiom_eval_patch" => {
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("anonymous");
-                let snippet = args.get("code_snippet").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("anonymous");
+                let snippet = args
+                    .get("code_snippet")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 // The sandbox compiles Rust. The indexer does not: it reads Java,
                 // Kotlin, Python, TypeScript and Go too, so a symbol from any of
@@ -561,7 +571,10 @@ impl AxiomMcpServer {
 
             "axiom_attest_commit" => {
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let task_id = match args.get("ctop_task_id").and_then(|v| v.as_str()) {
                     Some(t) if !t.is_empty() => t,
                     _ => {
@@ -602,7 +615,9 @@ impl AxiomMcpServer {
                 let ledger_path = attestation_ledger_path();
                 let _ledger_lock = match axiom_ast::IndexLock::acquire(&ledger_path) {
                     Ok(l) => l,
-                    Err(e) => return Ok(json!({ "error": format!("could not lock the ledger: {e}") })),
+                    Err(e) => {
+                        return Ok(json!({ "error": format!("could not lock the ledger: {e}") }))
+                    }
                 };
                 let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
                 let previous_seal = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
@@ -634,7 +649,9 @@ impl AxiomMcpServer {
                 existing.push(attestation.clone());
                 let encoded = match serde_json::to_string_pretty(&existing) {
                     Ok(j) => j,
-                    Err(e) => return Ok(json!({ "error": format!("could not encode the ledger: {e}") })),
+                    Err(e) => {
+                        return Ok(json!({ "error": format!("could not encode the ledger: {e}") }))
+                    }
                 };
                 if let Some(parent) = ledger_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -649,11 +666,19 @@ impl AxiomMcpServer {
             }
 
             "axiom_apply_mutation" => {
-                let node_id = args.get("node_id").and_then(|v| v.as_str()).unwrap_or("node_01");
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("module::fn");
+                let node_id = args
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("node_01");
+                let symbol = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("module::fn");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-                let op = self.tree_crdt.insert_node("root", node_id, symbol, "function", content);
+                let op = self
+                    .tree_crdt
+                    .insert_node("root", node_id, symbol, "function", content);
 
                 // Record it where the next agent will see it.
                 if let Err(e) = append_crdt_op(&crdt_op_log_path(), &op) {
@@ -661,7 +686,8 @@ impl AxiomMcpServer {
                         "error": format!("could not record the mutation: {e}")
                     }));
                 }
-                self.ast_index.index_node(symbol, "function", content, vec![]);
+                self.ast_index
+                    .index_node(symbol, "function", content, vec![]);
                 let root = self.tree_crdt.compute_tree_merkle_root();
 
                 // Save updated index to disk
@@ -719,8 +745,14 @@ impl AxiomMcpServer {
 
             "axiom_search_regex" => {
                 let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let max = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                let requested = args.get("mode").and_then(|v| v.as_str()).unwrap_or("literal");
+                let max = args
+                    .get("max_results")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20) as usize;
+                let requested = args
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("literal");
 
                 let mode = match SearchMode::parse(requested) {
                     Ok(m) => m,
@@ -737,7 +769,9 @@ impl AxiomMcpServer {
                         "matches_count": matches.len(),
                         "matches": matches
                     })),
-                    Err(e) => Ok(json!({ "error": e, "query": query, "mode_requested": requested })),
+                    Err(e) => {
+                        Ok(json!({ "error": e, "query": query, "mode_requested": requested }))
+                    }
                 }
             }
 

@@ -162,9 +162,14 @@ impl ProvenanceAttestation {
     /// Re-derive the seal from this attestation's own stored fields plus the
     /// symbol and prompt being claimed, and compare. A caller that supplies a
     /// different prompt, or asks about a different symbol, gets false.
-/// Sign this record with a key, binding the signature to the symbol and
+    /// Sign this record with a key, binding the signature to the symbol and
     /// prompt so it cannot be lifted onto a different record.
-    pub fn sign_with(&mut self, symbol_path: &str, prompt: &str, private_hex: &str) -> Result<(), String> {
+    pub fn sign_with(
+        &mut self,
+        symbol_path: &str,
+        prompt: &str,
+        private_hex: &str,
+    ) -> Result<(), String> {
         let (signature, public_key) = crate::signing::sign(self, symbol_path, prompt, private_hex)?;
         self.signature = signature;
         self.public_key = public_key;
@@ -192,7 +197,13 @@ impl ProvenanceAttestation {
 }
 
 impl CtopReport {
-    pub fn pass(task_id: String, engine: String, duration_ms: f64, passed_count: usize, stdout: String) -> Self {
+    pub fn pass(
+        task_id: String,
+        engine: String,
+        duration_ms: f64,
+        passed_count: usize,
+        stdout: String,
+    ) -> Self {
         Self {
             task_id,
             engine,
@@ -285,7 +296,9 @@ pub mod signing {
     }
 
     pub fn public_key_of(private_hex: &str) -> Result<String, String> {
-        Ok(hex::encode(load_signing_key(private_hex)?.verifying_key().to_bytes()))
+        Ok(hex::encode(
+            load_signing_key(private_hex)?.verifying_key().to_bytes(),
+        ))
     }
 
     /// A short, human-comparable form of a public key.
@@ -295,8 +308,8 @@ pub mod signing {
     }
 
     fn load_signing_key(private_hex: &str) -> Result<SigningKey, String> {
-        let raw = hex::decode(private_hex.trim())
-            .map_err(|e| format!("signing key is not hex: {e}"))?;
+        let raw =
+            hex::decode(private_hex.trim()).map_err(|e| format!("signing key is not hex: {e}"))?;
         let bytes: [u8; 32] = raw
             .try_into()
             .map_err(|_| "signing key must be 32 bytes".to_string())?;
@@ -374,7 +387,11 @@ pub fn verify_chain(records: &[ProvenanceAttestation]) -> Result<(), String> {
                 i,
                 i + 1,
                 i + 1,
-                if after.previous_seal.is_empty() { "(none)" } else { &after.previous_seal },
+                if after.previous_seal.is_empty() {
+                    "(none)"
+                } else {
+                    &after.previous_seal
+                },
                 before.seal
             ));
         }
