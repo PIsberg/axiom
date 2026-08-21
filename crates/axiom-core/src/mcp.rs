@@ -73,6 +73,29 @@ pub fn append_attestation_to(
     Ok(())
 }
 
+/// Read a required string argument, or say why it is unusable.
+///
+/// Defaulting a missing argument to "" turned a malformed request into a lookup
+/// for the empty string, which used to match every symbol.
+fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
+    match args.get(name) {
+        None => Err(format!("{name} is required")),
+        Some(Value::String(s)) if s.trim().is_empty() => Err(format!("{name} must not be blank")),
+        Some(Value::String(s)) => Ok(s.as_str()),
+        Some(other) => Err(format!(
+            "{name} must be a string, got {}",
+            match other {
+                Value::Number(_) => "a number",
+                Value::Bool(_) => "a boolean",
+                Value::Array(_) => "an array",
+                Value::Object(_) => "an object",
+                Value::Null => "null",
+                Value::String(_) => unreachable!(),
+            }
+        )),
+    }
+}
+
 /// A check that was performed before a provenance record was issued.
 #[derive(Debug, Clone)]
 pub struct Verification {
@@ -353,15 +376,29 @@ impl AxiomMcpServer {
     async fn execute_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
         match tool_name {
             "axiom_query_symbol" => {
-                let symbol = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol = match required_str(&args, "symbol_path") {
+                    Ok(s) => s,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+
                 if let Some(node) = self.ast_index.get_symbol(symbol) {
-                    Ok(json!(node))
-                } else {
-                    Ok(json!({
-                        "error": format!("Symbol '{}' not found in AST index. Use 'axiom scan' to index your workspace first.", symbol),
-                        "total_symbols_in_index": self.ast_index.total_symbols_count()
-                    }))
+                    return Ok(json!(node));
                 }
+
+                // An ambiguous name is not a miss. Saying so beats picking one of
+                // the candidates and presenting it as the answer.
+                let candidates = self.ast_index.candidates_for(symbol);
+                if candidates.len() > 1 {
+                    return Ok(json!({
+                        "error": format!("{:?} matches {} symbols; name one of them", symbol, candidates.len()),
+                        "candidates": candidates.iter().take(10).collect::<Vec<_>>()
+                    }));
+                }
+
+                Ok(json!({
+                    "error": format!("Symbol '{}' not found in AST index. Use 'axiom scan' to index your workspace first.", symbol),
+                    "total_symbols_in_index": self.ast_index.total_symbols_count()
+                }))
             }
 
             "axiom_get_blast_radius" => {

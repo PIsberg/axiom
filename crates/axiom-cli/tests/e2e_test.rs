@@ -1659,3 +1659,74 @@ async fn test_e2e_dashboard_counts_come_from_the_index() -> Result<()> {
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+/// A name that cannot identify one symbol must not resolve to one anyway.
+///
+/// Lookup fell back to `key.ends_with(name)`, which is true of every key when
+/// the name is empty. A request that omitted its argument, or sent a number
+/// where a string belonged, defaulted to "" and came back with a real-looking
+/// node for whichever symbol the HashMap reached first. The same fallback
+/// resolved an ambiguous suffix to an arbitrary one of its candidates, and to a
+/// different one between runs.
+#[tokio::test]
+async fn test_e2e_symbol_lookup_refuses_names_it_cannot_pin_down() -> Result<()> {
+    let idx = axiom_ast::AstIndex::new();
+    idx.index_node("pkg.One::execute", "method", "fn execute() {}", vec![]);
+    idx.index_node("pkg.Two::execute", "method", "fn execute() {}", vec![]);
+    idx.index_node("pkg.Only::unique", "method", "fn unique() {}", vec![]);
+
+    assert!(
+        idx.get_symbol("").is_none(),
+        "an empty name matches every key under ends_with and must resolve to nothing"
+    );
+    assert!(idx.get_symbol("   ").is_none(), "nor may whitespace stand in for a name");
+
+    assert!(
+        idx.get_symbol("execute").is_none(),
+        "an ambiguous name must not silently pick one of its candidates"
+    );
+    assert_eq!(
+        idx.candidates_for("execute"),
+        vec!["pkg.One::execute".to_string(), "pkg.Two::execute".to_string()],
+        "the candidates must be offered, in a stable order"
+    );
+
+    // A short name that does identify one symbol still resolves.
+    assert_eq!(
+        idx.get_symbol("unique").map(|n| n.symbol_path),
+        Some("pkg.Only::unique".to_string())
+    );
+    assert_eq!(
+        idx.get_symbol("pkg.Only::unique").map(|n| n.symbol_path),
+        Some("pkg.Only::unique".to_string())
+    );
+
+    // But a fragment that does not start on a boundary is not a name.
+    assert!(
+        idx.get_symbol("nique").is_none(),
+        "matching mid-identifier would make half the index reachable by accident"
+    );
+
+    // And the MCP layer separates a malformed request from a miss.
+    let server = AxiomMcpServer::with_index(None)?;
+    let call = |args: serde_json::Value| JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(60)),
+        method: "tools/call".into(),
+        params: Some(json!({ "name": "axiom_query_symbol", "arguments": args })),
+    };
+
+    let res = extract_tool_result(&server.handle_request(call(json!({}))).await);
+    assert!(
+        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("required"),
+        "a missing argument must be reported as such, got {res:?}"
+    );
+
+    let res = extract_tool_result(&server.handle_request(call(json!({ "symbol_path": 123 }))).await);
+    assert!(
+        res.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("must be a string"),
+        "a number where a name belongs must be reported as such, got {res:?}"
+    );
+
+    Ok(())
+}

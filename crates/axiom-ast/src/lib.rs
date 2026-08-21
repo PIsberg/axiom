@@ -211,24 +211,69 @@ impl AstIndex {
     }
 
     /// Lookup a symbol in the AST index (supports exact match and class-level matching)
+    /// Look a symbol up, exactly if possible and by unique suffix otherwise.
+    ///
+    /// Returns nothing when the name is blank or matches more than one symbol.
+    /// The previous version returned the first match found while walking a
+    /// HashMap, which meant two different wrong answers: an empty name matched
+    /// everything, because every string ends with the empty string, so a request
+    /// that forgot its argument got a real-looking node for an arbitrary symbol;
+    /// and an ambiguous suffix like "execute" silently resolved to whichever
+    /// class the iteration order happened to reach first, differently between
+    /// runs.
     pub fn get_symbol(&self, symbol_path: &str) -> Option<AstNode> {
+        if symbol_path.trim().is_empty() {
+            return None;
+        }
+
         let nodes = self.nodes.read().unwrap();
         if let Some(node) = nodes.get(symbol_path) {
             return Some(node.clone());
         }
 
-        let prefix = format!("{}::", symbol_path);
-        for (k, v) in nodes.iter() {
-            if k.starts_with(&prefix)
-                || k.ends_with(symbol_path)
-                || k.ends_with(&format!(".{}", symbol_path))
-                || k.ends_with(&format!("::{}", symbol_path))
-            {
-                return Some(v.clone());
-            }
+        let mut matches: Vec<&String> = nodes
+            .keys()
+            .filter(|k| Self::is_suffix_match(k, symbol_path))
+            .collect();
+
+        if matches.len() == 1 {
+            return nodes.get(matches.pop().unwrap()).cloned();
         }
 
         None
+    }
+
+    /// Every symbol an ambiguous name could have meant, sorted so a caller can
+    /// show a stable list rather than an arbitrary one.
+    pub fn candidates_for(&self, symbol_path: &str) -> Vec<String> {
+        if symbol_path.trim().is_empty() {
+            return Vec::new();
+        }
+        let nodes = self.nodes.read().unwrap();
+        let mut out: Vec<String> = nodes
+            .keys()
+            .filter(|k| Self::is_suffix_match(k, symbol_path))
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Whether `key` names the same thing as `symbol_path` written in short.
+    ///
+    /// A shorter name has to end on a boundary in the key: `alpha` matches
+    /// `pkg.Class::alpha` and `src/lib.rs::alpha` matches the absolute path it
+    /// was recorded under, while `pha` matches neither. Requiring the boundary
+    /// is what keeps this from degenerating into "ends with", which is true of
+    /// every key when the name is empty.
+    fn is_suffix_match(key: &str, symbol_path: &str) -> bool {
+        if key == symbol_path || key.starts_with(&format!("{symbol_path}::")) {
+            return true;
+        }
+        match key.strip_suffix(symbol_path) {
+            Some(before) => before.ends_with('.') || before.ends_with('/') || before.ends_with(':'),
+            None => false,
+        }
     }
 
     /// List all symbols currently indexed
