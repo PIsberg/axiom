@@ -101,6 +101,43 @@ enum Commands {
     },
 }
 
+/// Pull the payload out of a tool response.
+///
+/// A tool answer arrives as a JSON-RPC envelope whose `result.content[0].text`
+/// is itself a JSON document, encoded as a string. Printing the envelope leaves
+/// a person reading escaped JSON inside JSON to find the answer, so the CLI
+/// unwraps it and prints what was asked for.
+fn tool_payload(resp: &axiom_core::mcp::JsonRpcResponse) -> serde_json::Value {
+    resp.result
+        .as_ref()
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_else(|| {
+            resp.result
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({ "error": "no result in response" }))
+        })
+}
+
+/// Report an error payload and stop, or hand back the payload.
+fn payload_or_exit(payload: serde_json::Value) -> serde_json::Value {
+    if let Some(err) = payload.get("error").and_then(|e| e.as_str()) {
+        eprintln!("Error: {err}");
+        if let Some(candidates) = payload.get("candidates").and_then(|c| c.as_array()) {
+            for c in candidates {
+                if let Some(c) = c.as_str() {
+                    eprintln!("  {c}");
+                }
+            }
+        }
+        std::process::exit(1);
+    }
+    payload
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -142,11 +179,33 @@ async fn main() -> Result<()> {
                     }
                 })),
             };
-
-            let resp = server.handle_request(req).await;
+            let report = payload_or_exit(tool_payload(&server.handle_request(req).await));
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            eprintln!("\n⚡ Total Axiom Client-Server Round-Trip: {:.2} ms", elapsed);
+
+            let status = report["status"].as_str().unwrap_or("?");
+            println!("{status}");
+            println!("  engine     {}", report["engine"].as_str().unwrap_or("?"));
+            println!("  took       {elapsed:.1} ms");
+            println!("  passed     {}", report["passed_checks_count"].as_u64().unwrap_or(0));
+
+            for f in report["failed_checks"].as_array().cloned().unwrap_or_default() {
+                println!();
+                println!("  {}", f["error_type"].as_str().unwrap_or("failure"));
+                if let Some(a) = f["actual"].as_str() {
+                    println!("    actual   {a}");
+                }
+                if let Some(e) = f["expected"].as_str() {
+                    println!("    expected {e}");
+                }
+                if let Some(h) = f["hint"].as_str() {
+                    println!("    hint     {h}");
+                }
+            }
+
+            // Exit non-zero on anything but a pass, so this can gate a script.
+            if status != "PASSED" {
+                std::process::exit(1);
+            }
         }
 
         Commands::Symbol { path } => {
@@ -161,8 +220,24 @@ async fn main() -> Result<()> {
                     }
                 })),
             };
-            let resp = server.handle_request(req).await;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            let node = payload_or_exit(tool_payload(&server.handle_request(req).await));
+
+            println!("{}", node["symbol_path"].as_str().unwrap_or("?"));
+            println!("  kind       {}", node["kind"].as_str().unwrap_or("?"));
+            println!("  hash       {}", node["hash"].as_str().unwrap_or("?"));
+            if let Some(sig) = node["signature"].as_str() {
+                if sig != node["symbol_path"].as_str().unwrap_or("") {
+                    println!("  signature  {sig}");
+                }
+            }
+            let deps = node["dependencies"].as_array().cloned().unwrap_or_default();
+            println!("  depends on {} symbol(s)", deps.len());
+            for d in deps.iter().take(12) {
+                println!("    {}", d.as_str().unwrap_or("?"));
+            }
+            if deps.len() > 12 {
+                println!("    ... and {} more", deps.len() - 12);
+            }
         }
 
         Commands::BlastRadius { symbol, depth } => {
@@ -178,8 +253,28 @@ async fn main() -> Result<()> {
                     }
                 })),
             };
-            let resp = server.handle_request(req).await;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            let radius = payload_or_exit(tool_payload(&server.handle_request(req).await));
+
+            let tests = radius["impacted_tests"].as_array().cloned().unwrap_or_default();
+            let total = radius["total_tests_in_repo"].as_u64().unwrap_or(0);
+            let pruned = radius["pruned_test_percentage"].as_f64().unwrap_or(0.0);
+
+            println!("{}", radius["symbol"].as_str().unwrap_or(&symbol));
+            println!("  {} of {} tests, {:.2}% pruned", tests.len(), total, pruned);
+            if tests.is_empty() {
+                println!();
+                println!("  Nothing depends on this symbol as far as the index can tell.");
+                println!("  That is not the same as nothing being affected: run the suite if the");
+                println!("  change matters.");
+            } else {
+                println!();
+                for t in tests.iter().take(40) {
+                    println!("  {}", t.as_str().unwrap_or("?"));
+                }
+                if tests.len() > 40 {
+                    println!("  ... and {} more", tests.len() - 40);
+                }
+            }
         }
 
         Commands::Bench { iterations } => {
