@@ -262,6 +262,19 @@ pub struct AstIndex {
     /// by looking up what a file owned, and for those languages the answer was
     /// always nothing.
     parsing_file: RwLock<Option<String>>,
+    /// The line each symbol was declared on, used to attribute a call site to
+    /// the function it sits inside rather than to the whole file.
+    ///
+    /// Scan-scoped and not persisted: it exists only long enough for
+    /// `resolve_reference_edges` to turn references into dependencies, which
+    /// are what survive to disk.
+    symbol_lines: RwLock<HashMap<String, usize>>,
+    /// Every name each file mentions, with the line it was mentioned on.
+    ///
+    /// Collected while parsing and resolved once the whole tree has been read,
+    /// because a file that references a symbol defined in a file scanned later
+    /// cannot be resolved when it is read.
+    pending_refs: RwLock<HashMap<String, Vec<(usize, String)>>>,
 }
 
 impl Default for AstIndex {
@@ -283,10 +296,12 @@ impl AstIndex {
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             parsing_file: RwLock::new(None),
+            symbol_lines: RwLock::new(HashMap::new()),
+            pending_refs: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Insert or update an AST Node into the Merkle index
+    /// Insert or update an AST Node into the Merkle index.
     pub fn index_node(
         &self,
         symbol: &str,
@@ -294,6 +309,29 @@ impl AstIndex {
         content: &str,
         deps: Vec<String>,
     ) -> AstNode {
+        self.index_node_at(symbol, kind, content, deps, None)
+    }
+
+    /// Insert a node, recording which line it was declared on.
+    ///
+    /// The line is what lets a reference found later be charged to the function
+    /// it sits in. Without it the only available owner is the file, and in a
+    /// language where one file holds forty unrelated tests, charging all of
+    /// them for one reference is the same as charging none of them.
+    pub fn index_node_at(
+        &self,
+        symbol: &str,
+        kind: &str,
+        content: &str,
+        deps: Vec<String>,
+        declared_on: Option<usize>,
+    ) -> AstNode {
+        if let Some(line) = declared_on {
+            self.symbol_lines
+                .write()
+                .unwrap()
+                .insert(symbol.to_string(), line);
+        }
         let normalized = content.trim();
         let mut hasher = blake3::Hasher::new();
         hasher.update(normalized.as_bytes());
@@ -629,13 +667,7 @@ impl AstIndex {
     ) -> Option<BlastRadiusResult> {
         let symbol_node = self.get_symbol(symbol_path)?;
         let canonical_symbol = symbol_node.symbol_path;
-        let simple_name = canonical_symbol
-            .split('.')
-            .next_back()
-            .unwrap_or(&canonical_symbol)
-            .split("::")
-            .next()
-            .unwrap_or(&canonical_symbol);
+        let simple_name = Self::simple_name_of(&canonical_symbol);
 
         let rev = self.reverse_deps.read().unwrap();
         let nodes = self.nodes.read().unwrap();
@@ -693,10 +725,22 @@ impl AstIndex {
             }
 
             if depth < survey_depth {
-                if let Some(callers) = rev.get(&curr) {
-                    for caller in callers {
-                        if visited.insert(caller.clone()) {
-                            queue.push_back((caller.clone(), depth + 1));
+                // The graph is keyed by the name a caller writes, and its
+                // values are full symbol paths, so the next hop has to be
+                // looked up under both. Looking up only the path found nothing
+                // after the first step: `reverse_deps` has an entry for
+                // `write_atomically`, never for
+                // `crates/axiom-ast/src/lib.rs::write_atomically`. Every
+                // transitive layer was silently empty for any language whose
+                // symbols are keyed by file.
+                let simple = Self::simple_name_of(&curr);
+                let keys: [&str; 2] = [curr.as_str(), simple];
+                for key in keys.iter().take(if simple == curr { 1 } else { 2 }) {
+                    if let Some(callers) = rev.get(*key) {
+                        for caller in callers {
+                            if visited.insert(caller.clone()) {
+                                queue.push_back((caller.clone(), depth + 1));
+                            }
                         }
                     }
                 }
@@ -844,6 +888,11 @@ impl AstIndex {
         self.forget_missing_files(&root_key, &visited);
         self.rebuild_reverse_deps();
 
+        // Only now, with every file read, can a reference be matched against
+        // the symbol it names. Doing it per file resolved nothing that was
+        // defined further down the walk.
+        self.resolve_reference_edges();
+
         Ok(ScanSummary {
             files_scanned,
             nodes_indexed: nodes_extracted,
@@ -887,6 +936,7 @@ impl AstIndex {
     fn forget_file(&self, file_path: &str) {
         let previous = self.file_to_symbols.write().unwrap().remove(file_path);
         self.file_call_names.write().unwrap().remove(file_path);
+        self.pending_refs.write().unwrap().remove(file_path);
         self.forgotten_files
             .write()
             .unwrap()
@@ -895,8 +945,10 @@ impl AstIndex {
         if let Some(symbols) = previous {
             let mut nodes = self.nodes.write().unwrap();
             let mut forgotten = self.forgotten_symbols.write().unwrap();
+            let mut lines = self.symbol_lines.write().unwrap();
             for symbol in symbols {
                 nodes.remove(&symbol);
+                lines.remove(&symbol);
                 forgotten.insert(symbol);
             }
         }
@@ -935,6 +987,133 @@ impl AstIndex {
     /// Rebuild the reverse graph from the nodes that remain. Purging by file
     /// leaves dangling entries otherwise, and a stale caller list is how a
     /// deleted test keeps showing up in a blast radius.
+    /// The last identifier in a symbol key: the name a caller writes.
+    ///
+    /// Two shapes reach here. A package-keyed symbol, `pkg.Class::method`,
+    /// reduces to `Class`, because in Java the type is what a caller names and
+    /// what a return type mentions. A file-keyed symbol,
+    /// `crates/axiom-ast/src/lib.rs::write_atomically`, reduces to
+    /// `write_atomically`.
+    ///
+    /// Telling them apart matters more than it looks. Splitting on the last dot
+    /// unconditionally, which is what this used to do, took the file extension
+    /// for a package separator: every Rust symbol reduced to `rs`, every Python
+    /// one to `py`, and the fallback search then matched `rs::` against every
+    /// symbol indexed from a `.rs` file. The blast radius for any symbol in
+    /// this repository was all 49 tests, whatever was asked.
+    fn simple_name_of(symbol: &str) -> &str {
+        let owner = symbol.split("::").next().unwrap_or(symbol);
+        // Keys always use forward slashes: `key_under_root` and `canonical_key`
+        // both normalise, so a backslash never reaches here whatever host wrote
+        // the index.
+        let file_keyed = owner.contains('/')
+            || matches!(
+                owner.rsplit('.').next(),
+                Some("rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "go" | "c" | "cpp" | "h")
+            );
+
+        if file_keyed {
+            return symbol.rsplit("::").next().unwrap_or(symbol);
+        }
+
+        symbol
+            .split('.')
+            .next_back()
+            .unwrap_or(symbol)
+            .split("::")
+            .next()
+            .unwrap_or(symbol)
+    }
+
+    /// Turn the names each file mentioned into dependencies of the symbol that
+    /// mentioned them.
+    ///
+    /// Runs once the whole tree has been read, because a file that references a
+    /// symbol defined in a file scanned later cannot be resolved when it is
+    /// read. A reference is kept only when some indexed symbol answers to that
+    /// name: the point is a graph between things this index knows about, not a
+    /// record of every word in the source.
+    ///
+    /// Attribution is by line. Every reference belongs to the last symbol
+    /// declared above it, which is wrong for a nested function and right for
+    /// everything else, and the error it makes is charging a sibling rather
+    /// than charging all forty tests in the file.
+    fn resolve_reference_edges(&self) {
+        let pending: HashMap<String, Vec<(usize, String)>> =
+            std::mem::take(&mut *self.pending_refs.write().unwrap());
+        if pending.is_empty() {
+            return;
+        }
+
+        let known: HashSet<String> = {
+            let nodes = self.nodes.read().unwrap();
+            nodes
+                .keys()
+                .map(|k| Self::simple_name_of(k).to_string())
+                .collect()
+        };
+
+        let file_syms = self.file_to_symbols.read().unwrap().clone();
+        let lines = self.symbol_lines.read().unwrap().clone();
+        let mut added: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for (file, refs) in pending {
+            // Symbols of this file, ordered by where they start, so the owner
+            // of a line is a binary search rather than a scan.
+            let mut declared: Vec<(usize, &String)> = file_syms
+                .get(&file)
+                .into_iter()
+                .flatten()
+                .filter_map(|s| lines.get(s).map(|l| (*l, s)))
+                .collect();
+            if declared.is_empty() {
+                continue;
+            }
+            declared.sort();
+
+            for (line_no, name) in refs {
+                if !known.contains(&name) {
+                    continue;
+                }
+                let owner = match declared.partition_point(|(l, _)| *l <= line_no) {
+                    0 => continue, // above the first declaration: file preamble
+                    i => declared[i - 1].1,
+                };
+                if Self::simple_name_of(owner) == name {
+                    continue; // a symbol does not depend on itself
+                }
+                added.entry(owner.clone()).or_default().insert(name);
+            }
+        }
+
+        if added.is_empty() {
+            return;
+        }
+
+        let mut nodes = self.nodes.write().unwrap();
+        for (symbol, names) in added {
+            if let Some(node) = nodes.get_mut(&symbol) {
+                let mut fresh: Vec<String> = names
+                    .into_iter()
+                    .filter(|n| !node.dependencies.contains(n))
+                    .collect();
+                if fresh.is_empty() {
+                    continue;
+                }
+                fresh.sort();
+                // The node's hash is left as parsed. It covers the declaration
+                // and the imports the parser saw; a resolved edge is derived
+                // from that same text, so a caller that adds a call changes the
+                // caller's own hash already.
+                node.dependencies.extend(fresh);
+            }
+        }
+        drop(nodes);
+
+        self.rebuild_reverse_deps();
+        self.symbol_lines.write().unwrap().clear();
+    }
+
     fn rebuild_reverse_deps(&self) {
         let nodes = self.nodes.read().unwrap();
         let mut rebuilt: HashMap<String, Vec<String>> = HashMap::new();
@@ -1018,6 +1197,52 @@ impl AstIndex {
         *self.parsing_file.write().unwrap() = Some(file_path.to_string());
         self.parse_by_language(file_path, ext, content, nodes_count);
         *self.parsing_file.write().unwrap() = None;
+        self.record_references(file_path, ext, content);
+    }
+
+    /// Record every name a file mentions, with the line it was mentioned on.
+    ///
+    /// Java is excluded: `parse_java_content` already collects referenced type
+    /// names and attaches them to its nodes, and doing it twice would double
+    /// the edges the Java tests pin.
+    ///
+    /// Comments and string literals are stripped first. Matching raw text made
+    /// every doc comment that named a function into a call of it.
+    fn record_references(&self, file_path: &str, ext: &str, content: &str) {
+        if matches!(ext, "java" | "kt" | "scala") {
+            return;
+        }
+
+        let clean = Self::strip_comments_and_strings(content);
+        let mut refs: Vec<(usize, String)> = Vec::new();
+
+        for (line_no, line) in clean.lines().enumerate() {
+            // A call site, `name(`, is the strongest evidence that one symbol
+            // uses another. Bare identifiers would also catch a type used as a
+            // parameter, and would catch every local variable with them.
+            for name in Self::extract_call_names(line) {
+                refs.push((line_no, name));
+            }
+
+            // Types are not called, so they need the qualified forms too:
+            // `Type::assoc`, `Type {`, and `Type::` all name a type that a
+            // call-site scan alone would miss.
+            for word in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                if word.len() > 1
+                    && word.chars().next().is_some_and(|c| c.is_uppercase())
+                    && Self::is_valid_identifier(word)
+                {
+                    refs.push((line_no, word.to_string()));
+                }
+            }
+        }
+
+        refs.sort();
+        refs.dedup();
+        self.pending_refs
+            .write()
+            .unwrap()
+            .insert(file_path.to_string(), refs);
     }
 
     fn parse_by_language(
@@ -1479,7 +1704,7 @@ impl AstIndex {
     fn parse_rust_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let mut uses = Vec::new();
 
-        for line in content.lines() {
+        for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty()
                 || trimmed.starts_with("//")
@@ -1520,7 +1745,7 @@ impl AstIndex {
                     let is_test = name.starts_with("test_") || trimmed.contains("#[test]");
                     let kind = if is_test { "test" } else { "function" };
 
-                    self.index_node(&symbol, kind, trimmed, uses.clone());
+                    self.index_node_at(&symbol, kind, trimmed, uses.clone(), Some(line_no));
                     *nodes_count += 1;
                 }
             } else if trimmed.starts_with("struct ")
@@ -1539,7 +1764,7 @@ impl AstIndex {
 
                 if Self::is_valid_identifier(&name) {
                     let symbol = format!("{}::{}", file_path, name);
-                    self.index_node(&symbol, "struct", trimmed, uses.clone());
+                    self.index_node_at(&symbol, "struct", trimmed, uses.clone(), Some(line_no));
                     *nodes_count += 1;
                 }
             }
@@ -1550,7 +1775,7 @@ impl AstIndex {
         let mut imports = Vec::new();
         let mut current_class = String::new();
 
-        for line in content.lines() {
+        for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty()
                 || trimmed.starts_with('#')
@@ -1579,7 +1804,7 @@ impl AstIndex {
                     } else {
                         "class"
                     };
-                    self.index_node(&symbol, kind, trimmed, imports.clone());
+                    self.index_node_at(&symbol, kind, trimmed, imports.clone(), Some(line_no));
                     *nodes_count += 1;
                 }
             } else if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
@@ -1601,7 +1826,7 @@ impl AstIndex {
                     let is_test = name.starts_with("test_");
                     let kind = if is_test { "test" } else { "function" };
 
-                    self.index_node(&symbol, kind, trimmed, imports.clone());
+                    self.index_node_at(&symbol, kind, trimmed, imports.clone(), Some(line_no));
                     *nodes_count += 1;
                 }
             }
@@ -1611,7 +1836,7 @@ impl AstIndex {
     fn parse_ts_js_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let mut imports = Vec::new();
 
-        for line in content.lines() {
+        for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("import ") {
                 imports.push(trimmed.to_string());
@@ -1636,7 +1861,7 @@ impl AstIndex {
                         || file_path.contains("spec");
                     let kind = if is_test { "test" } else { "function" };
 
-                    self.index_node(&symbol, kind, trimmed, imports.clone());
+                    self.index_node_at(&symbol, kind, trimmed, imports.clone(), Some(line_no));
                     *nodes_count += 1;
                 }
             } else if trimmed.starts_with("class ")
@@ -1656,7 +1881,7 @@ impl AstIndex {
 
                 if !name.is_empty() {
                     let symbol = format!("{}::{}", file_path, name);
-                    self.index_node(&symbol, "class", trimmed, imports.clone());
+                    self.index_node_at(&symbol, "class", trimmed, imports.clone(), Some(line_no));
                     *nodes_count += 1;
                 }
             }
@@ -1664,7 +1889,7 @@ impl AstIndex {
     }
 
     fn parse_go_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
-        for line in content.lines() {
+        for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("func ") {
                 let sig = trimmed.replace("func ", "");
@@ -1674,7 +1899,7 @@ impl AstIndex {
                     let is_test = name.starts_with("Test");
                     let kind = if is_test { "test" } else { "function" };
 
-                    self.index_node(&symbol, kind, trimmed, vec![]);
+                    self.index_node_at(&symbol, kind, trimmed, vec![], Some(line_no));
                     *nodes_count += 1;
                 }
             }
@@ -1899,6 +2124,10 @@ impl AstIndex {
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             parsing_file: RwLock::new(None),
+            // Both are scan-scoped. A loaded index already carries the edges
+            // they were used to produce, in the nodes' own dependencies.
+            symbol_lines: RwLock::new(HashMap::new()),
+            pending_refs: RwLock::new(HashMap::new()),
         })
     }
 }
