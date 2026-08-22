@@ -182,6 +182,17 @@ flag that does nothing; one copied the other way would lose a flag that decides 
 a false assertion reports `PASSED`. Ask the question per language and answer it by
 running it.
 
+**A cold JVM toolchain can outlast the evaluation deadline, and CI is where that shows.**
+`scala` and `kotlinc` fetch their compiler on first use. Locally, warm, a Scala snippet
+evaluates in about a second; on a fresh CI runner the first one spent 187s downloading
+and was killed at the 30s deadline and reported as `TIMEOUT`. That verdict is correct,
+it says nothing is known about the snippet, and it is useless to a caller who thinks
+their code hung. CI warms both toolchains before the tests so they measure the recipe
+rather than the download. A user's first Scala evaluation on a cold machine will hit the
+same wall; the hint already names `AXIOM_EVAL_TIMEOUT_SECS`. This is also the general
+shape to expect from this suite: a local green says nothing about a machine with cold
+caches, which is why CI runs on two.
+
 **The Java parser reads Kotlin and Scala at class granularity only, and `object` had to
 be taught.** `parse_java_content` matched `class`, `interface`, `enum` and `record`, so
 a Scala file declaring `object ScalaGate` indexed *nothing at all* and its evaluator
