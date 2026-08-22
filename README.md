@@ -206,6 +206,7 @@ Copy the generated configuration into your AI client's settings:
 | `axiom eval --symbol <SYM> -c <CODE>` | Runs an isolated sandbox evaluation with compiler verification |
 | `axiom blast-radius --symbol <SYM>` | Computes impacted tests and pruned percentage |
 | `axiom symbol --path <SYM>` | Queries AST node metadata, signatures, and imports |
+| `axiom cache-audit --path <DIR>` | Measures what a verdict cache would decide against what the blast radius selects, without caching anything or skipping any test. See [docs/verdict_cache_audit.md](docs/verdict_cache_audit.md); on this repository it currently says do not build it |
 | `axiom bench --iterations <N>` | Measures how long a sandbox evaluation takes on this machine, reporting min, median, max and mean |
 | `axiom demo` | Runs live end-to-end self-healing agent demonstration |
 | `axiom swarm --agents <N> --ops <M>` | Runs multi-agent Tree-CRDT swarm concurrency simulation |
