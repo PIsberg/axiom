@@ -45,8 +45,8 @@ sequenceDiagram
     AST-->>AI: Impacted tests, with the pruned percentage
 
     loop Test-Driven Hypothesis Validation
-        AI->>MCP: axiom_eval_patch(snippet) for Rust, else axiom_record_verification
-        MCP->>VMM: Compile and run the snippet (rustc, ~175ms)
+        AI->>MCP: axiom_eval_patch(snippet), else axiom_record_verification
+        MCP->>VMM: Run the snippet in its own toolchain (rustc ~175ms, javac slower)
         VMM-->>AI: CTOP JSON Report (Status: PASSED / FAILED + Hints)
     end
 
@@ -184,18 +184,48 @@ Compile and run a snippet.
   }
   ```
 
-The snippet is written out and compiled with `rustc`, so expect a few hundred
-milliseconds rather than microseconds, and real compiler errors for code that
-does not compile.
+The snippet is written out and run by the toolchain of the language the symbol
+was indexed from, so expect a few hundred milliseconds rather than microseconds,
+and real compiler errors for code that does not compile. Which toolchain ran it
+is in `engine`.
 
-**This is a Rust sandbox.** A symbol from a Java, Kotlin, Python, TypeScript or
-Go file returns `EVALUATOR_UNAVAILABLE` with `UnsupportedLanguage` rather than
-being handed to `rustc`. For those, run the project's own tests and report the
-outcome with `axiom_record_verification`.
+| Language of the symbol | Toolchain | `engine` |
+| --- | --- | --- |
+| Rust | `rustc`, then the compiled binary | `tier1_wasi_cranelift` |
+| WAT or wasm snippet | wasmtime Cranelift | `tier1_wasi_cranelift` |
+| Python | `python3`, else `python` | `tier2_native_python` |
+| JavaScript | `node` | `tier2_native_node` |
+| TypeScript | `deno`, else `tsc` then `node` | `tier2_native_typescript` |
+| Go | `go run` | `tier2_native_go` |
+| Java | `javac`, then `java -ea` | `tier2_native_java` |
+| Kotlin, Scala | none | refused |
 
-If `rustc` is missing or the temp directory is not writable, the result is
-`EVALUATOR_UNAVAILABLE` with `passed_checks_count` of 0. It is never `PASSED`:
-nothing ran, so nothing passed.
+Assertions are supplied where the language does not have them built in. A
+JavaScript snippet gets `const assert = require('node:assert')` unless it
+already asked for it; Java runs with `-ea`, without which every `assert` is a
+no-op and a false one would look like a pass. A TypeScript snippet gets nothing,
+because deno and tsc-then-node disagree about how a module is reached, so bring
+your own check.
+
+**This is not a sandbox for anything but WebAssembly.** Tier 2 invokes the real
+compiler or interpreter with the privileges the axiom process holds, exactly as
+the `rustc` tier always has. Set `AXIOM_EVAL_NATIVE=off` to refuse tier 2
+outright. A command that has not finished after `AXIOM_EVAL_TIMEOUT_SECS`
+(default 30) is killed and reported as `TIMEOUT`, so a snippet that never
+terminates cannot hold the session open.
+
+Three answers mean nothing ran, and none of them is ever `PASSED`:
+
+* `EVALUATOR_UNAVAILABLE` with `UnsupportedLanguage`: the language has no
+  evaluator. Kotlin and Scala are read by the Java parser, which does not make
+  `javac` able to run them.
+* `EVALUATOR_UNAVAILABLE` naming the programs it looked for: the toolchain is
+  not on `PATH`, or `AXIOM_EVAL_NATIVE=off`.
+* `EVALUATOR_UNAVAILABLE` with `AmbiguousSymbol` and a `candidates` list: the
+  name matches several symbols, so which language to use is unknown. Name one.
+
+In all three, run the project's own tests and report the outcome with
+`axiom_record_verification`; `axiom_get_blast_radius` will name the tests.
 
 **Agent directive**: on `FAILED`, read the hint and actual output before changing
 the code. Keep the `task_id`, because a provenance record must name it.

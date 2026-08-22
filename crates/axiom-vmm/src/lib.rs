@@ -7,11 +7,30 @@ use wasmtime::*;
 use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 use wasmtime_wasi::WasiCtxBuilder;
 
+pub mod native;
+
 /// Sandboxed execution backend trait
 #[async_trait]
 pub trait SandboxEngine: Send + Sync {
     async fn execute_wasi(&self, wasm_binary: &[u8], entrypoint: &str) -> Result<CtopReport>;
-    async fn execute_eval(&self, symbol_path: &str, code_snippet: &str) -> Result<CtopReport>;
+
+    /// Evaluate a snippet written in the language of the file `symbol_path`
+    /// lives in, named by its extension.
+    ///
+    /// The extension is not a hint the engine may ignore. Handing a Java symbol
+    /// to `rustc` produces a syntax error that reads as though the caller wrote
+    /// bad code, when the real answer is that a different toolchain was needed.
+    async fn execute_eval_in(
+        &self,
+        symbol_path: &str,
+        code_snippet: &str,
+        language: Option<&str>,
+    ) -> Result<CtopReport>;
+
+    /// Evaluate a snippet as Rust, for callers that already know it is Rust.
+    async fn execute_eval(&self, symbol_path: &str, code_snippet: &str) -> Result<CtopReport> {
+        self.execute_eval_in(symbol_path, code_snippet, None).await
+    }
 }
 
 /// Tier 1: In-Process WASI Engine with real Cranelift JIT compiler & native sandbox executor
@@ -159,7 +178,12 @@ impl SandboxEngine for WasiEngine {
         }
     }
 
-    async fn execute_eval(&self, symbol_path: &str, code_snippet: &str) -> Result<CtopReport> {
+    async fn execute_eval_in(
+        &self,
+        symbol_path: &str,
+        code_snippet: &str,
+        language: Option<&str>,
+    ) -> Result<CtopReport> {
         let start = Instant::now();
         let task_id = format!("eval_{:x}", start.elapsed().as_nanos());
 
@@ -237,6 +261,52 @@ impl SandboxEngine for WasiEngine {
             }
         }
 
+        // 2. Anything that is not Rust goes to its own toolchain.
+        //
+        // WAT is checked first above, because a WebAssembly module is
+        // recognisable from its own text and does not belong to the file the
+        // symbol was indexed from.
+        if let Some(ext) = language {
+            let ext = ext.to_ascii_lowercase();
+            if ext != "rs" {
+                return Ok(match native::language_for(&ext) {
+                    Some(lang) => native::evaluate(
+                        lang,
+                        symbol_path,
+                        code_snippet,
+                        native::configured_timeout(),
+                    ),
+                    // Kotlin and Scala reach here: the indexer reads them with
+                    // the Java parser, which does not make javac able to run
+                    // them.
+                    None => CtopReport {
+                        task_id,
+                        engine: "tier2_native".to_string(),
+                        status: CtopStatus::EvaluatorUnavailable,
+                        execution_duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                        blast_radius_nodes: 1,
+                        failed_checks: vec![FailedCheck {
+                            symbol: symbol_path.to_string(),
+                            error_type: "UnsupportedLanguage".to_string(),
+                            expected: Some("a language axiom can evaluate".to_string()),
+                            actual: Some(format!(
+                                "{symbol_path:?} is defined in a .{ext} file, and axiom has no evaluator for it"
+                            )),
+                            stack_trace_ast_nodes: vec![symbol_path.to_string()],
+                            hint: Some(
+                                "Run this symbol's own test suite instead and report the outcome                                  with axiom_record_verification; axiom_get_blast_radius will name                                  the tests to run."
+                                    .to_string(),
+                            ),
+                        }],
+                        passed_checks_count: 0,
+                        stdout: String::new(),
+                        stderr: format!("no evaluator for .{ext}"),
+                        memory_allocated_bytes: None,
+                    },
+                });
+            }
+        }
+
         // 2. Real Syntax & Token Validation
         if code_snippet.contains("@@@")
             || code_snippet.contains("???")
@@ -305,17 +375,19 @@ fn main() {{
 
         if write_ok.is_ok() {
             // Attempt compile with rustc
-            let compile_output = Command::new("rustc")
+            let timeout = native::configured_timeout();
+            let mut rustc = Command::new("rustc");
+            rustc
                 .arg(&src_file)
                 .arg("-o")
                 .arg(&bin_file)
                 .arg("--crate-type")
-                .arg("bin")
-                .output();
+                .arg("bin");
+            let compile_output = native::run_with_timeout(rustc, timeout);
 
             if let Ok(c_out) = compile_output {
-                if !c_out.status.success() {
-                    let stderr = String::from_utf8_lossy(&c_out.stderr).to_string();
+                if !c_out.succeeded() {
+                    let stderr = c_out.stderr.clone();
                     let dur = start.elapsed().as_secs_f64() * 1000.0;
                     let _ = std::fs::remove_dir_all(&temp_dir);
                     return Ok(CtopReport {
@@ -340,12 +412,39 @@ fn main() {{
                 }
 
                 // Run compiled binary in isolated process
-                let run_output = Command::new(&bin_file).output();
+                let run_output = native::run_with_timeout(Command::new(&bin_file), timeout);
                 let dur = start.elapsed().as_secs_f64() * 1000.0;
                 let _ = std::fs::remove_dir_all(&temp_dir);
 
                 if let Ok(r_out) = run_output {
-                    if r_out.status.success() {
+                    if r_out.timed_out {
+                        return Ok(CtopReport {
+                            task_id,
+                            engine: "tier1_wasi_cranelift".to_string(),
+                            status: CtopStatus::Timeout,
+                            execution_duration_ms: dur,
+                            blast_radius_nodes: 1,
+                            failed_checks: vec![FailedCheck {
+                                symbol: symbol_path.to_string(),
+                                error_type: "EvaluationTimeout".to_string(),
+                                expected: Some(format!(
+                                    "the snippet to finish within {}s",
+                                    timeout.as_secs()
+                                )),
+                                actual: Some("still running when the deadline passed".to_string()),
+                                stack_trace_ast_nodes: vec![symbol_path.to_string()],
+                                hint: Some(
+                                    "The snippet did not terminate, so nothing is known about whether it would have passed. Raise AXIOM_EVAL_TIMEOUT_SECS if the work is genuinely slow."
+                                        .to_string(),
+                                ),
+                            }],
+                            passed_checks_count: 0,
+                            stdout: r_out.stdout,
+                            stderr: r_out.stderr,
+                            memory_allocated_bytes: None,
+                        });
+                    }
+                    if r_out.succeeded() {
                         let assert_count = code_snippet.matches("assert").count();
                         return Ok(CtopReport::pass(
                             task_id,
@@ -358,7 +457,7 @@ fn main() {{
                             ),
                         ));
                     } else {
-                        let stderr = String::from_utf8_lossy(&r_out.stderr).to_string();
+                        let stderr = r_out.stderr.clone();
                         return Ok(CtopReport::fail(
                             task_id,
                             "tier1_wasi_cranelift".to_string(),
@@ -371,7 +470,7 @@ fn main() {{
                                 stack_trace_ast_nodes: vec![symbol_path.to_string()],
                                 hint: Some("Assertion expression evaluated to false during sandbox execution".to_string()),
                             }],
-                            String::from_utf8_lossy(&r_out.stdout).to_string(),
+                            r_out.stdout.clone(),
                             stderr,
                         ));
                     }
@@ -386,7 +485,7 @@ fn main() {{
         Ok(CtopReport {
             task_id,
             engine: "tier1_wasi_cranelift".to_string(),
-            status: CtopStatus::CompilationError,
+            status: CtopStatus::EvaluatorUnavailable,
             execution_duration_ms: dur,
             blast_radius_nodes: 1,
             failed_checks: vec![FailedCheck {

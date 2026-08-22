@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 61 tests across e2e, mcp, crdt, persistence, blast radius
+cargo test                            # 69 tests across e2e, mcp, crdt, persistence, blast radius, eval
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -129,14 +129,31 @@ side.
 traversal therefore has to look up both on each hop. Looking up only the path found nothing after
 the first step, so every transitive layer was silently empty for the file-keyed languages.
 
-**`axiom_eval_patch` must never return a verdict it did not earn.** Three tiers in `execute_eval`: a
-WAT or wasm snippet compiles and runs through wasmtime Cranelift; anything else is written to a temp
-`.rs` and compiled with `rustc`; and if the temp write or `rustc` fails, the answer is
-`EvaluatorUnavailable` with `passed_checks_count: 0`, never `PASSED`. An earlier version fell back
-to matching assertion substrings and reported success for code that never executed, which is the
-worst available failure for a tool an agent trusts. `test_e2e_truth_preserving_assertions` guards
-it. Note the harness: a snippet without `fn main` is wrapped in one, with a `validate_token` helper
-injected so snippets can call it.
+**`axiom_eval_patch` must never return a verdict it did not earn.** `execute_eval_in` in
+`axiom-vmm` picks a tier from the extension of the file the symbol was indexed from: a WAT or wasm
+snippet goes to wasmtime Cranelift; Rust is written to a temp `.rs` and compiled with `rustc`; and
+everything the table in `axiom-vmm/src/native.rs` knows about goes to that language's own toolchain.
+Anything else, a toolchain that is not on `PATH`, a name matching several symbols, or a temp
+directory that cannot be written, is `EvaluatorUnavailable` with `passed_checks_count: 0`, never
+`PASSED`. An earlier version fell back to matching assertion substrings and reported success for
+code that never executed, which is the worst available failure for a tool an agent trusts.
+`test_e2e_truth_preserving_assertions` and `crates/axiom-cli/tests/multi_language_eval.rs` guard it.
+
+Two harness details that have already produced wrong answers. A Rust snippet without `fn main` is
+wrapped in one, with a `validate_token` helper injected. And Java runs under `java -ea`: without it
+every `assert` is a no-op, so a false assertion exits zero and reports `PASSED`, which is why
+`a_java_assertion_is_checked_with_assertions_enabled` asserts on the failing case rather than the
+passing one.
+
+**Tier 2 is not a sandbox, and the docs must not say it is.** It runs the real compiler or
+interpreter with the process's own privileges, as the `rustc` tier always did. `AXIOM_EVAL_NATIVE=off`
+refuses it, and `AXIOM_EVAL_TIMEOUT_SECS` (default 30) bounds every command, because before that a
+snippet that did not terminate held the stdio pipe an agent was blocked on.
+
+**Language is resolved through the symbol, not the caller's spelling.** `language_of_symbol`
+resolves the name first, because comparing the caller's spelling against the stored keys returned
+`None` for every short name, and `None` meant Rust. An ambiguous name is refused with
+`AmbiguousSymbol` and its candidates rather than compiled as whichever language won.
 
 **Persistence failures must stay loud.** `save_to_disk` returns the path it wrote and verifies the
 file exists, and callers propagate the error instead of discarding it. When these were `let _ = ...`
