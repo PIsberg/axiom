@@ -155,6 +155,16 @@ resolves the name first, because comparing the caller's spelling against the sto
 `None` for every short name, and `None` meant Rust. An ambiguous name is refused with
 `AmbiguousSymbol` and its candidates rather than compiled as whichever language won.
 
+**A caller-supplied field that is printed is an injection surface.**
+`agent_identity` reaches `axiom_attest_commit` from the caller and is rendered by
+`axiom verify` as one of a column of labelled lines. A value carrying a newline could
+add lines of its own, showing `Checked by: sandbox` above a record whose `verified_by`
+says `reported`. `agent_identity_of` in `mcp.rs` refuses control characters and bounds
+the length where the value enters, rather than escaping it at each place it is shown.
+The same reasoning applies to any future field that is both caller-set and displayed.
+Note also what makes storing an unverified name acceptable at all: it is hashed into
+the seal and covered by the signature, so it cannot be edited afterwards.
+
 **Persistence failures must stay loud.** `save_to_disk` returns the path it wrote and verifies the
 file exists, and callers propagate the error instead of discarding it. When these were `let _ = ...`
 under an unconditional success banner, `scan` printed "Saved to .axiom/index.json" while writing

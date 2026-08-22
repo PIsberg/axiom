@@ -277,7 +277,7 @@ workspace does not lose its work to this one.
 
 Record the provenance of a change.
 
-* **Request**: `{"prompt": "Fix the token length invariant", "symbol_path": "auth::service::validate_token", "ctop_task_id": "eval_1f4"}`
+* **Request**: `{"prompt": "Fix the token length invariant", "symbol_path": "auth::service::validate_token", "ctop_task_id": "eval_1f4", "agent_identity": "claude-code"}`
 * **Response**:
   ```json
   {
@@ -291,7 +291,7 @@ Record the provenance of a change.
     "seal": "blake3_seal_26ba03bb89e57ade9e0ca6214daeb22f",
     "signature": "ddcc139ce344",
     "public_key": "2c37bfc05ad1",
-    "agent_identity": "agent_axiom_v1",
+    "agent_identity": "claude-code",
     "timestamp": "2026-08-21T01:24:03Z"
   }
   ```
@@ -305,6 +305,16 @@ and nothing about who wrote it. `signature` and `public_key` are present when a
 signing key was configured through `AXIOM_SIGNING_KEY_FILE`. `previous_seal`
 chains the record to the one before it, so removing a record from the ledger is
 visible.
+
+`agent_identity` is what you ask to be recorded as. Axiom stores it and does not
+check it, so on its own it is a claim: any caller able to reach the server can
+send any name. What makes it worth recording is that it is hashed into `seal`
+and covered by `signature`, so it cannot be edited after the fact, and on a
+signed record it is bound to the key that issued it. Omit the field and the
+record reads `unattributed`, which is the honest answer when nobody named
+themselves. It must be printable single-line text of at most 128 characters;
+`axiom verify` prints it as one line, and a value carrying a newline could add
+lines of its own to that output. Anything else is refused rather than trimmed.
 
 `verified_by` is `sandbox` when axiom compiled and ran the code, and `reported`
 when an agent ran something else and said so. Do not present the second as the
