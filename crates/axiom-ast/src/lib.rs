@@ -2318,22 +2318,51 @@ pub struct ForwardClosure {
     /// Indexed symbols reachable from `symbol`, including itself. Sorted, so the
     /// hash over them does not depend on traversal order.
     pub reachable: Vec<String>,
-    /// Dependency names that matched no indexed symbol, or matched several.
+    /// Names that several indexed symbols answer to, so none was chosen.
     ///
-    /// These are why a closure hash cannot be trusted on its own. An unresolved
-    /// name is a dependency whose content the hash does not cover, so a change
-    /// behind it would not disturb the hash, and a cache keyed on that hash
-    /// would skip a test that should have run.
-    pub unresolved: Vec<String>,
+    /// This is the kind of unresolved name that blocks a key. Something in this
+    /// tree satisfies the dependency and the graph cannot say which, so a change
+    /// to it would not disturb the hash, and a cache keyed on that hash would
+    /// skip a test that should have run. Guessing an edge here is worse than
+    /// refusing: the wrong guess produces a key that looks complete.
+    pub ambiguous: Vec<String>,
+    /// Names no indexed symbol answers to, which on a real tree means a crate
+    /// outside it: `anyhow::Result`, `std::path::{Path, PathBuf}`.
+    ///
+    /// These do not block a key. The index was never going to hold them, and
+    /// their contents cannot change between two runs on one machine unless the
+    /// toolchain or a lock file changes, which [`EnvironmentKey`] covers. Before
+    /// they were separated out, every test importing anything was unkeyable,
+    /// which was every test.
+    ///
+    /// They are still recorded, and still hashed, because *which* outside names
+    /// a test reaches is itself an input: adding an import changes what the test
+    /// does even when nothing inside the tree moved.
+    pub outside: Vec<String>,
+}
+
+/// What an indexed lookup of a dependency name found.
+///
+/// Three answers rather than two. Collapsing the last two into `None` is what
+/// made every closure incomplete: a crate outside the tree and a name this tree
+/// defines several times are both unresolved, and only one of them is a gap in
+/// the graph.
+enum Resolution {
+    One(String),
+    /// Several indexed symbols match. Blocks a key.
+    Ambiguous,
+    /// Nothing in the index matches. Folded into the environment key instead.
+    Outside,
 }
 
 impl ForwardClosure {
-    /// True when every dependency name resolved to an indexed symbol.
+    /// True when nothing inside this tree was left unidentified.
     ///
-    /// Only a complete closure may back a cached verdict. An incomplete one has
-    /// to miss, because what it does not cover can change without saying so.
+    /// Only a complete closure may back a cached verdict. Names from outside the
+    /// tree do not count against it, because [`EnvironmentKey`] covers them; an
+    /// ambiguous name does, because nothing covers it.
     pub fn is_complete(&self) -> bool {
-        self.unresolved.is_empty()
+        self.ambiguous.is_empty()
     }
 }
 
@@ -2363,15 +2392,14 @@ pub struct CacheAudit {
     pub would_run_unselected: usize,
     /// Up to this many examples of the dangerous case, for a report to name.
     pub wrongly_skipped_examples: Vec<(String, String)>,
-    /// The dependency names that most often failed to resolve, with counts.
-    ///
-    /// Without these, `tests_with_complete_closure: 0` is a number with no
-    /// diagnosis attached, and the obvious reading, that the graph is broken,
-    /// may not be the right one. Most of what fails to resolve here is a crate
-    /// outside the tree, `std::collections::HashMap` and the like, which is not
-    /// a missing edge so much as a dependency the index was never going to hold.
-    /// Those two want different fixes, and the counts are what tells them apart.
-    pub top_unresolved: Vec<(String, usize)>,
+    /// The names that most often blocked a key, with counts. These are the gaps
+    /// in the graph: something in this tree satisfies them and the graph cannot
+    /// say what.
+    pub top_ambiguous: Vec<(String, usize)>,
+    /// The out-of-tree names most often reached, with counts. Reported because
+    /// they are what [`EnvironmentKey`] has to cover, not because they are
+    /// defects.
+    pub top_outside: Vec<(String, usize)>,
 }
 
 impl CacheAudit {
@@ -2400,7 +2428,8 @@ impl AstIndex {
         let nodes = self.nodes.read().unwrap();
 
         let mut reachable: BTreeSet<String> = BTreeSet::new();
-        let mut unresolved: BTreeSet<String> = BTreeSet::new();
+        let mut ambiguous: BTreeSet<String> = BTreeSet::new();
+        let mut outside: BTreeSet<String> = BTreeSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
         reachable.insert(start.symbol_path.clone());
@@ -2423,13 +2452,16 @@ impl AstIndex {
                 // reach by that name. An ambiguous name resolves to nothing,
                 // which makes the closure incomplete rather than picking one.
                 match Self::resolve_within(&nodes, name) {
-                    Some(resolved) => {
+                    Resolution::One(resolved) => {
                         if reachable.insert(resolved.clone()) {
                             queue.push_back((resolved, depth + 1));
                         }
                     }
-                    None => {
-                        unresolved.insert(name.to_string());
+                    Resolution::Ambiguous => {
+                        ambiguous.insert(name.to_string());
+                    }
+                    Resolution::Outside => {
+                        outside.insert(name.to_string());
                     }
                 }
             }
@@ -2438,7 +2470,8 @@ impl AstIndex {
         Some(ForwardClosure {
             symbol: start.symbol_path,
             reachable: reachable.into_iter().collect(),
-            unresolved: unresolved.into_iter().collect(),
+            ambiguous: ambiguous.into_iter().collect(),
+            outside: outside.into_iter().collect(),
         })
     }
 
@@ -2447,16 +2480,20 @@ impl AstIndex {
     /// `get_symbol` takes the lock itself, and the closure walk holds it for the
     /// whole traversal, so the lookup is repeated here rather than dropping and
     /// retaking the guard once per edge.
-    fn resolve_within(nodes: &HashMap<String, AstNode>, name: &str) -> Option<String> {
+    fn resolve_within(nodes: &HashMap<String, AstNode>, name: &str) -> Resolution {
         if nodes.contains_key(name) {
-            return Some(name.to_string());
+            return Resolution::One(name.to_string());
         }
         let mut matches = nodes.keys().filter(|k| Self::is_suffix_match(k, name));
-        let first = matches.next()?;
+        let Some(first) = matches.next() else {
+            // Nothing in the index answers to this name at all, which on a real
+            // tree usually means a crate outside it.
+            return Resolution::Outside;
+        };
         if matches.next().is_some() {
-            return None;
+            return Resolution::Ambiguous;
         }
-        Some(first.clone())
+        Resolution::One(first.clone())
     }
 }
 
@@ -2468,7 +2505,7 @@ impl AstIndex {
     /// whatever it knows will key on a partial view and skip a test whose real
     /// dependency changed behind an unresolved name. Refusing to produce a key
     /// is what makes the miss happen.
-    pub fn closure_hash(&self, symbol_path: &str) -> Option<String> {
+    pub fn closure_hash(&self, symbol_path: &str, environment: &EnvironmentKey) -> Option<String> {
         let closure = self.forward_closure(symbol_path, Self::CLOSURE_DEPTH)?;
         if !closure.is_complete() {
             return None;
@@ -2476,6 +2513,27 @@ impl AstIndex {
 
         let nodes = self.nodes.read().unwrap();
         let mut hasher = blake3::Hasher::new();
+
+        // The environment first, so a lock file or compiler change moves every
+        // key at once rather than only the keys of tests that happen to import
+        // something.
+        hasher.update(environment.as_str().as_bytes());
+        hasher.update(
+            b"
+",
+        );
+
+        // Which out-of-tree names the test reaches is itself an input: adding an
+        // import changes what the test does even when nothing inside the tree
+        // moved. What is *behind* those names is the environment key's job.
+        for name in &closure.outside {
+            hasher.update(name.as_bytes());
+            hasher.update(
+                b"
+",
+            );
+        }
+
         for symbol in &closure.reachable {
             // Both the identity and the content: renaming a symbol changes what
             // a test calls, and editing its body changes what that call does.
@@ -2515,25 +2573,33 @@ impl AstIndex {
 
         // One closure per test, computed once and reused across every symbol.
         let mut closures: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut unresolved_counts: HashMap<String, usize> = HashMap::new();
+        let mut ambiguous_counts: HashMap<String, usize> = HashMap::new();
+        let mut outside_counts: HashMap<String, usize> = HashMap::new();
         for test in &test_symbols {
             if let Some(closure) = self.forward_closure(test, Self::CLOSURE_DEPTH) {
                 if closure.is_complete() {
                     audit.tests_with_complete_closure += 1;
                 }
-                for name in &closure.unresolved {
-                    *unresolved_counts.entry(name.clone()).or_insert(0) += 1;
+                for name in &closure.ambiguous {
+                    *ambiguous_counts.entry(name.clone()).or_insert(0) += 1;
+                }
+                for name in &closure.outside {
+                    *outside_counts.entry(name.clone()).or_insert(0) += 1;
                 }
                 closures.insert(test.clone(), closure.reachable.into_iter().collect());
             }
         }
 
-        let mut ranked: Vec<(String, usize)> = unresolved_counts.into_iter().collect();
         // By count, then by name, so two runs over the same tree report the same
         // list rather than whatever order the map happened to yield.
-        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        ranked.truncate(example_limit);
-        audit.top_unresolved = ranked;
+        let rank = |counts: HashMap<String, usize>| {
+            let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            ranked.truncate(example_limit);
+            ranked
+        };
+        audit.top_ambiguous = rank(ambiguous_counts);
+        audit.top_outside = rank(outside_counts);
 
         for symbol in &all_symbols {
             let Some(radius) = self.compute_blast_radius(symbol, max_depth) else {
@@ -2564,5 +2630,111 @@ impl AstIndex {
         }
 
         audit
+    }
+}
+
+/// Everything a verdict depends on that is not a symbol in this tree.
+///
+/// Separating out-of-tree names from ambiguous ones is only safe if something
+/// else covers them. This is that something else. A `cargo update` rewrites
+/// `Cargo.lock`, a compiler upgrade changes the version strings, and either one
+/// changes this digest, which changes every key derived from it and invalidates
+/// the whole cache at once. That is the correct blast radius for a change to the
+/// environment: nothing that was compiled against the old one is still known to
+/// hold.
+///
+/// It is deliberately coarse. A finer key would invalidate less, and getting it
+/// wrong would leave a verdict standing against a dependency that moved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentKey {
+    digest: String,
+    /// What went into it, so a report can say why a key changed rather than
+    /// only that it did.
+    pub inputs: Vec<String>,
+}
+
+impl EnvironmentKey {
+    /// Lock files and manifests that pin what an out-of-tree name resolves to.
+    ///
+    /// Manifests are included alongside lock files because a language without a
+    /// lock file still pins versions somewhere, and a key that covers neither is
+    /// worse than one that covers the looser of the two.
+    const MANIFESTS: &'static [&'static str] = &[
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "deno.lock",
+        "go.sum",
+        "poetry.lock",
+        "Pipfile.lock",
+        "requirements.txt",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "rust-toolchain.toml",
+        "rust-toolchain",
+        ".tool-versions",
+    ];
+
+    /// Digest the manifests under `root`, plus any toolchain fingerprints the
+    /// caller supplies.
+    ///
+    /// The fingerprints are passed in rather than probed here because this crate
+    /// indexes files and does not run compilers; the tier that already probes
+    /// them supplies the strings.
+    pub fn of(root: &Path, toolchains: &[String]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        let mut inputs: Vec<String> = Vec::new();
+
+        for name in Self::MANIFESTS {
+            let candidate = root.join(name);
+            let Ok(bytes) = std::fs::read(&candidate) else {
+                continue;
+            };
+            hasher.update(name.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(&bytes);
+            hasher.update(b"\n");
+            inputs.push((*name).to_string());
+        }
+
+        // Sorted, so two runs on one machine agree whatever order the caller
+        // probed the toolchains in.
+        let mut sorted: Vec<&String> = toolchains.iter().collect();
+        sorted.sort();
+        for fingerprint in sorted {
+            hasher.update(fingerprint.as_bytes());
+            hasher.update(b"\n");
+            inputs.push(fingerprint.clone());
+        }
+
+        Self {
+            digest: format!("env_{}", hasher.finalize().to_hex()),
+            inputs,
+        }
+    }
+
+    /// A key covering nothing, for a caller that has no environment to describe.
+    ///
+    /// Named rather than defaulted: a verdict keyed against this is keyed
+    /// against no environment at all, and that should be visible at the call
+    /// site instead of happening by omission.
+    pub fn uncovered() -> Self {
+        Self {
+            digest: "env_uncovered".to_string(),
+            inputs: Vec::new(),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.digest
+    }
+
+    /// True when nothing was found to cover. A key derived from this is not
+    /// wrong, but it says nothing about the environment, and a report should
+    /// say so rather than showing a digest that looks like an answer.
+    pub fn covers_nothing(&self) -> bool {
+        self.inputs.is_empty()
     }
 }

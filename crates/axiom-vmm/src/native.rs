@@ -46,6 +46,14 @@ struct Recipe {
     /// exposes it (exit 49) instead of letting it produce a failed verdict for
     /// code that never ran.
     probe_args: &'static [&'static str],
+    /// Arguments that make `probe` print what version it is.
+    ///
+    /// Separate from `probe_args` because those are chosen to produce no output:
+    /// `python -c pass` and `node -e ""` are silent by design, which is right for
+    /// a probe and useless for a fingerprint. Reusing them gave `node=` and
+    /// `python=` in the environment key, so upgrading either would not have
+    /// invalidated a single cached verdict.
+    version_args: &'static [&'static str],
     file_name: &'static str,
     /// Built from the source path and the work directory, once both are known.
     build: Option<Step>,
@@ -99,6 +107,7 @@ static PYTHON: NativeLanguage = NativeLanguage {
         Recipe {
             probe: "python3",
             probe_args: &["-c", "pass"],
+            version_args: &["--version"],
             file_name: "axiom_eval.py",
             build: None,
             run: |src, _| ("python3".to_string(), vec![src.display().to_string()]),
@@ -106,6 +115,7 @@ static PYTHON: NativeLanguage = NativeLanguage {
         Recipe {
             probe: "python",
             probe_args: &["-c", "pass"],
+            version_args: &["--version"],
             file_name: "axiom_eval.py",
             build: None,
             run: |src, _| ("python".to_string(), vec![src.display().to_string()]),
@@ -124,6 +134,7 @@ static JAVASCRIPT: NativeLanguage = NativeLanguage {
     recipes: &[Recipe {
         probe: "node",
         probe_args: &["-e", ""],
+        version_args: &["--version"],
         file_name: "axiom_eval.js",
         build: None,
         run: |src, _| ("node".to_string(), vec![src.display().to_string()]),
@@ -159,6 +170,7 @@ static TYPESCRIPT: NativeLanguage = NativeLanguage {
         Recipe {
             probe: "deno",
             probe_args: &["--version"],
+            version_args: &["--version"],
             file_name: "axiom_eval.ts",
             build: None,
             run: |src, _| {
@@ -182,6 +194,7 @@ static TYPESCRIPT: NativeLanguage = NativeLanguage {
         Recipe {
             probe: "tsc",
             probe_args: &["--version"],
+            version_args: &["--version"],
             file_name: "axiom_eval.ts",
             build: Some(|src, _| {
                 (
@@ -222,6 +235,7 @@ static GO: NativeLanguage = NativeLanguage {
         probe: "go",
         // `go --version` is not a thing; the subcommand is `go version`.
         probe_args: &["version"],
+        version_args: &["version"],
         file_name: "axiom_eval.go",
         build: None,
         run: |src, _| {
@@ -242,6 +256,7 @@ static JAVA: NativeLanguage = NativeLanguage {
     recipes: &[Recipe {
         probe: "javac",
         probe_args: &["-version"],
+        version_args: &["-version"],
         file_name: "AxiomEval.java",
         build: Some(|src, dir| {
             (
@@ -831,6 +846,56 @@ pub fn evaluate(
         done.stdout,
         detail,
     )
+}
+
+/// A version string for every toolchain this tier can currently drive.
+///
+/// Feeds `EnvironmentKey`, which is what makes it safe for a closure to treat an
+/// out-of-tree name as covered rather than as a gap. `anyhow::Result` does not
+/// resolve to an indexed symbol and never will, and what it means is fixed by
+/// the compiler and the lock file; if either moves, every cached verdict has to
+/// go with it.
+///
+/// A toolchain that is not installed contributes nothing rather than an empty
+/// string, so installing one changes the key and invalidates verdicts reached
+/// without it. That is the right way round: a snippet that was refused for want
+/// of a compiler must not stay refused once the compiler arrives.
+///
+/// The probe is the same cached one the evaluator uses, so this costs at most
+/// one process spawn per language per process.
+pub fn toolchain_fingerprints() -> Vec<String> {
+    let mut out = Vec::new();
+    for language in LANGUAGES {
+        let Some(recipe) = pick_recipe(language) else {
+            continue;
+        };
+        let version = Command::new(resolve_program(recipe.probe))
+            .args(recipe.version_args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|o| {
+                // Some report on stdout, some on stderr, and javac has moved
+                // between the two across releases. Both are hashed rather than
+                // picking one and getting an empty string on the wrong version.
+                let mut combined = String::from_utf8_lossy(&o.stdout).into_owned();
+                combined.push_str(&String::from_utf8_lossy(&o.stderr));
+                combined.split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .unwrap_or_default();
+        // An empty answer must not read as a version. A fingerprint of
+        // `node=` is one that never changes, so an upgrade would leave every
+        // cached verdict standing; saying so is the difference between a key
+        // that covers node and one that only looks like it does.
+        let version = if version.trim().is_empty() {
+            "<reported no version>".to_string()
+        } else {
+            version
+        };
+        out.push(format!("{}={}", recipe.probe, version));
+    }
+    out.sort();
+    out
 }
 
 #[cfg(all(test, windows))]

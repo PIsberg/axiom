@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 76 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 79 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -182,13 +182,18 @@ The portable form is a bare `throw`, which is why `throw ` is in the language's
 **The verdict cache is measured, not built, and the measurement says do not build it.**
 `axiom cache-audit` reads the same graph in the forward direction, from a test to what
 it depends on, and compares that against what the blast radius selects. Nothing is
-cached and no test is skipped. On this repository 0 of 52 tests produce a usable key,
-and 322 symbol/test pairs disagree in the direction that would skip a test the selector
-says must run. Two causes, needing different fixes: names from crates outside the tree
-(`anyhow::Result`, `std::path::{Path, PathBuf}`) belong in the key as a toolchain and
-lockfile digest rather than counting as gaps, while ambiguous short names (`new`,
-`write`, 51 and 48 occurrences) cannot be resolved without type information the
-line-based parsers do not have. `closure_hash` returns `Option` for this reason: an
+cached and no test is skipped. On this repository 1 of 51 tests produces a usable key,
+and 312 symbol/test pairs disagree in the direction that would skip a test the selector
+says must run. Two causes, needing different fixes. Names from crates outside the tree
+(`anyhow::Result`, `std::path::{Path, PathBuf}`) are now folded into `EnvironmentKey`,
+a digest over lock files, manifests and compiler versions, rather than counting as
+gaps; a `cargo update` or a compiler upgrade moves that digest and invalidates every
+key at once. The fingerprints have to be real for that to hold: reusing the evaluator's
+probe arguments, which are chosen to be silent, gave `node=` and `python=`, so an
+upgrade would have invalidated nothing, and `toolchain_fingerprints.rs` now fails on an
+empty version. Ambiguous short names (`new`, `write`, `drop`, 51, 48 and 44
+occurrences) are the half that remains, and they need type information the line-based
+parsers do not have. `closure_hash` returns `Option` for this reason: an
 incomplete closure must produce no key at all, because a cache that keys on a partial
 view skips a test whose real dependency moved and reports a pass for code that never
 ran. Full reasoning in `docs/verdict_cache_audit.md`. Re-run the audit before quoting

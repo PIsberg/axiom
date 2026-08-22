@@ -49,15 +49,20 @@ contains that symbol. Where they disagree, the direction matters:
 Taken on this repository, 25 files and 271 symbols, at depth 1:
 
 ```
- Tests in index:             52
- Tests with a usable key:    0 of 52
- Symbols audited:            271
+ Tests in index:             51
+ Tests with a usable key:    1 of 51
+ Symbols audited:            283
 
- Both mechanisms agree:      362
- Cache would wrongly skip:   322
- Cache would run unselected: 3370
- Agreement:                  8.93%
+ Both mechanisms agree:      358
+ Cache would wrongly skip:   312
+ Cache would run unselected: 3294
+ Agreement:                  9.03%
 ```
+
+Before out-of-tree names were separated from ambiguous ones, usable keys were
+0 of 52. Separating them is necessary and nowhere near sufficient: the ambiguous
+half dominates, and until it is answered the cache would still miss on every test
+but one.
 
 Repeat it with:
 
@@ -74,35 +79,48 @@ between runs changes them, which is the point.
 precondition fails on the graph as it stands. Two separate things are failing,
 and they want different fixes.
 
-**Nothing has a usable key.** Every test's closure contains at least one name
-that resolved to no indexed symbol, so no test can be keyed at all. A cache built
-on this today would miss on 100% of tests: safe, and useless.
+**Almost nothing has a usable key.** A test is keyable only when every name it
+reaches was identified. The audit separates two reasons a name is not, because
+they want different fixes.
 
-The names that fail to resolve, by frequency, say why:
+Names from outside the tree no longer count against a key. `serde`, `anyhow` and
+`std` were never going to be in the index, and what they mean is pinned by the
+compiler and the lock file rather than by this tree, so they are folded into an
+environment key instead:
+
+```
+ Environment key: env_e69a785d...
+   Covering: Cargo.lock, deno=2.9.5, go=go1.24.5, javac=26,
+             node=v26.5.0, python=Python 3.11.4
+```
+
+A `cargo update` rewrites `Cargo.lock`, a compiler upgrade changes a version
+string, and either one changes that digest, which changes every key derived from
+it. That is the correct blast radius for an environment change: nothing compiled
+against the old one is still known to hold.
+
+The fingerprints must be real for that argument to work. The first version reused
+the evaluator's probe arguments, which are chosen to produce no output, so the
+key contained `node=` and `python=` and an upgrade to either would have
+invalidated nothing. `crates/axiom-vmm/tests/toolchain_fingerprints.rs` now fails
+if an installed toolchain reports an empty version.
+
+**Ambiguous names are what remain, and they are the real gap.** Many indexed
+symbols answer to these, so resolution picks none:
 
 ```
    51x  new
-   48x  serde::{Deserialize, Serialize}
    48x  write
-   47x  anyhow::Result
-   46x  std::path::{Path, PathBuf}
+   44x  drop
+   32x  path
+   21x  extract_tool_result
 ```
 
-Two different problems sitting in one list.
-
-`serde`, `anyhow` and `std` are crates outside the tree. The index was never
-going to hold them, and their contents do not change between two runs on one
-machine unless the toolchain or the lockfile changes. Treating them as
-unresolved is correct today, because the key does not cover them, but the fix is
-not to resolve them into the index: it is to make the toolchain and lockfile part
-of the key, and stop counting them as gaps.
-
-`new` and `write` are the harder half, and they are not external at all. They are
-ambiguous: many indexed symbols answer to those names, so resolution returns
-nothing rather than picking one. Resolving a bare method name to one definition
-needs type information the line-based parsers do not have. Until that is
-answered, any file declaring a `new` cannot be keyed, which on a Rust tree is
-most of them.
+Something in this tree satisfies each of them and the graph cannot say what, so
+nothing covers a change behind them. Resolving a bare method name to one
+definition needs the receiver's type, which the line-based parsers do not have.
+On a Rust tree most files declare a `new`, which is why this alone keeps almost
+every test unkeyable.
 
 **The dangerous direction is not zero.** 322 symbol/test pairs where the blast
 radius selects a test whose closure omits the symbol. Some of that is the same
@@ -114,9 +132,9 @@ a key.
 
 In order, each gated on the one before:
 
-1. Split "unresolved" into "outside the tree" and "ambiguous inside it". Fold the
-   first into the key as a toolchain and lockfile digest instead of a gap. That
-   alone should take usable keys from zero to something.
+1. ~~Split "unresolved" into "outside the tree" and "ambiguous inside it". Fold
+   the first into the key as a toolchain and lockfile digest instead of a gap.~~
+   Done. Usable keys went from 0 to 1, which is the honest size of that step.
 2. Resolve ambiguous short names, which needs more than the current parsers do.
 3. Re-run the audit. If `would wrongly skip` is zero on several real trees, build
    the cache behind a flag, still shadowed, and compare its decisions against
