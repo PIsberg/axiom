@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 73 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 76 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -154,6 +154,30 @@ snippet that did not terminate held the stdio pipe an agent was blocked on.
 resolves the name first, because comparing the caller's spelling against the stored keys returned
 `None` for every short name, and `None` meant Rust. An ambiguous name is refused with
 `AmbiguousSymbol` and its candidates rather than compiled as whichever language won.
+
+**A toolchain-conditional test can pass without ever running the thing it tests.**
+`crates/axiom-cli/tests/multi_language_eval.rs` branches on whether a toolchain is on
+PATH: with one it asserts the verdict, without one it asserts the refusal. Both
+branches are green, so the suite says nothing about which ran. The TypeScript recipe
+reached main that way, reasoned rather than executed (#9). When touching one of these,
+break an assertion that only the running branch reaches and confirm the test goes red.
+Doing exactly that is what found `resolve_program`: with `deno` and `tsc` both
+installed, the test was still taking the refusal branch.
+
+**Windows resolves a bare program name by appending `.exe`, and npm does not ship one.**
+`Command::new("tsc")` cannot see `tsc.cmd`, so a toolchain the user runs from their own
+shell was reported as not installed. `resolve_program` in `axiom-vmm/src/native.rs`
+searches PATHEXT. The order matters: npm drops `deno.cmd`, `deno.ps1` and an
+extension-less `deno` holding a POSIX shell script, and matching the bare name first
+finds the one Windows cannot execute. PATHEXT candidates win, and the bare name is only
+considered when it already carries an extension.
+
+**A TypeScript snippet cannot assume Node's type declarations.** `import assert from
+"node:assert"` runs under deno and is TS2591 under `tsc`, which has no `@types/node`,
+so the same snippet passes on one machine and returns a compilation error on another.
+The portable form is a bare `throw`, which is why `throw ` is in the language's
+`assertion_tokens`: without it a snippet written the documented way reports
+`passed_checks_count: 0` beside `PASSED`.
 
 **The verdict cache is measured, not built, and the measurement says do not build it.**
 `axiom cache-audit` reads the same graph in the forward direction, from a test to what

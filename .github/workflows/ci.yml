@@ -23,6 +23,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # The tier 2 evaluator tests branch on whether a toolchain is installed,
+      # and assert the refusal when it is not. That makes them pass on a runner
+      # with nothing installed while never executing the half that matters,
+      # which is how the TypeScript recipe reached main unrun (#9). python, node,
+      # go and javac are already on both runners; TypeScript is not, so it is
+      # installed here to make its running branch reachable in CI.
+      - name: Install a TypeScript toolchain
+        run: npm install -g typescript
+
       - name: Test
         run: cargo test --release --all-targets
 
