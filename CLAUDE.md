@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 72 tests across e2e, mcp, crdt, persistence, blast radius, eval
+cargo test                            # 76 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -178,6 +178,21 @@ so the same snippet passes on one machine and returns a compilation error on ano
 The portable form is a bare `throw`, which is why `throw ` is in the language's
 `assertion_tokens`: without it a snippet written the documented way reports
 `passed_checks_count: 0` beside `PASSED`.
+
+**The verdict cache is measured, not built, and the measurement says do not build it.**
+`axiom cache-audit` reads the same graph in the forward direction, from a test to what
+it depends on, and compares that against what the blast radius selects. Nothing is
+cached and no test is skipped. On this repository 0 of 52 tests produce a usable key,
+and 322 symbol/test pairs disagree in the direction that would skip a test the selector
+says must run. Two causes, needing different fixes: names from crates outside the tree
+(`anyhow::Result`, `std::path::{Path, PathBuf}`) belong in the key as a toolchain and
+lockfile digest rather than counting as gaps, while ambiguous short names (`new`,
+`write`, 51 and 48 occurrences) cannot be resolved without type information the
+line-based parsers do not have. `closure_hash` returns `Option` for this reason: an
+incomplete closure must produce no key at all, because a cache that keys on a partial
+view skips a test whose real dependency moved and reports a pass for code that never
+ran. Full reasoning in `docs/verdict_cache_audit.md`. Re-run the audit before quoting
+any of these numbers; they move with the graph.
 
 **Persistence failures must stay loud.** `save_to_disk` returns the path it wrote and verifies the
 file exists, and callers propagate the error instead of discarding it. When these were `let _ = ...`

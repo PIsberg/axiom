@@ -1,6 +1,6 @@
 use axiom_proto::AstNode;
 use regex::Regex;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -2303,4 +2303,266 @@ pub struct BlastRadiusResult {
     pub tests_by_depth: HashMap<usize, Vec<String>>,
     pub total_tests_in_repo: usize,
     pub pruned_test_percentage: f64,
+}
+
+/// A symbol's forward dependency closure: everything it can reach.
+///
+/// The blast radius walks `reverse_deps`, from a changed symbol out to the tests
+/// that reach it. A verdict cache needs the other direction: given a test, what
+/// does its outcome depend on? If that set is unchanged since the last run, the
+/// previous verdict is still valid and neither the test nor the compilation
+/// behind it has to happen again.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForwardClosure {
+    pub symbol: String,
+    /// Indexed symbols reachable from `symbol`, including itself. Sorted, so the
+    /// hash over them does not depend on traversal order.
+    pub reachable: Vec<String>,
+    /// Dependency names that matched no indexed symbol, or matched several.
+    ///
+    /// These are why a closure hash cannot be trusted on its own. An unresolved
+    /// name is a dependency whose content the hash does not cover, so a change
+    /// behind it would not disturb the hash, and a cache keyed on that hash
+    /// would skip a test that should have run.
+    pub unresolved: Vec<String>,
+}
+
+impl ForwardClosure {
+    /// True when every dependency name resolved to an indexed symbol.
+    ///
+    /// Only a complete closure may back a cached verdict. An incomplete one has
+    /// to miss, because what it does not cover can change without saying so.
+    pub fn is_complete(&self) -> bool {
+        self.unresolved.is_empty()
+    }
+}
+
+/// What a verdict cache would have decided, measured against what the blast
+/// radius selects, without skipping anything.
+///
+/// Shadow mode: this computes the decision and reports it. Nothing is cached and
+/// no test is skipped, because the number that decides whether a cache is safe
+/// to build is how often it would have been wrong, and that has to be measured
+/// before it is relied on rather than after.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CacheAudit {
+    pub symbols_audited: usize,
+    pub tests_in_index: usize,
+    /// Tests whose forward closure resolved completely. Only these could ever
+    /// back a cached verdict.
+    pub tests_with_complete_closure: usize,
+    /// Symbol/test pairs where both mechanisms agree the test is affected.
+    pub agreements: usize,
+    /// The dangerous disagreement: the blast radius selects the test, and the
+    /// test's forward closure does not contain the symbol. A cache keyed on that
+    /// closure would skip a test the selector says must run.
+    pub would_wrongly_skip: usize,
+    /// The safe disagreement: the closure contains the symbol but the blast
+    /// radius did not select the test. Costs a test run, and points at
+    /// under-selection rather than at an unsound cache.
+    pub would_run_unselected: usize,
+    /// Up to this many examples of the dangerous case, for a report to name.
+    pub wrongly_skipped_examples: Vec<(String, String)>,
+    /// The dependency names that most often failed to resolve, with counts.
+    ///
+    /// Without these, `tests_with_complete_closure: 0` is a number with no
+    /// diagnosis attached, and the obvious reading, that the graph is broken,
+    /// may not be the right one. Most of what fails to resolve here is a crate
+    /// outside the tree, `std::collections::HashMap` and the like, which is not
+    /// a missing edge so much as a dependency the index was never going to hold.
+    /// Those two want different fixes, and the counts are what tells them apart.
+    pub top_unresolved: Vec<(String, usize)>,
+}
+
+impl CacheAudit {
+    /// Share of decisions the two mechanisms agreed on, or `None` when there
+    /// were no decisions to make. Reported rather than inferred from the counts,
+    /// so a zero-denominator run cannot read as 100%.
+    pub fn agreement_rate(&self) -> Option<f64> {
+        let total = self.agreements + self.would_wrongly_skip + self.would_run_unselected;
+        if total == 0 {
+            return None;
+        }
+        Some(self.agreements as f64 / total as f64)
+    }
+}
+
+impl AstIndex {
+    /// How deep the forward walk goes. The reverse walk bounds itself the same
+    /// way; an unbounded closure on a cyclic graph is the whole index, which
+    /// tells a cache nothing.
+    pub const CLOSURE_DEPTH: usize = 5;
+
+    /// Every indexed symbol reachable from `symbol_path` by following
+    /// dependencies, plus the names that resolved to nothing.
+    pub fn forward_closure(&self, symbol_path: &str, max_depth: usize) -> Option<ForwardClosure> {
+        let start = self.get_symbol(symbol_path)?;
+        let nodes = self.nodes.read().unwrap();
+
+        let mut reachable: BTreeSet<String> = BTreeSet::new();
+        let mut unresolved: BTreeSet<String> = BTreeSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+
+        reachable.insert(start.symbol_path.clone());
+        queue.push_back((start.symbol_path.clone(), 0));
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            let Some(node) = nodes.get(&current) else {
+                continue;
+            };
+            for dependency in &node.dependencies {
+                let name = dependency.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                // Resolution goes through the same lookup a caller would use, or
+                // the closure would cover symbols the rest of the system cannot
+                // reach by that name. An ambiguous name resolves to nothing,
+                // which makes the closure incomplete rather than picking one.
+                match Self::resolve_within(&nodes, name) {
+                    Some(resolved) => {
+                        if reachable.insert(resolved.clone()) {
+                            queue.push_back((resolved, depth + 1));
+                        }
+                    }
+                    None => {
+                        unresolved.insert(name.to_string());
+                    }
+                }
+            }
+        }
+
+        Some(ForwardClosure {
+            symbol: start.symbol_path,
+            reachable: reachable.into_iter().collect(),
+            unresolved: unresolved.into_iter().collect(),
+        })
+    }
+
+    /// Resolve a dependency name against an already-held read guard.
+    ///
+    /// `get_symbol` takes the lock itself, and the closure walk holds it for the
+    /// whole traversal, so the lookup is repeated here rather than dropping and
+    /// retaking the guard once per edge.
+    fn resolve_within(nodes: &HashMap<String, AstNode>, name: &str) -> Option<String> {
+        if nodes.contains_key(name) {
+            return Some(name.to_string());
+        }
+        let mut matches = nodes.keys().filter(|k| Self::is_suffix_match(k, name));
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first.clone())
+    }
+}
+
+impl AstIndex {
+    /// A digest over everything a symbol's outcome depends on, or `None` when
+    /// the closure is incomplete.
+    ///
+    /// `None` is the point of the return type. A cache that answers with a hash
+    /// whatever it knows will key on a partial view and skip a test whose real
+    /// dependency changed behind an unresolved name. Refusing to produce a key
+    /// is what makes the miss happen.
+    pub fn closure_hash(&self, symbol_path: &str) -> Option<String> {
+        let closure = self.forward_closure(symbol_path, Self::CLOSURE_DEPTH)?;
+        if !closure.is_complete() {
+            return None;
+        }
+
+        let nodes = self.nodes.read().unwrap();
+        let mut hasher = blake3::Hasher::new();
+        for symbol in &closure.reachable {
+            // Both the identity and the content: renaming a symbol changes what
+            // a test calls, and editing its body changes what that call does.
+            hasher.update(symbol.as_bytes());
+            hasher.update(b"\0");
+            if let Some(node) = nodes.get(symbol) {
+                hasher.update(node.hash.as_bytes());
+            }
+            hasher.update(b"\n");
+        }
+        Some(format!("closure_{}", hasher.finalize().to_hex()))
+    }
+
+    /// Measure a verdict cache without running one.
+    ///
+    /// For every symbol, the tests the blast radius selects are compared against
+    /// the tests whose forward closure contains that symbol. Where the two
+    /// disagree, a cache keyed on the closure would decide differently from the
+    /// selector already shipping, and the direction says whether that is
+    /// dangerous or merely wasteful.
+    pub fn audit_cache(&self, max_depth: usize, example_limit: usize) -> CacheAudit {
+        let (test_symbols, all_symbols) = {
+            let nodes = self.nodes.read().unwrap();
+            let tests: Vec<String> = nodes
+                .values()
+                .filter(|n| n.kind == "test")
+                .map(|n| n.symbol_path.clone())
+                .collect();
+            let all: Vec<String> = nodes.keys().cloned().collect();
+            (tests, all)
+        };
+
+        let mut audit = CacheAudit {
+            tests_in_index: test_symbols.len(),
+            ..Default::default()
+        };
+
+        // One closure per test, computed once and reused across every symbol.
+        let mut closures: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut unresolved_counts: HashMap<String, usize> = HashMap::new();
+        for test in &test_symbols {
+            if let Some(closure) = self.forward_closure(test, Self::CLOSURE_DEPTH) {
+                if closure.is_complete() {
+                    audit.tests_with_complete_closure += 1;
+                }
+                for name in &closure.unresolved {
+                    *unresolved_counts.entry(name.clone()).or_insert(0) += 1;
+                }
+                closures.insert(test.clone(), closure.reachable.into_iter().collect());
+            }
+        }
+
+        let mut ranked: Vec<(String, usize)> = unresolved_counts.into_iter().collect();
+        // By count, then by name, so two runs over the same tree report the same
+        // list rather than whatever order the map happened to yield.
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(example_limit);
+        audit.top_unresolved = ranked;
+
+        for symbol in &all_symbols {
+            let Some(radius) = self.compute_blast_radius(symbol, max_depth) else {
+                continue;
+            };
+            audit.symbols_audited += 1;
+
+            let selected: HashSet<&String> = radius.impacted_tests.iter().collect();
+
+            for test in &test_symbols {
+                let Some(reachable) = closures.get(test) else {
+                    continue;
+                };
+                match (selected.contains(test), reachable.contains(symbol)) {
+                    (true, true) => audit.agreements += 1,
+                    (true, false) => {
+                        audit.would_wrongly_skip += 1;
+                        if audit.wrongly_skipped_examples.len() < example_limit {
+                            audit
+                                .wrongly_skipped_examples
+                                .push((symbol.clone(), test.clone()));
+                        }
+                    }
+                    (false, true) => audit.would_run_unselected += 1,
+                    (false, false) => {}
+                }
+            }
+        }
+
+        audit
+    }
 }

@@ -41,6 +41,13 @@ enum Commands {
         #[arg(short, long, default_value_t = 1)]
         depth: usize,
     },
+    /// Measure what a verdict cache would decide, without caching anything
+    CacheAudit {
+        #[arg(short, long, default_value = ".")]
+        path: String,
+        #[arg(short, long, default_value_t = 1)]
+        depth: usize,
+    },
     /// Run execution latency benchmarks
     Bench {
         #[arg(short, long, default_value_t = 100)]
@@ -248,6 +255,72 @@ async fn main() -> Result<()> {
             }
             if deps.len() > 12 {
                 println!("    ... and {} more", deps.len() - 12);
+            }
+        }
+
+        Commands::CacheAudit { path, depth } => {
+            println!(
+                "Auditing a verdict cache over '{path}' (nothing is cached, nothing is skipped)..."
+            );
+            let index = axiom_ast::AstIndex::new();
+            let summary = index.scan_directory(std::path::Path::new(&path))?;
+            let audit = index.audit_cache(depth, 5);
+
+            println!();
+            println!(" Files scanned:              {}", summary.files_scanned);
+            println!(" Symbols indexed:            {}", summary.total_symbols);
+            println!(" Tests in index:             {}", audit.tests_in_index);
+            println!(
+                " Tests with a usable key:    {} of {}",
+                audit.tests_with_complete_closure, audit.tests_in_index
+            );
+            println!(" Symbols audited:            {}", audit.symbols_audited);
+            println!();
+            println!(" Both mechanisms agree:      {}", audit.agreements);
+            println!(
+                " Cache would wrongly skip:   {}   <- the number that decides this",
+                audit.would_wrongly_skip
+            );
+            println!(
+                " Cache would run unselected: {}   (wasteful, not unsound)",
+                audit.would_run_unselected
+            );
+            match audit.agreement_rate() {
+                Some(rate) => println!(" Agreement:                  {:.2}%", rate * 100.0),
+                None => println!(" Agreement:                  no decisions to make"),
+            }
+
+            if !audit.top_unresolved.is_empty() {
+                println!();
+                println!(" Dependency names that did not resolve to an indexed symbol:");
+                for (name, count) in &audit.top_unresolved {
+                    println!("   {count:>4}x  {name}");
+                }
+                println!("   A name from a crate outside this tree is not a missing edge. It is");
+                println!("   still an input the key does not cover, so it still forces a miss.");
+            }
+
+            if !audit.wrongly_skipped_examples.is_empty() {
+                println!();
+                println!(" Tests the blast radius selects whose closure omits the symbol:");
+                for (symbol, test) in &audit.wrongly_skipped_examples {
+                    println!("   {symbol} -> {test}");
+                }
+            }
+
+            println!();
+            if audit.would_wrongly_skip == 0 && audit.tests_with_complete_closure > 0 {
+                println!(" No disagreement in the dangerous direction on this repository.");
+                println!(" That is one measurement on one tree, not a proof. Run it on yours");
+                println!(" before letting anything skip a test on the strength of a key.");
+            } else if audit.would_wrongly_skip > 0 {
+                println!(" A cache keyed on these closures would skip tests the selector says");
+                println!(" must run. Nothing should be cached until that count is zero, and");
+                println!(" the tests above say where the graph is losing an edge.");
+            } else {
+                println!(" No test produced a usable key, so a cache would miss on everything.");
+                println!(" That is the safe answer and a useless one: the closures are not");
+                println!(" resolving, which is what to fix before measuring anything else.");
             }
         }
 
