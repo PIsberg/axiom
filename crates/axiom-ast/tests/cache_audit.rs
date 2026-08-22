@@ -138,16 +138,19 @@ fn editing_an_unrelated_symbol_leaves_the_hash_alone() {
 }
 
 /// An unresolved dependency name means the closure does not cover everything the
-/// An ambiguous name blocks the key outright.
+/// An ambiguous name is over-approximated, not guessed.
 ///
-/// This is the kind of unresolved name that is a genuine gap: something in this
-/// tree satisfies the dependency and the graph cannot say which, so nothing
-/// covers a change behind it. Returning a hash anyway is the tempting bug. It
-/// would look like every other key and would be a promise about code the graph
-/// never identified, so the miss has to come from refusing to produce a key
-/// rather than from a caller remembering to check a flag.
+/// The direction of the guess is the whole argument. For the blast radius, a
+/// wrong extra edge costs one unnecessary test run. For a cache key, a missing
+/// edge means a test is skipped on the strength of a key that did not cover what
+/// changed, and a stale pass is reported for code that never ran. The two
+/// mechanisms read the same graph and want opposite biases from it.
+///
+/// So every candidate is taken. Picking the nearest one, by file or directory,
+/// was the obvious alternative and is unsafe for exactly this reason: a wrong
+/// pick produces a key that looks complete and omits the dependency that moved.
 #[test]
-fn an_ambiguous_name_yields_no_key_at_all() {
+fn an_ambiguous_name_takes_every_candidate_rather_than_choosing_one() {
     let dir = TempDir::new("ambiguous");
     // Two definitions of `shared_helper`, so a reference to it picks neither.
     dir.write("one.rs", "pub fn shared_helper() -> i32 { 1 }\n");
@@ -162,17 +165,56 @@ fn an_ambiguous_name_yields_no_key_at_all() {
         .forward_closure("test_uses_ambiguous", AstIndex::CLOSURE_DEPTH)
         .expect("the test is indexed");
 
-    assert!(
-        !closure.ambiguous.is_empty(),
-        "the fixture defines shared_helper twice and only means something if that \
-         name came back ambiguous: {closure:?}"
+    let (name, candidates) = closure
+        .over_approximated
+        .iter()
+        .find(|(n, _)| n.contains("shared_helper"))
+        .expect(
+            "the fixture defines shared_helper twice and only means something if \
+             that name came back ambiguous",
+        );
+    assert_eq!(
+        *candidates, 2,
+        "both definitions of {name} must be taken, not one of them chosen"
     );
-    assert!(!closure.is_complete(), "{closure:?}");
+    assert!(!closure.is_precise(), "{closure:?}");
+
+    // Both definitions are in the closure, so editing either one moves the key.
+    // That is what makes over-approximation safe, and it is the property that
+    // choosing the nearest candidate would break.
+    let reached: Vec<&String> = closure
+        .reachable
+        .iter()
+        .filter(|r| r.contains("shared_helper"))
+        .collect();
+    assert_eq!(
+        reached.len(),
+        2,
+        "both definitions must be reachable: {closure:?}"
+    );
     assert!(
-        index
-            .closure_hash("test_uses_ambiguous", &EnvironmentKey::uncovered())
-            .is_none(),
-        "an ambiguous name must leave the test unkeyable: {closure:?}"
+        reached.iter().any(|r| r.contains("one.rs"))
+            && reached.iter().any(|r| r.contains("two.rs")),
+        "the closure must span both files, or one of them was silently preferred: {reached:?}"
+    );
+
+    // And it is still keyable. Ambiguity costs precision, not the key.
+    let environment = EnvironmentKey::of(dir.path(), &["rustc=test".to_string()]);
+    let before = index
+        .closure_hash("test_uses_ambiguous", &environment)
+        .expect("over-approximation must not block a key");
+
+    // Editing the definition the test does not obviously mean must still move
+    // the key, because nothing established which one it meant.
+    dir.write("two.rs", "pub fn shared_helper() -> i32 { 22 }\n");
+    let after = scan(&dir)
+        .closure_hash("test_uses_ambiguous", &environment)
+        .expect("still keyable");
+
+    assert_ne!(
+        before, after,
+        "editing either candidate has to move the key; if it does not, a cache \
+         would skip a test whose dependency changed"
     );
 }
 
@@ -211,14 +253,25 @@ fn an_out_of_tree_name_is_covered_rather_than_treated_as_a_gap() {
          something if that name landed in `outside`: {closure:?}"
     );
     assert!(
-        closure.ambiguous.is_empty(),
-        "nothing here is ambiguous, so nothing should block the key: {closure:?}"
+        closure.is_precise(),
+        "nothing here is ambiguous: {closure:?}"
     );
 
-    let uncovered = EnvironmentKey::uncovered();
+    // An out-of-tree name is safe only while something pins what it means. With
+    // nothing covering the environment, nothing does, so the key is refused: it
+    // would otherwise stay stable across the dependency upgrade that changed the
+    // answer. This is the one thing that still refuses a key.
+    assert!(
+        index
+            .closure_hash("uses_outside_world", &EnvironmentKey::uncovered())
+            .is_none(),
+        "a name from outside the tree must not be keyed against an environment          that covers nothing: {closure:?}"
+    );
+
+    let environment = EnvironmentKey::of(dir.path(), &["rustc=some-version".to_string()]);
     let keyed = index
-        .closure_hash("uses_outside_world", &uncovered)
-        .expect("an out-of-tree name must not block a key");
+        .closure_hash("uses_outside_world", &environment)
+        .expect("a covered environment makes an out-of-tree name keyable");
 
     // A different environment is a different verdict. Without this, folding
     // out-of-tree names in would be a hole rather than a coverage decision: a
@@ -254,7 +307,7 @@ fn the_audit_counts_both_directions_of_disagreement() {
     );
 
     let index = scan(&dir);
-    let audit = index.audit_cache(1, 5);
+    let audit = index.audit_cache(&EnvironmentKey::uncovered(), 1, 5);
 
     assert_eq!(audit.tests_in_index, 2, "{audit:?}");
     assert!(audit.symbols_audited > 0, "{audit:?}");
@@ -262,6 +315,14 @@ fn the_audit_counts_both_directions_of_disagreement() {
     // Whatever the numbers are, they have to be internally consistent: every
     // example named must be counted, and the rate must not be reported when
     // there was nothing to decide.
+    assert!(
+        audit.tests_with_a_key <= audit.tests_in_index,
+        "more keys than tests: {audit:?}"
+    );
+    assert!(
+        audit.tests_with_precise_closure <= audit.tests_in_index,
+        "more precise closures than tests: {audit:?}"
+    );
     assert!(
         audit.wrongly_skipped_examples.len() <= audit.would_wrongly_skip,
         "an example was named that was not counted: {audit:?}"
