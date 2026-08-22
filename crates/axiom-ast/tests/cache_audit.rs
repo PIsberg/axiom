@@ -14,7 +14,7 @@
 //! `EvaluatorUnavailable` exists to prevent, with a longer reach, because a
 //! stale green survives across sessions.
 
-use axiom_ast::AstIndex;
+use axiom_ast::{AstIndex, EnvironmentKey};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -87,7 +87,7 @@ fn editing_a_dependency_changes_the_hash_of_the_test_that_uses_it() {
     );
 
     let before = index
-        .closure_hash("test_gate_opens")
+        .closure_hash("test_gate_opens", &EnvironmentKey::uncovered())
         .expect("the fixture resolves completely, so it has a key");
 
     // Only the dependency's body changes. The test file is not touched.
@@ -97,7 +97,7 @@ fn editing_a_dependency_changes_the_hash_of_the_test_that_uses_it() {
     );
 
     let after = scan(&dir)
-        .closure_hash("test_gate_opens")
+        .closure_hash("test_gate_opens", &EnvironmentKey::uncovered())
         .expect("still resolves");
 
     assert_ne!(
@@ -122,13 +122,13 @@ fn editing_an_unrelated_symbol_leaves_the_hash_alone() {
     dir.write("unrelated.rs", "pub fn untouched_helper() -> i32 { 1 }\n");
 
     let before = scan(&dir)
-        .closure_hash("test_gate_opens")
+        .closure_hash("test_gate_opens", &EnvironmentKey::uncovered())
         .expect("has a key");
 
     dir.write("unrelated.rs", "pub fn untouched_helper() -> i32 { 42 }\n");
 
     let after = scan(&dir)
-        .closure_hash("test_gate_opens")
+        .closure_hash("test_gate_opens", &EnvironmentKey::uncovered())
         .expect("still has a key");
 
     assert_eq!(
@@ -138,41 +138,100 @@ fn editing_an_unrelated_symbol_leaves_the_hash_alone() {
 }
 
 /// An unresolved dependency name means the closure does not cover everything the
-/// test reads, so there is no key to hand back.
+/// An ambiguous name blocks the key outright.
 ///
-/// Returning a hash anyway is the tempting bug: it would look like every other
-/// key, and it would be a promise about code the graph never saw. The miss has
-/// to come from refusing to produce a key, not from a caller remembering to
-/// check a flag.
+/// This is the kind of unresolved name that is a genuine gap: something in this
+/// tree satisfies the dependency and the graph cannot say which, so nothing
+/// covers a change behind it. Returning a hash anyway is the tempting bug. It
+/// would look like every other key and would be a promise about code the graph
+/// never identified, so the miss has to come from refusing to produce a key
+/// rather than from a caller remembering to check a flag.
 #[test]
-fn an_unresolved_dependency_yields_no_key_at_all() {
-    let dir = TempDir::new("incomplete");
+fn an_ambiguous_name_yields_no_key_at_all() {
+    let dir = TempDir::new("ambiguous");
+    // Two definitions of `shared_helper`, so a reference to it picks neither.
+    dir.write("one.rs", "pub fn shared_helper() -> i32 { 1 }\n");
+    dir.write("two.rs", "pub fn shared_helper() -> i32 { 2 }\n");
     dir.write(
-        "user.rs",
-        "use some_external_crate::Thing;\n\
-         pub fn uses_outside_world() -> bool { Thing::check() }\n\
-         #[test]\n\
-         fn test_reaches_outside() { assert!(uses_outside_world()); }\n",
+        "user_test.rs",
+        "#[test]\nfn test_uses_ambiguous() { assert_eq!(shared_helper(), 1); }\n",
     );
 
     let index = scan(&dir);
     let closure = index
-        .forward_closure("test_reaches_outside", AstIndex::CLOSURE_DEPTH)
-        .expect("the test itself is indexed");
-
-    if closure.is_complete() {
-        // Nothing left the index, so there is no incompleteness to assert on and
-        // the interesting case is not being exercised. Say so rather than
-        // passing quietly, which is how a branching test asserts nothing.
-        panic!(
-            "the fixture was supposed to reference something outside the index, \
-             but every name resolved: {closure:?}"
-        );
-    }
+        .forward_closure("test_uses_ambiguous", AstIndex::CLOSURE_DEPTH)
+        .expect("the test is indexed");
 
     assert!(
-        index.closure_hash("test_reaches_outside").is_none(),
-        "an incomplete closure must not produce a key: {closure:?}"
+        !closure.ambiguous.is_empty(),
+        "the fixture defines shared_helper twice and only means something if that \
+         name came back ambiguous: {closure:?}"
+    );
+    assert!(!closure.is_complete(), "{closure:?}");
+    assert!(
+        index
+            .closure_hash("test_uses_ambiguous", &EnvironmentKey::uncovered())
+            .is_none(),
+        "an ambiguous name must leave the test unkeyable: {closure:?}"
+    );
+}
+
+/// A name from outside the tree does not block a key, and still changes it.
+///
+/// This is what #17 changed. Before it, an out-of-tree name counted the same as
+/// an ambiguous one, so every test importing anything was unkeyable, which was
+/// every test: the audit reported 0 usable keys out of 52. The index was never
+/// going to hold `std` or `anyhow`, and what those names mean is pinned by the
+/// environment rather than by this tree.
+///
+/// Two things have to hold for that to be safe. Which outside names a test
+/// reaches is an input, so adding an import must move the key. And what sits
+/// behind them is the environment's business, so a different environment must
+/// move it too.
+#[test]
+fn an_out_of_tree_name_is_covered_rather_than_treated_as_a_gap() {
+    let dir = TempDir::new("outside");
+    dir.write(
+        "user.rs",
+        "use some_external_crate::Thing;\npub fn uses_outside_world() -> bool { true }\n",
+    );
+    dir.write(
+        "user_test.rs",
+        "#[test]\nfn test_reaches_outside() { assert!(uses_outside_world()); }\n",
+    );
+
+    let index = scan(&dir);
+    let closure = index
+        .forward_closure("uses_outside_world", AstIndex::CLOSURE_DEPTH)
+        .expect("the symbol is indexed");
+
+    assert!(
+        !closure.outside.is_empty(),
+        "the fixture imports a crate that is not in the index and only means \
+         something if that name landed in `outside`: {closure:?}"
+    );
+    assert!(
+        closure.ambiguous.is_empty(),
+        "nothing here is ambiguous, so nothing should block the key: {closure:?}"
+    );
+
+    let uncovered = EnvironmentKey::uncovered();
+    let keyed = index
+        .closure_hash("uses_outside_world", &uncovered)
+        .expect("an out-of-tree name must not block a key");
+
+    // A different environment is a different verdict. Without this, folding
+    // out-of-tree names in would be a hole rather than a coverage decision: a
+    // dependency upgrade would leave every cached verdict standing.
+    let upgraded = EnvironmentKey::of(dir.path(), &["rustc=some-other-version".to_string()]);
+    let rekeyed = index
+        .closure_hash("uses_outside_world", &upgraded)
+        .expect("still keyable");
+
+    assert_ne!(
+        keyed, rekeyed,
+        "the environment is what covers these names, so changing it has to \
+         invalidate every verdict that rested on it"
     );
 }
 

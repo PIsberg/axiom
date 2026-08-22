@@ -97,6 +97,13 @@ fn polyglot_workspace() -> Result<(AxiomMcpServer, PathBuf)> {
         "function jsIsOpen(depth) {\n  return depth > 0;\n}\nmodule.exports = { jsIsOpen };\n",
     )?;
     std::fs::write(
+        root.join("gate.ts"),
+        "export function tsIsOpen(depth: number): boolean {
+  return depth > 0;
+}
+",
+    )?;
+    std::fs::write(
         root.join("Gate.kt"),
         "class KotlinGate {\n    fun isOpen(depth: Int): Boolean = depth > 0\n}\n",
     )?;
@@ -296,6 +303,94 @@ async fn an_ambiguous_name_is_not_resolved_by_picking_a_compiler() -> Result<()>
         "the caller needs the candidates to pick from: {result:?}"
     );
     assert_ne!(engine(&result), "tier1_wasi_cranelift", "{result:?}");
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+/// TypeScript, which #9 was opened about: the recipe shipped without either
+/// toolchain installed on the machine that reviewed it, so the running branch
+/// had never executed and this test asserted nothing anywhere.
+///
+/// The assertion style is the measured part. Neither recipe injects a prelude,
+/// and they do not offer the same environment: `import assert from
+/// "node:assert"` runs under deno and is a type error under tsc, which has no
+/// @types/node, so the same snippet passes on one machine and comes back as a
+/// compilation error on another. A bare `throw` needs nothing from either. This
+/// test uses it for that reason, and the guide tells callers the same thing.
+#[tokio::test]
+async fn a_typescript_symbol_is_evaluated_by_its_toolchain() -> Result<()> {
+    let (server, root) = polyglot_workspace()?;
+
+    let passing = eval(
+        &server,
+        "tsIsOpen",
+        "const n: number = 1 + 1;\nif (n !== 2) { throw new Error(`expected 2, got ${n}`); }",
+    )
+    .await;
+    let failing = eval(
+        &server,
+        "tsIsOpen",
+        "const n: number = 1 + 1;\nif (n !== 3) { throw new Error(`expected 3, got ${n}`); }",
+    )
+    .await;
+
+    // True with or without a toolchain, which is the assertion that matters:
+    // a snippet that was never run and one that ran and threw are both not a
+    // pass.
+    assert_ne!(
+        status(&failing),
+        "PASSED",
+        "a snippet that throws must never come back as a pass: {failing:?}"
+    );
+
+    match toolchain_for("ts") {
+        Some(program) => {
+            assert_eq!(
+                status(&passing),
+                "PASSED",
+                "{program} should have run this snippet: {passing:?}"
+            );
+            assert_eq!(engine(&passing), "tier2_native_typescript");
+            assert_eq!(
+                status(&failing),
+                "FAILED",
+                "the snippet throws and the toolchain says so: {failing:?}"
+            );
+            assert!(
+                failing
+                    .get("stderr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .contains("expected 3"),
+                "the toolchain's own output should reach the caller: {failing:?}"
+            );
+            // A pass with nothing counted reads as a pass nothing checked.
+            assert!(
+                passing
+                    .get("passed_checks_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    > 0,
+                "the documented assertion style must be counted: {passing:?}"
+            );
+        }
+        None => {
+            assert_eq!(
+                status(&passing),
+                "EVALUATOR_UNAVAILABLE",
+                "no deno and no tsc on PATH, so nothing was run: {passing:?}"
+            );
+            assert_eq!(
+                passing.get("passed_checks_count").and_then(|v| v.as_u64()),
+                Some(0)
+            );
+            assert!(
+                error_types(&passing).contains(&"EvaluatorUnavailable".to_string()),
+                "{passing:?}"
+            );
+        }
+    }
 
     std::fs::remove_dir_all(&root).ok();
     Ok(())

@@ -46,6 +46,14 @@ struct Recipe {
     /// exposes it (exit 49) instead of letting it produce a failed verdict for
     /// code that never ran.
     probe_args: &'static [&'static str],
+    /// Arguments that make `probe` print what version it is.
+    ///
+    /// Separate from `probe_args` because those are chosen to produce no output:
+    /// `python -c pass` and `node -e ""` are silent by design, which is right for
+    /// a probe and useless for a fingerprint. Reusing them gave `node=` and
+    /// `python=` in the environment key, so upgrading either would not have
+    /// invalidated a single cached verdict.
+    version_args: &'static [&'static str],
     file_name: &'static str,
     /// Built from the source path and the work directory, once both are known.
     build: Option<Step>,
@@ -99,6 +107,7 @@ static PYTHON: NativeLanguage = NativeLanguage {
         Recipe {
             probe: "python3",
             probe_args: &["-c", "pass"],
+            version_args: &["--version"],
             file_name: "axiom_eval.py",
             build: None,
             run: |src, _| ("python3".to_string(), vec![src.display().to_string()]),
@@ -106,6 +115,7 @@ static PYTHON: NativeLanguage = NativeLanguage {
         Recipe {
             probe: "python",
             probe_args: &["-c", "pass"],
+            version_args: &["--version"],
             file_name: "axiom_eval.py",
             build: None,
             run: |src, _| ("python".to_string(), vec![src.display().to_string()]),
@@ -124,6 +134,7 @@ static JAVASCRIPT: NativeLanguage = NativeLanguage {
     recipes: &[Recipe {
         probe: "node",
         probe_args: &["-e", ""],
+        version_args: &["--version"],
         file_name: "axiom_eval.js",
         build: None,
         run: |src, _| ("node".to_string(), vec![src.display().to_string()]),
@@ -133,19 +144,33 @@ static JAVASCRIPT: NativeLanguage = NativeLanguage {
 static TYPESCRIPT: NativeLanguage = NativeLanguage {
     extension: "ts",
     engine: "tier2_native_typescript",
-    assertion_tokens: &["assert", "expect("],
-    // Nothing is injected: deno and tsc-then-node disagree about how a
-    // module is reached, and a prelude that works under one breaks under
-    // the other. A TypeScript snippet brings its own assertions.
+    // `throw` is here because it is the assertion style the two recipes agree
+    // on. Without it a snippet written the documented way reports
+    // passed_checks_count 0 next to PASSED, which reads as a pass nothing
+    // checked.
+    assertion_tokens: &["assert", "expect(", "throw "],
+    // Nothing is injected, and the two recipes do not offer the same
+    // environment, so a snippet has to bring assertions that need neither an
+    // import nor an ambient type declaration.
+    //
+    // Measured rather than assumed, after #9. Under deno,
+    // `import assert from "node:assert"` works. Under tsc it is TS2591,
+    // "cannot find name", because @types/node is not installed, so the same
+    // snippet passes on one machine and comes back CompilationError on
+    // another. A bare `if (!cond) throw new Error(...)` needs nothing from
+    // either and produces the same verdict under both, which is why the guide
+    // tells a caller to write that.
     is_self_contained: |_| true,
     wrap: |s| s.to_string(),
     recipes: &[
         // Deno runs TypeScript directly and grants no permissions unless asked,
         // so a snippet reaching for the network or the filesystem fails rather
-        // than succeeding quietly.
+        // than succeeding quietly. A thrown error exits non-zero, which is what
+        // the report shape assumes; measured, not reasoned.
         Recipe {
             probe: "deno",
             probe_args: &["--version"],
+            version_args: &["--version"],
             file_name: "axiom_eval.ts",
             build: None,
             run: |src, _| {
@@ -169,6 +194,7 @@ static TYPESCRIPT: NativeLanguage = NativeLanguage {
         Recipe {
             probe: "tsc",
             probe_args: &["--version"],
+            version_args: &["--version"],
             file_name: "axiom_eval.ts",
             build: Some(|src, _| {
                 (
@@ -178,6 +204,13 @@ static TYPESCRIPT: NativeLanguage = NativeLanguage {
                         "es2020".to_string(),
                         "--module".to_string(),
                         "commonjs".to_string(),
+                        // tsc emits the .js anyway when type checking fails,
+                        // which would leave a file for the run step to execute
+                        // after the build step reported an error. The work
+                        // directory is fresh per evaluation so nothing stale
+                        // can be picked up today, but a verdict must not depend
+                        // on that staying true.
+                        "--noEmitOnError".to_string(),
                         src.display().to_string(),
                     ],
                 )
@@ -202,6 +235,7 @@ static GO: NativeLanguage = NativeLanguage {
         probe: "go",
         // `go --version` is not a thing; the subcommand is `go version`.
         probe_args: &["version"],
+        version_args: &["version"],
         file_name: "axiom_eval.go",
         build: None,
         run: |src, _| {
@@ -222,6 +256,7 @@ static JAVA: NativeLanguage = NativeLanguage {
     recipes: &[Recipe {
         probe: "javac",
         probe_args: &["-version"],
+        version_args: &["-version"],
         file_name: "AxiomEval.java",
         build: Some(|src, dir| {
             (
@@ -367,6 +402,76 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
     })
 }
 
+/// Where a program name actually lives on this machine.
+///
+/// Windows resolves a bare name through `CreateProcess`, which appends `.exe`
+/// and nothing else. npm installs its global binaries as shims: `tsc` and
+/// `deno` arrive as `tsc.cmd` and `deno.cmd`, with no `.exe` anywhere. So a
+/// toolchain the user can run from their own shell was invisible here, and the
+/// evaluator answered `EVALUATOR_UNAVAILABLE` naming a program that was
+/// installed. The refusal was safe, and it was also wrong.
+///
+/// Found while verifying #9: with both `tsc` and `deno` on PATH, the TypeScript
+/// test still took the refusal branch, which is the same way the recipe reached
+/// main unrun in the first place.
+///
+/// PATHEXT is honoured rather than hardcoded, since that is what the shell
+/// itself searches. A name that already carries a path is returned untouched.
+#[cfg(windows)]
+fn resolve_program(program: &str) -> std::ffi::OsString {
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    match std::env::var_os("PATH") {
+        Some(path) => resolve_in(program, &path, &exts),
+        None => std::ffi::OsString::from(program),
+    }
+}
+
+/// The search itself, with the environment passed in.
+///
+/// Split out so it can be tested without mutating `PATH` for the whole process,
+/// which the rest of the suite is running in at the same time.
+#[cfg(windows)]
+fn resolve_in(program: &str, path: &std::ffi::OsStr, exts: &str) -> std::ffi::OsString {
+    use std::ffi::OsString;
+
+    if program.contains('/') || program.contains('\\') {
+        return OsString::from(program);
+    }
+
+    // PATHEXT candidates come first, and the bare name only when it already
+    // carries an extension. npm drops three files for one tool: `deno.cmd`,
+    // `deno.ps1`, and an extension-less `deno` holding a POSIX shell script for
+    // Git Bash. Windows cannot execute that third one, so matching the bare
+    // name first found it, handed it to CreateProcess, and failed, which looks
+    // exactly like the tool not being installed.
+    let named_extension = std::path::Path::new(program).extension().is_some();
+    for dir in std::env::split_paths(path) {
+        for ext in exts.split(';').filter(|e| !e.is_empty()) {
+            let candidate = dir.join(format!("{program}{ext}"));
+            if candidate.is_file() {
+                return candidate.into_os_string();
+            }
+        }
+        if named_extension {
+            let bare = dir.join(program);
+            if bare.is_file() {
+                return bare.into_os_string();
+            }
+        }
+    }
+
+    // Nothing found. Hand back the bare name so the spawn fails the way it
+    // always did, rather than inventing a path that does not exist.
+    OsString::from(program)
+}
+
+/// Unix resolves a bare name through PATH itself, and an npm shim there is an
+/// executable script with a shebang, so there is nothing to add.
+#[cfg(not(windows))]
+fn resolve_program(program: &str) -> std::ffi::OsString {
+    std::ffi::OsString::from(program)
+}
+
 /// Can `probe` actually run something?
 ///
 /// The answer is cached for the life of the process. Probing costs a process
@@ -381,7 +486,7 @@ fn probe_usable(probe: &str, args: &[&str]) -> bool {
         return *known;
     }
 
-    let usable = Command::new(probe)
+    let usable = Command::new(resolve_program(probe))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -618,7 +723,7 @@ pub fn evaluate(
 
     if let Some(build) = recipe.build {
         let (program, args) = build(&src_file, &work_dir);
-        let mut cmd = Command::new(&program);
+        let mut cmd = Command::new(resolve_program(&program));
         cmd.args(&args).current_dir(&work_dir);
         match run_with_timeout(cmd, timeout) {
             Ok(done) if done.timed_out => {
@@ -662,7 +767,7 @@ pub fn evaluate(
     }
 
     let (program, args) = (recipe.run)(&src_file, &work_dir);
-    let mut cmd = Command::new(&program);
+    let mut cmd = Command::new(resolve_program(&program));
     cmd.args(&args).current_dir(&work_dir);
     let done = match run_with_timeout(cmd, timeout) {
         Ok(d) => d,
@@ -765,7 +870,7 @@ pub fn toolchain_fingerprints() -> Vec<String> {
             continue;
         };
         let version = Command::new(resolve_program(recipe.probe))
-            .args(recipe.probe_args)
+            .args(recipe.version_args)
             .stdin(Stdio::null())
             .output()
             .ok()
@@ -778,8 +883,71 @@ pub fn toolchain_fingerprints() -> Vec<String> {
                 combined.split_whitespace().collect::<Vec<_>>().join(" ")
             })
             .unwrap_or_default();
+        // An empty answer must not read as a version. A fingerprint of
+        // `node=` is one that never changes, so an upgrade would leave every
+        // cached verdict standing; saying so is the difference between a key
+        // that covers node and one that only looks like it does.
+        let version = if version.trim().is_empty() {
+            "<reported no version>".to_string()
+        } else {
+            version
+        };
         out.push(format!("{}={}", recipe.probe, version));
     }
     out.sort();
     out
+}
+
+#[cfg(all(test, windows))]
+mod resolve_tests {
+    use super::resolve_in;
+
+    /// The npm global layout, which is what broke the TypeScript recipe: three
+    /// files for one tool, and the only one Windows can execute is the `.cmd`.
+    /// Matching the extension-less POSIX shim first found a file, spawned it,
+    /// and failed, which reads as "the toolchain is not installed" for a
+    /// toolchain the user can run from their own shell.
+    #[test]
+    fn a_cmd_shim_wins_over_the_extension_less_posix_shim() {
+        let dir =
+            std::env::temp_dir().join(format!("axiom_resolve_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("deno"), "#!/bin/sh\nexec node deno.js\n").expect("posix shim");
+        std::fs::write(dir.join("deno.cmd"), "@node deno.js %*\n").expect("cmd shim");
+
+        let path = std::ffi::OsString::from(dir.display().to_string());
+        let resolved = resolve_in("deno", &path, ".COM;.EXE;.BAT;.CMD");
+
+        // Compared case-insensitively: the extension comes from PATHEXT, which
+        // is conventionally upper case, while the file on disk is lower case.
+        // Windows does not distinguish them, and the point of the assertion is
+        // which file was chosen, not how it was spelled.
+        assert_eq!(
+            resolved.to_string_lossy().to_lowercase(),
+            dir.join("deno.cmd").display().to_string().to_lowercase(),
+            "the executable shim must win over the one Windows cannot run"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Nothing on PATH means the bare name is handed back, so the spawn fails
+    /// the way it always did. Inventing a path would turn a missing toolchain
+    /// into a confusing error about a file that was never there.
+    #[test]
+    fn an_absent_program_is_returned_unchanged() {
+        let dir =
+            std::env::temp_dir().join(format!("axiom_resolve_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let path = std::ffi::OsString::from(dir.display().to_string());
+        let resolved = resolve_in("definitely_not_installed", &path, ".COM;.EXE;.BAT;.CMD");
+
+        assert_eq!(
+            resolved,
+            std::ffi::OsString::from("definitely_not_installed")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

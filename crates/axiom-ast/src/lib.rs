@@ -2518,16 +2518,20 @@ impl AstIndex {
         // key at once rather than only the keys of tests that happen to import
         // something.
         hasher.update(environment.as_str().as_bytes());
-        hasher.update(b"
-");
+        hasher.update(
+            b"
+",
+        );
 
         // Which out-of-tree names the test reaches is itself an input: adding an
         // import changes what the test does even when nothing inside the tree
         // moved. What is *behind* those names is the environment key's job.
         for name in &closure.outside {
             hasher.update(name.as_bytes());
-            hasher.update(b"
-");
+            hasher.update(
+                b"
+",
+            );
         }
 
         for symbol in &closure.reachable {
