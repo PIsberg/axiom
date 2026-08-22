@@ -32,6 +32,18 @@ jobs:
       - name: Install a TypeScript toolchain
         run: npm install -g typescript
 
+      # Kotlin and Scala for the same reason. Without them the JVM cases assert
+      # the refusal branch and say nothing about the recipes, which is how the
+      # TypeScript one reached main unrun (#9). Both are JDK-based and the JDK
+      # is already on the runners.
+      - name: Install a Kotlin toolchain
+        uses: fwilhe2/setup-kotlin@main
+
+      - name: Install a Scala toolchain
+        uses: coursier/setup-action@v1
+        with:
+          apps: scala scalac
+
       - name: Test
         run: cargo test --release --all-targets
 

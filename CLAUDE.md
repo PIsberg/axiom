@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 79 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 82 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -171,6 +171,30 @@ searches PATHEXT. The order matters: npm drops `deno.cmd`, `deno.ps1` and an
 extension-less `deno` holding a POSIX shell script, and matching the bare name first
 finds the one Windows cannot execute. PATHEXT candidates win, and the bare name is only
 considered when it already carries an extension.
+
+**Kotlin shares Java's assertion trap; Scala does not, and the difference is per language.**
+Kotlin's `assert` compiles to a check of the JVM's assertion status, exactly as Java's
+does, so without `-J-ea` a false assertion is a no-op and the snippet exits zero.
+Measured: `assert(1 + 1 == 3)` printed the line after it and returned success until the
+flag was passed. Scala's `assert` is `Predef.assert`, which throws unconditionally, so
+no flag is needed and none is passed. A recipe copied from Java to Scala would carry a
+flag that does nothing; one copied the other way would lose a flag that decides whether
+a false assertion reports `PASSED`. Ask the question per language and answer it by
+running it.
+
+**The Java parser reads Kotlin and Scala at class granularity only, and `object` had to
+be taught.** `parse_java_content` matched `class`, `interface`, `enum` and `record`, so
+a Scala file declaring `object ScalaGate` indexed *nothing at all* and its evaluator
+could not be reached through any symbol. `object` and `trait` are now recognised, gated
+on the file extension so Java cannot regress: loosening a match here has form. Methods
+are still not indexed for either language, `fun` and `def` match no Java signature
+shape, so a Kotlin or Scala symbol is a type and never a method.
+
+**`LANGUAGES` in axiom-vmm and `parse_by_language` in axiom-ast are twins.** One decides
+what is indexed, the other what can be run, they live in different crates, and nothing
+made them agree; Kotlin and Scala sat on the first list and not the second for as long
+as the tier existed. `every_indexed_language_has_an_evaluator` now fails when they
+diverge. Rust is the deliberate exception: it belongs to tier 1.
 
 **A TypeScript snippet cannot assume Node's type declarations.** `import assert from
 "node:assert"` runs under deno and is TS2591 under `tsc`, which has no `@types/node`,
