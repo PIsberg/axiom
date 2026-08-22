@@ -742,3 +742,44 @@ pub fn evaluate(
         detail,
     )
 }
+
+/// A version string for every toolchain this tier can currently drive.
+///
+/// Feeds `EnvironmentKey`, which is what makes it safe for a closure to treat an
+/// out-of-tree name as covered rather than as a gap. `anyhow::Result` does not
+/// resolve to an indexed symbol and never will, and what it means is fixed by
+/// the compiler and the lock file; if either moves, every cached verdict has to
+/// go with it.
+///
+/// A toolchain that is not installed contributes nothing rather than an empty
+/// string, so installing one changes the key and invalidates verdicts reached
+/// without it. That is the right way round: a snippet that was refused for want
+/// of a compiler must not stay refused once the compiler arrives.
+///
+/// The probe is the same cached one the evaluator uses, so this costs at most
+/// one process spawn per language per process.
+pub fn toolchain_fingerprints() -> Vec<String> {
+    let mut out = Vec::new();
+    for language in LANGUAGES {
+        let Some(recipe) = pick_recipe(language) else {
+            continue;
+        };
+        let version = Command::new(resolve_program(recipe.probe))
+            .args(recipe.probe_args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|o| {
+                // Some report on stdout, some on stderr, and javac has moved
+                // between the two across releases. Both are hashed rather than
+                // picking one and getting an empty string on the wrong version.
+                let mut combined = String::from_utf8_lossy(&o.stdout).into_owned();
+                combined.push_str(&String::from_utf8_lossy(&o.stderr));
+                combined.split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .unwrap_or_default();
+        out.push(format!("{}={}", recipe.probe, version));
+    }
+    out.sort();
+    out
+}

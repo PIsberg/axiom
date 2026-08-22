@@ -262,8 +262,11 @@ async fn main() -> Result<()> {
             println!(
                 "Auditing a verdict cache over '{path}' (nothing is cached, nothing is skipped)..."
             );
+            let root = std::path::Path::new(&path);
             let index = axiom_ast::AstIndex::new();
-            let summary = index.scan_directory(std::path::Path::new(&path))?;
+            let summary = index.scan_directory(root)?;
+            let environment =
+                axiom_ast::EnvironmentKey::of(root, &axiom_vmm::native::toolchain_fingerprints());
             let audit = index.audit_cache(depth, 5);
 
             println!();
@@ -275,6 +278,16 @@ async fn main() -> Result<()> {
                 audit.tests_with_complete_closure, audit.tests_in_index
             );
             println!(" Symbols audited:            {}", audit.symbols_audited);
+            println!();
+            if environment.covers_nothing() {
+                println!(" Environment key:            covers nothing found under this path");
+                println!("   No lock file, manifest or toolchain was found, so out-of-tree names");
+                println!("   are folded into a key that pins none of them. Treat any result");
+                println!("   below as saying nothing about a dependency upgrade.");
+            } else {
+                println!(" Environment key:            {}", environment.as_str());
+                println!("   Covering: {}", environment.inputs.join(", "));
+            }
             println!();
             println!(" Both mechanisms agree:      {}", audit.agreements);
             println!(
@@ -290,14 +303,22 @@ async fn main() -> Result<()> {
                 None => println!(" Agreement:                  no decisions to make"),
             }
 
-            if !audit.top_unresolved.is_empty() {
+            if !audit.top_ambiguous.is_empty() {
                 println!();
-                println!(" Dependency names that did not resolve to an indexed symbol:");
-                for (name, count) in &audit.top_unresolved {
+                println!(" Names this tree defines more than once, so no edge was taken:");
+                for (name, count) in &audit.top_ambiguous {
                     println!("   {count:>4}x  {name}");
                 }
-                println!("   A name from a crate outside this tree is not a missing edge. It is");
-                println!("   still an input the key does not cover, so it still forces a miss.");
+                println!("   These are the gaps. Something here satisfies them and the graph");
+                println!("   cannot say what, so nothing covers a change behind them.");
+            }
+
+            if !audit.top_outside.is_empty() {
+                println!();
+                println!(" Names from outside this tree, covered by the environment key:");
+                for (name, count) in &audit.top_outside {
+                    println!("   {count:>4}x  {name}");
+                }
             }
 
             if !audit.wrongly_skipped_examples.is_empty() {
