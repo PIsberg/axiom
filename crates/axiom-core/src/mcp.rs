@@ -29,6 +29,60 @@ pub struct JsonRpcResponse {
 }
 
 /// Where issued attestations are recorded, beside the index they describe.
+/// What a record says when nobody named themselves.
+///
+/// Not a plausible-looking agent name. The field used to be the constant
+/// `agent_axiom_v1`, which read as the claimed author sitting next to
+/// `public_key` when it was the same on every record ever issued. An absent
+/// answer has to look absent.
+pub const UNATTRIBUTED: &str = "unattributed";
+
+/// Longest identity accepted. The value is printed by `axiom verify`, stored in
+/// the ledger and hashed into the seal, so it is bounded where it enters rather
+/// than truncated at each of those.
+const MAX_AGENT_IDENTITY: usize = 128;
+
+/// The identity a caller asked to be recorded as, or an error naming the field.
+///
+/// Self-declared and unverified: axiom stores what it is told. That is honest
+/// only while the value cannot claim more than it is. `axiom verify` prints the
+/// record as a column of labelled lines, so an identity carrying a newline could
+/// add lines of its own and show `Checked by: sandbox` above a record whose
+/// `verified_by` says `reported`. Control characters are refused for that
+/// reason, not for tidiness.
+///
+/// A present-but-not-a-string value is refused rather than read as absent:
+/// silently substituting the default is the failure #11 was about, in a
+/// different place.
+fn agent_identity_of(args: &Value) -> Result<String, String> {
+    let raw = match args.get("agent_identity") {
+        None | Some(Value::Null) => return Ok(UNATTRIBUTED.to_string()),
+        Some(Value::String(s)) => s,
+        Some(other) => {
+            return Err(format!(
+                "agent_identity must be a string, got {other}. Omit it to record the change as {UNATTRIBUTED}."
+            ))
+        }
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(UNATTRIBUTED.to_string());
+    }
+    if let Some(bad) = trimmed.chars().find(|c| c.is_control()) {
+        return Err(format!(
+            "agent_identity must be printable single-line text; it is shown as one line by `axiom verify`, and {bad:?} would let a record add lines of its own"
+        ));
+    }
+    if trimmed.chars().count() > MAX_AGENT_IDENTITY {
+        return Err(format!(
+            "agent_identity is limited to {MAX_AGENT_IDENTITY} characters, got {}",
+            trimmed.chars().count()
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 pub fn attestation_ledger_path() -> PathBuf {
     PathBuf::from(".axiom").join("attestations.json")
 }
@@ -426,7 +480,8 @@ impl AxiomMcpServer {
                                 "properties": {
                                     "prompt": { "type": "string" },
                                     "symbol_path": { "type": "string" },
-                                    "ctop_task_id": { "type": "string" }
+                                    "ctop_task_id": { "type": "string" },
+                                    "agent_identity": { "type": "string", "description": "What to record as the author. Self-declared: axiom stores what you send and does not check it. It is covered by the seal, so it cannot be edited afterwards, and by the signature when a key is configured, which is what ties it to an issuer. Omit it and the record reads 'unattributed' rather than naming an agent nothing established. Printable single-line text, at most 128 characters." }
                                 },
                                 "required": ["prompt", "symbol_path"]
                             }
@@ -640,6 +695,10 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let agent_identity = match agent_identity_of(&args) {
+                    Ok(i) => i,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
                 let task_id = match args.get("ctop_task_id").and_then(|v| v.as_str()) {
                     Some(t) if !t.is_empty() => t,
                     _ => {
@@ -691,7 +750,7 @@ impl AxiomMcpServer {
                 let attestation = ProvenanceAttestation::generate(NewAttestation {
                     parent_merkle_root: "merkle_root_prev_77a1",
                     commit_merkle_root: &commit_root,
-                    agent_identity: "agent_axiom_v1",
+                    agent_identity: &agent_identity,
                     prompt,
                     symbol_path: symbol,
                     ctop_task_id: task_id,

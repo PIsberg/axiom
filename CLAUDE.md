@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 82 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 91 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -251,6 +251,16 @@ incomplete closure must produce no key at all, because a cache that keys on a pa
 view skips a test whose real dependency moved and reports a pass for code that never
 ran. Full reasoning in `docs/verdict_cache_audit.md`. Re-run the audit before quoting
 any of these numbers; they move with the graph.
+
+**A caller-supplied field that is printed is an injection surface.**
+`agent_identity` reaches `axiom_attest_commit` from the caller and is rendered by
+`axiom verify` as one of a column of labelled lines. A value carrying a newline could
+add lines of its own, showing `Checked by: sandbox` above a record whose `verified_by`
+says `reported`. `agent_identity_of` in `mcp.rs` refuses control characters and bounds
+the length where the value enters, rather than escaping it at each place it is shown.
+The same reasoning applies to any future field that is both caller-set and displayed.
+Note also what makes storing an unverified name acceptable at all: it is hashed into
+the seal and covered by the signature, so it cannot be edited afterwards.
 
 **Persistence failures must stay loud.** `save_to_disk` returns the path it wrote and verifies the
 file exists, and callers propagate the error instead of discarding it. When these were `let _ = ...`

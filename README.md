@@ -276,6 +276,20 @@ Axiom did not run this check. The outcome above was reported by
 the agent that asked for the record.
 ```
 
+### Who issued it
+
+`agent_identity` is what the caller asked to be recorded as. Axiom stores it
+without checking it, so by itself it is a claim rather than an answer. It used to
+be the constant `agent_axiom_v1` on every record, which read as an author when it
+identified nobody, and a caller that supplied a value had it silently dropped.
+
+It is now taken as an argument, and it is hashed into the seal and covered by the
+signature. That is what makes it worth having: it cannot be edited after the
+record is written, and on a signed record it is bound to the key that issued it.
+`axiom verify` prints it and says which of those cases applies, so an unsigned
+name is never shown as though something had established it. A record whose caller
+named nobody reads `unattributed`.
+
 Read a record back with:
 
 ```bash

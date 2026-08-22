@@ -889,6 +889,7 @@ async fn main() -> Result<()> {
 
             println!("✅ ATTESTATION VALID");
             println!("   Symbol:        {}", chosen.symbol_path);
+            println!("   Agent:         {}", chosen.agent_identity);
             println!(
                 "   Checked by:    {} ({})",
                 chosen.verified_by, chosen.verification_detail
@@ -912,11 +913,18 @@ async fn main() -> Result<()> {
                 println!("   shows only that the record is unaltered, not who issued it. Anyone");
                 println!("   able to write the ledger could have added it. Run `axiom keygen`,");
                 println!("   set AXIOM_SIGNING_KEY_FILE, and verify with --trusted-key.");
+                println!("   The agent name above is self-declared and carries no signature, so");
+                println!("   it is a claim rather than an answer to who wrote this.");
             } else if expected.is_none() {
                 println!();
                 println!("   The signature matches the key inside the record, which shows the two");
                 println!("   agree and nothing more. Pass --trusted-key to require a signer you");
-                println!("   already know.");
+                println!("   already know. The agent name above is covered by that signature, so");
+                println!("   it is bound to whichever key issued the record, named or not.");
+            } else {
+                println!();
+                println!("   The agent name above is covered by the signature, so it was set by");
+                println!("   the holder of the key you named and has not been edited since.");
             }
 
             match &chain {
