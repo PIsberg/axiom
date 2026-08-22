@@ -427,6 +427,17 @@ impl AstIndex {
         None
     }
 
+    /// Every symbol path in the index, sorted.
+    ///
+    /// Exposed for tests that assert a property of the whole index rather than
+    /// of one lookup, such as "no symbol name carries a file path", which is a
+    /// regression this parser has produced before.
+    pub fn symbol_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.nodes.read().unwrap().keys().cloned().collect();
+        out.sort();
+        out
+    }
+
     /// Every symbol an ambiguous name could have meant, sorted so a caller can
     /// show a stable list rather than an arbitrary one.
     pub fn candidates_for(&self, symbol_path: &str) -> Vec<String> {
@@ -1262,6 +1273,28 @@ impl AstIndex {
         }
     }
 
+    /// Does this line declare a Kotlin `fun` or a Scala `def`?
+    ///
+    /// Checked against the tokens before the parameter list rather than against
+    /// the whole line, so `foo(fun_arg)` and a string mentioning `def` do not
+    /// match. Modifiers are allowed before it: `private`, `override`, `suspend`,
+    /// `inline`, `@main` and the rest all sit to the left of the keyword.
+    ///
+    /// Expression bodies are the reason this cannot simply look for a brace.
+    /// `fun isOpen(depth: Int): Boolean = depth > 0` opens none, and it is the
+    /// commonest shape in both languages.
+    fn declares_fun_or_def(trimmed: &str) -> bool {
+        if !trimmed.contains('(') {
+            return false;
+        }
+        trimmed
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .any(|t| t == "fun" || t == "def")
+    }
+
     fn is_test_path_or_file(file_path: &str) -> bool {
         let normalized = file_path.replace('\\', "/");
         let file_name = normalized.split('/').next_back().unwrap_or("");
@@ -1440,6 +1473,22 @@ impl AstIndex {
                 .and_then(|e| e.to_str()),
             Some("scala") | Some("sc") | Some("kt") | Some("kts")
         );
+        // Kotlin and Scala allow a definition with no enclosing type. Java does
+        // not, so the existing path simply skips anything with an empty
+        // `enclosing_class`, and every top-level `fun` and `def` went unindexed.
+        //
+        // The file stem stands in as the owner, which is close to what Kotlin
+        // does itself: a top-level `fun` in Gate.kt compiles into `GateKt`. It
+        // is validated as an identifier first, because the failure this parser
+        // has actually had is writing a machine-absolute path into a symbol
+        // name when the owner was empty.
+        let file_stem = std::path::Path::new(file_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| Self::is_valid_identifier(s))
+            .unwrap_or("")
+            .to_string();
+
         let type_keywords: &[&str] = if scala_or_kotlin {
             &["class", "interface", "enum", "record", "object", "trait"]
         } else {
@@ -1589,7 +1638,8 @@ impl AstIndex {
                         }
                     }
                 }
-            } else if (trimmed.starts_with("public ")
+            } else if ((scala_or_kotlin && Self::declares_fun_or_def(trimmed))
+                || trimmed.starts_with("public ")
                 || trimmed.starts_with("private ")
                 || trimmed.starts_with("protected ")
                 || trimmed.starts_with("static ")
@@ -1616,6 +1666,8 @@ impl AstIndex {
                 let is_annotated_test = full_sig.contains("@Test")
                     || (i > 0 && lines[i - 1].trim().starts_with("@Test"));
 
+                // A wrapped parameter list once dropped a method entirely, so
+                // the signature is joined until the list closes.
                 while !full_sig.contains(')') && i + 1 < lines.len() {
                     i += 1;
                     full_sig.push(' ');
@@ -1639,7 +1691,15 @@ impl AstIndex {
                     .unwrap_or("")
                     .trim();
 
-                let enclosing_class = class_stack.last().map(|(c, _)| c.as_str()).unwrap_or("");
+                let enclosing_class = match class_stack.last().map(|(c, _)| c.as_str()) {
+                    Some(class) => class,
+                    // Only Kotlin and Scala reach the fallback: for Java an
+                    // empty owner still means the line was not a method, and
+                    // inventing one would resurrect the symbols this parser used
+                    // to produce from `new Foo(...)` and `catch` clauses.
+                    None if scala_or_kotlin => file_stem.as_str(),
+                    None => "",
+                };
                 let is_valid_name = Self::is_valid_identifier(method_name)
                     && !Self::is_java_keyword(method_name)
                     && (method_name

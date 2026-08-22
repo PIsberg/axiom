@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 91 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 98 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -205,13 +205,24 @@ silently did nothing runs no recipe and reports success.
 the languages that had none. Unset locally, because a developer without kotlinc should
 not get a red suite.
 
-**The Java parser reads Kotlin and Scala at class granularity only, and `object` had to
-be taught.** `parse_java_content` matched `class`, `interface`, `enum` and `record`, so
-a Scala file declaring `object ScalaGate` indexed *nothing at all* and its evaluator
-could not be reached through any symbol. `object` and `trait` are now recognised, gated
-on the file extension so Java cannot regress: loosening a match here has form. Methods
-are still not indexed for either language, `fun` and `def` match no Java signature
-shape, so a Kotlin or Scala symbol is a type and never a method.
+**The Java parser reads three languages, and everything it was taught for the other two
+is gated on the file extension.** It matched only Java's shapes, so `object ScalaGate`
+indexed nothing at all and a `fun` or `def` was never a symbol: a Kotlin or Scala symbol
+was always a type. `object` and `trait` are now type keywords and `fun`/`def` declare
+methods, but only for `.kt`, `.kts`, `.scala` and `.sc`. Java never sees the extra
+keywords, which matters because `fun` and `def` are ordinary identifiers there and
+loosening a match in this parser has form.
+
+`declares_fun_or_def` looks at the tokens before the parameter list rather than at the
+whole line, so `foo(fun_arg)` does not match, and it cannot key on a brace because the
+commonest shape in both languages has none: `fun isOpen(depth: Int): Boolean = depth > 0`.
+A definition with no enclosing type, which Java cannot have, is owned by the file stem,
+close to what Kotlin does itself in compiling a top-level `fun` in Gate.kt into `GateKt`.
+The stem is validated as an identifier first: an empty owner is exactly the condition
+under which this parser once wrote machine-absolute paths into symbol names.
+`crates/axiom-ast/tests/jvm_symbols.rs` pins all of that, and pins the four failure
+modes alongside it, comment-declared ghosts, call sites, `catch` clauses and paths in
+symbol names, because each is a way this change could have gone wrong.
 
 **`LANGUAGES` in axiom-vmm and `parse_by_language` in axiom-ast are twins.** One decides
 what is indexed, the other what can be run, they live in different crates, and nothing
