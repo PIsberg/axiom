@@ -1420,6 +1420,31 @@ impl AstIndex {
 
     fn parse_java_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let is_test_file = Self::is_test_path_or_file(file_path);
+
+        // This parser reads Java, Kotlin and Scala. `object` and `trait` declare
+        // a type in the last two and nothing in Java, so they are recognised
+        // only for the extensions that have them.
+        //
+        // Gated on the extension rather than added to the list for everyone,
+        // because loosening a match here has form: a javadoc mention once
+        // hijacked an enclosing class name, and `new Foo(...)` was once indexed
+        // as a method. Java's behaviour cannot change if Java never sees the
+        // extra keywords.
+        //
+        // Without this a Scala file indexed nothing at all: `object ScalaGate`
+        // matched no type keyword, so no symbol existed to ask about and the
+        // Scala evaluator could not be reached through one.
+        let scala_or_kotlin = matches!(
+            std::path::Path::new(file_path)
+                .extension()
+                .and_then(|e| e.to_str()),
+            Some("scala") | Some("sc") | Some("kt") | Some("kts")
+        );
+        let type_keywords: &[&str] = if scala_or_kotlin {
+            &["class", "interface", "enum", "record", "object", "trait"]
+        } else {
+            &["class", "interface", "enum", "record"]
+        };
         let mut imports = Vec::new();
         let mut class_stack: Vec<(String, usize)> = Vec::new(); // (class_name, open_brace_depth)
         let mut current_brace_depth: usize = 0;
@@ -1499,27 +1524,22 @@ impl AstIndex {
                     .trim()
                     .to_string();
                 imports.push(imp);
-            } else if (trimmed.contains("class ")
-                || trimmed.contains("interface ")
-                || trimmed.contains("enum ")
-                || trimmed.contains("record "))
+            } else if type_keywords
+                .iter()
+                .any(|k| trimmed.contains(&format!("{k} ")))
                 && (trimmed.starts_with("public ")
                     || trimmed.starts_with("private ")
                     || trimmed.starts_with("protected ")
                     || trimmed.starts_with("abstract ")
                     || trimmed.starts_with("final ")
                     || trimmed.starts_with("static ")
-                    || trimmed.starts_with("class ")
-                    || trimmed.starts_with("interface ")
-                    || trimmed.starts_with("enum ")
-                    || trimmed.starts_with("record ")
-                    || trimmed.starts_with("@interface "))
+                    || trimmed.starts_with("@interface ")
+                    || type_keywords
+                        .iter()
+                        .any(|k| trimmed.starts_with(&format!("{k} "))))
             {
                 let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-                if let Some(pos) = tokens
-                    .iter()
-                    .position(|&t| t == "class" || t == "interface" || t == "enum" || t == "record")
-                {
+                if let Some(pos) = tokens.iter().position(|t| type_keywords.contains(t)) {
                     if pos + 1 < tokens.len() {
                         let raw_name = tokens[pos + 1]
                             .split('<')

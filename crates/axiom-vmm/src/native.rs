@@ -89,6 +89,28 @@ fn go_wrap(snippet: &str) -> String {
     format!("package main\n\nfunc main() {{\n{snippet}\n}}\n")
 }
 
+fn kotlin_wrap(snippet: &str) -> String {
+    // A top-level main, so the compiled class is AxiomEvalKt and the launcher
+    // has something to call.
+    format!(
+        "fun main() {{
+{snippet}
+}}
+"
+    )
+}
+
+fn scala_wrap(snippet: &str) -> String {
+    format!(
+        "object AxiomEval {{
+  def main(args: Array[String]): Unit = {{
+{snippet}
+  }}
+}}
+"
+    )
+}
+
 fn java_wrap(snippet: &str) -> String {
     format!(
         "public class AxiomEval {{\n    public static void main(String[] args) throws Exception {{\n{snippet}\n    }}\n}}\n"
@@ -284,17 +306,97 @@ static JAVA: NativeLanguage = NativeLanguage {
     }],
 };
 
-static LANGUAGES: &[&NativeLanguage] = &[&PYTHON, &JAVASCRIPT, &TYPESCRIPT, &GO, &JAVA];
+static KOTLIN: NativeLanguage = NativeLanguage {
+    extension: "kt",
+    engine: "tier2_native_kotlin",
+    // `check` and `require` throw whatever the JVM's assertion flag says, unlike
+    // `assert`, so they count too.
+    assertion_tokens: &["assert", "check(", "require("],
+    is_self_contained: |s| s.contains("fun main("),
+    wrap: kotlin_wrap,
+    recipes: &[Recipe {
+        probe: "kotlinc",
+        probe_args: &["-version"],
+        version_args: &["-version"],
+        file_name: "AxiomEval.kt",
+        build: Some(|src, dir| {
+            (
+                "kotlinc".to_string(),
+                vec![
+                    src.display().to_string(),
+                    "-d".to_string(),
+                    dir.display().to_string(),
+                ],
+            )
+        }),
+        // Kotlin's `assert` compiles to a check of the JVM's assertion status
+        // for the enclosing class, exactly as Java's does, so without -ea a
+        // false assertion is a no-op and the snippet exits zero. Measured, not
+        // assumed: `assert(1 + 1 == 3)` printed the line after it and returned
+        // success until -J-ea was passed. The run goes through the `kotlin`
+        // launcher rather than `java` because the launcher knows where the
+        // Kotlin standard library lives, and that path is per-installation.
+        //
+        // A top-level `fun main` in AxiomEval.kt compiles to `AxiomEvalKt`.
+        run: |_, dir| {
+            (
+                "kotlin".to_string(),
+                vec![
+                    "-J-ea".to_string(),
+                    "-cp".to_string(),
+                    dir.display().to_string(),
+                    "AxiomEvalKt".to_string(),
+                ],
+            )
+        },
+    }],
+};
+
+static SCALA: NativeLanguage = NativeLanguage {
+    extension: "scala",
+    engine: "tier2_native_scala",
+    assertion_tokens: &["assert", "require("],
+    is_self_contained: |s| s.contains("def main(") || s.contains("@main"),
+    wrap: scala_wrap,
+    recipes: &[Recipe {
+        probe: "scala",
+        probe_args: &["version"],
+        version_args: &["version"],
+        file_name: "AxiomEval.scala",
+        // No build step: the Scala 3 runner compiles and runs in one command.
+        build: None,
+        // No -ea either, and that difference is the point. Scala's `assert` is
+        // `Predef.assert`, which throws unconditionally rather than compiling to
+        // a JVM assertion check, so a false assertion fails whatever the flag
+        // says. Measured the same way Kotlin's was.
+        run: |src, _| ("scala".to_string(), vec![src.display().to_string()]),
+    }],
+};
+
+static LANGUAGES: &[&NativeLanguage] = &[
+    &PYTHON,
+    &JAVASCRIPT,
+    &TYPESCRIPT,
+    &GO,
+    &JAVA,
+    &KOTLIN,
+    &SCALA,
+];
 
 /// The driver for a file extension, if this tier has one.
 ///
-/// `mjs`, `cjs` and `jsx` are Node's; `tsx` is TypeScript's. Kotlin and Scala
-/// are indexed by the Java parser but have no recipe here, so they stay an
-/// honest `UnsupportedLanguage` instead of being handed to `javac`.
+/// `mjs`, `cjs` and `jsx` are Node's; `tsx` is TypeScript's; `kts` is a Kotlin
+/// script, which the same compiler reads.
+///
+/// Kotlin and Scala are indexed by the Java parser and now have recipes of their
+/// own. They are not handed to `javac`: neither compiles as Java, and the error
+/// would be filed against the snippet rather than against the language.
 pub fn language_for(extension: &str) -> Option<&'static NativeLanguage> {
     let normalised = match extension {
         "mjs" | "cjs" | "jsx" => "js",
         "tsx" => "ts",
+        "kts" => "kt",
+        "sc" => "scala",
         other => other,
     };
     LANGUAGES
@@ -846,6 +948,14 @@ pub fn evaluate(
         done.stdout,
         detail,
     )
+}
+
+/// Every language this tier knows how to drive.
+///
+/// Exposed so a test can ask whether each one is actually runnable here, rather
+/// than each test discovering that for itself and quietly asserting nothing.
+pub fn languages() -> &'static [&'static NativeLanguage] {
+    LANGUAGES
 }
 
 /// A version string for every toolchain this tier can currently drive.
