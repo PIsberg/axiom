@@ -282,9 +282,7 @@ async fn main() -> Result<()> {
             );
             if tests.is_empty() {
                 println!();
-                println!("  Nothing depends on this symbol as far as the index can tell.");
-                println!("  That is not the same as nothing being affected: run the suite if the");
-                println!("  change matters.");
+                println!("  No test reaches this symbol within depth {depth}.");
             } else {
                 println!();
                 for t in tests.iter().take(40) {
@@ -293,6 +291,43 @@ async fn main() -> Result<()> {
                 if tests.len() > 40 {
                     println!("  ... and {} more", tests.len() - 40);
                 }
+            }
+
+            // The deeper layers are computed whether or not they are reported,
+            // and a caller left to guess at them cannot decide whether widening
+            // is worth it. Showing the count, not the names, keeps the answer
+            // to the question that was asked while saying what the next one
+            // would cost.
+            let deeper: Vec<(u64, usize)> = radius["tests_by_depth"]
+                .as_object()
+                .map(|layers| {
+                    let mut rows: Vec<(u64, usize)> = layers
+                        .iter()
+                        .filter_map(|(d, v)| {
+                            let d: u64 = d.parse().ok()?;
+                            Some((d, v.as_array()?.len()))
+                        })
+                        .filter(|(d, n)| *d > depth as u64 && *n > 0)
+                        .collect();
+                    rows.sort();
+                    rows
+                })
+                .unwrap_or_default();
+
+            if !deeper.is_empty() {
+                println!();
+                for (d, n) in &deeper {
+                    println!("  {n} more test(s) reach it at depth {d}, not counted above");
+                }
+                let widest = deeper.last().map(|(d, _)| *d).unwrap_or(depth as u64);
+                println!("  Use --depth {widest} to include them.");
+            }
+
+            if tests.is_empty() && deeper.is_empty() {
+                println!();
+                println!("  Nothing depends on this symbol as far as the index can tell.");
+                println!("  That is not the same as nothing being affected: run the suite if the");
+                println!("  change matters.");
             }
         }
 
