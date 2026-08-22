@@ -105,7 +105,7 @@ fn polyglot_workspace() -> Result<(AxiomMcpServer, PathBuf)> {
     )?;
     std::fs::write(
         root.join("Gate.kt"),
-        "class KotlinGate {\n    fun isOpen(depth: Int): Boolean = depth > 0\n}\n",
+        "class KotlinGate {\n    fun isOpen(depth: Int): Boolean = depth > 0\n    fun kotlinGateDepth(): Int = 3\n}\n",
     )?;
     std::fs::write(
         root.join("Gate.scala"),
@@ -521,6 +521,43 @@ async fn a_typescript_symbol_is_evaluated_by_its_toolchain() -> Result<()> {
                 error_types(&passing).contains(&"EvaluatorUnavailable".to_string()),
                 "{passing:?}"
             );
+        }
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+/// A JVM-language method can be named, which #21 was about.
+///
+/// The Java parser recognised only Java's signature shapes, so a Kotlin `fun`
+/// and a Scala `def` were never indexed. A symbol in either language was always
+/// a type, and a caller wanting to check a hypothesis about one method had to
+/// name the class that contained it. This asserts the language still follows
+/// from the symbol when that symbol is a method.
+#[tokio::test]
+async fn a_kotlin_method_can_be_named_and_is_evaluated_as_kotlin() -> Result<()> {
+    let (server, root) = polyglot_workspace()?;
+
+    let failing = eval(&server, "kotlinGateDepth", "assert(1 + 1 == 3)").await;
+
+    assert_ne!(
+        status(&failing),
+        "PASSED",
+        "a false assertion must never come back as a pass: {failing:?}"
+    );
+
+    match toolchain_for("kt") {
+        Some(_) => {
+            assert_eq!(
+                engine(&failing),
+                "tier2_native_kotlin",
+                "the method's language must decide the tier, not its spelling: {failing:?}"
+            );
+            assert_eq!(status(&failing), "FAILED", "{failing:?}");
+        }
+        None => {
+            assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
         }
     }
 
