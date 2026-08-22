@@ -950,6 +950,14 @@ pub fn evaluate(
     )
 }
 
+/// Every language this tier knows how to drive.
+///
+/// Exposed so a test can ask whether each one is actually runnable here, rather
+/// than each test discovering that for itself and quietly asserting nothing.
+pub fn languages() -> &'static [&'static NativeLanguage] {
+    LANGUAGES
+}
+
 /// A version string for every toolchain this tier can currently drive.
 ///
 /// Feeds `EnvironmentKey`, which is what makes it safe for a closure to treat an

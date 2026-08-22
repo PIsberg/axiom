@@ -7,6 +7,19 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # A cold JVM toolchain fetches its compiler on first use. Measured on a fresh
+  # runner: the first Scala evaluation spent 187s downloading and was correctly
+  # killed at the 30s default and reported as TIMEOUT. Raising it here lets the
+  # tests measure the recipe rather than the download.
+  #
+  # This does not weaken the deadline guard: eval_deadline.rs passes its own
+  # two-second deadline to native::evaluate and never reads this variable.
+  AXIOM_EVAL_TIMEOUT_SECS: "300"
+  # Turns a vacuously green run red. The evaluator tests assert the refusal
+  # branch when a toolchain is missing, so a runner that failed to install one
+  # passes every test without running any of them, which is how the TypeScript
+  # recipe reached main unrun (#9).
+  AXIOM_REQUIRE_TOOLCHAINS: "1"
 
 jobs:
   test:
@@ -43,23 +56,6 @@ jobs:
         uses: coursier/setup-action@v1
         with:
           apps: scala scalac
-
-      # Both launchers fetch their compiler on first use, and the evaluator
-      # bounds every command at AXIOM_EVAL_TIMEOUT_SECS, 30s by default. On a
-      # cold runner the first Scala evaluation spent 187s downloading and was
-      # correctly killed and reported as TIMEOUT, which passes no judgement on
-      # the snippet and fails the test. Paying that cost here means the tests
-      # measure the recipe rather than the download.
-      - name: Warm the JVM toolchains
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$(mktemp -d)"
-          echo 'object Warm { def main(args: Array[String]): Unit = println("warm") }' > Warm.scala
-          scala Warm.scala
-          echo 'fun main() { println("warm") }' > Warm.kt
-          kotlinc Warm.kt -d warmout
-          kotlin -cp warmout WarmKt
 
       - name: Test
         run: cargo test --release --all-targets
