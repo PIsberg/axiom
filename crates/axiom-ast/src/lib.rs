@@ -1,6 +1,6 @@
 use axiom_proto::AstNode;
 use regex::Regex;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -2318,14 +2318,26 @@ pub struct ForwardClosure {
     /// Indexed symbols reachable from `symbol`, including itself. Sorted, so the
     /// hash over them does not depend on traversal order.
     pub reachable: Vec<String>,
-    /// Names that several indexed symbols answer to, so none was chosen.
+    /// Names several indexed symbols answer to, with how many, where every
+    /// candidate was taken rather than one of them chosen.
     ///
-    /// This is the kind of unresolved name that blocks a key. Something in this
-    /// tree satisfies the dependency and the graph cannot say which, so a change
-    /// to it would not disturb the hash, and a cache keyed on that hash would
-    /// skip a test that should have run. Guessing an edge here is worse than
-    /// refusing: the wrong guess produces a key that looks complete.
-    pub ambiguous: Vec<String>,
+    /// The direction of the guess is what matters, and it runs opposite to the
+    /// blast radius. There, a wrong extra edge costs one unnecessary test run.
+    /// Here, a missing edge means a test is skipped on the strength of a key
+    /// that did not cover the thing that changed, and a stale pass is reported
+    /// for code that never ran.
+    ///
+    /// So an ambiguous name is over-approximated: the closure depends on every
+    /// symbol that could answer to it. The real target is among them whenever it
+    /// is in the index at all, so nothing is missed. What it costs is precision,
+    /// and that cost is recorded here rather than hidden: editing any same-named
+    /// symbol invalidates the key, and these counts say how much of the tree
+    /// each name drags in.
+    ///
+    /// Picking the nearest candidate instead, by file or by directory, was the
+    /// obvious alternative and is unsafe for exactly this reason. A wrong pick
+    /// produces a key that looks complete and omits the dependency that moved.
+    pub over_approximated: Vec<(String, usize)>,
     /// Names no indexed symbol answers to, which on a real tree means a crate
     /// outside it: `anyhow::Result`, `std::path::{Path, PathBuf}`.
     ///
@@ -2349,20 +2361,34 @@ pub struct ForwardClosure {
 /// the graph.
 enum Resolution {
     One(String),
-    /// Several indexed symbols match. Blocks a key.
-    Ambiguous,
+    /// Several indexed symbols answer to the name and nothing here can say
+    /// which was meant. Every one of them is taken, not one of them chosen.
+    Several(Vec<String>),
     /// Nothing in the index matches. Folded into the environment key instead.
     Outside,
 }
 
 impl ForwardClosure {
-    /// True when nothing inside this tree was left unidentified.
+    /// True when every name resolved to exactly one symbol.
     ///
-    /// Only a complete closure may back a cached verdict. Names from outside the
-    /// tree do not count against it, because [`EnvironmentKey`] covers them; an
-    /// ambiguous name does, because nothing covers it.
-    pub fn is_complete(&self) -> bool {
-        self.ambiguous.is_empty()
+    /// Informational, not a gate. An imprecise closure is still safe to key on,
+    /// because over-approximation cannot miss a dependency; it just invalidates
+    /// more often than it needs to. What decides whether a key may be issued is
+    /// in [`AstIndex::closure_hash`], and it is about the environment rather
+    /// than about this.
+    pub fn is_precise(&self) -> bool {
+        self.over_approximated.is_empty()
+    }
+
+    /// How many symbols this closure drags in per name it could not pin down.
+    ///
+    /// A closure that over-approximates a handful of names is cheap. One that
+    /// over-approximates a name matching half the index is a key that changes
+    /// whenever anything does, which is a cache that never hits. The number is
+    /// reported so that failure mode is visible as a number rather than as
+    /// unexplained misses.
+    pub fn over_approximation_cost(&self) -> usize {
+        self.over_approximated.iter().map(|(_, n)| n).sum()
     }
 }
 
@@ -2377,9 +2403,22 @@ impl ForwardClosure {
 pub struct CacheAudit {
     pub symbols_audited: usize,
     pub tests_in_index: usize,
-    /// Tests whose forward closure resolved completely. Only these could ever
-    /// back a cached verdict.
-    pub tests_with_complete_closure: usize,
+    /// Tests every one of whose names resolved to exactly one symbol.
+    ///
+    /// Not a gate. A test that over-approximates is still keyable, because
+    /// taking every candidate cannot miss the real one. This counts how often
+    /// the graph was precise enough not to need that.
+    pub tests_with_precise_closure: usize,
+    /// Tests that can be keyed at all, which is the number a cache would live
+    /// on. A key is refused only when a name from outside the tree is reached
+    /// and the environment covers nothing.
+    pub tests_with_a_key: usize,
+    /// Total extra symbols pulled in by over-approximation, across all tests.
+    ///
+    /// The cost side of the safety. A closure that drags in half the index for
+    /// one unpinnable name is a key that changes whenever anything does, so
+    /// this is the number that says whether the cache would ever hit.
+    pub over_approximation_cost: usize,
     /// Symbol/test pairs where both mechanisms agree the test is affected.
     pub agreements: usize,
     /// The dangerous disagreement: the blast radius selects the test, and the
@@ -2428,7 +2467,7 @@ impl AstIndex {
         let nodes = self.nodes.read().unwrap();
 
         let mut reachable: BTreeSet<String> = BTreeSet::new();
-        let mut ambiguous: BTreeSet<String> = BTreeSet::new();
+        let mut over_approximated: BTreeMap<String, usize> = BTreeMap::new();
         let mut outside: BTreeSet<String> = BTreeSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
@@ -2457,8 +2496,15 @@ impl AstIndex {
                             queue.push_back((resolved, depth + 1));
                         }
                     }
-                    Resolution::Ambiguous => {
-                        ambiguous.insert(name.to_string());
+                    Resolution::Several(candidates) => {
+                        // Every candidate, not the likeliest one. The real
+                        // target is among them, so the closure cannot miss it.
+                        over_approximated.insert(name.to_string(), candidates.len());
+                        for candidate in candidates {
+                            if reachable.insert(candidate.clone()) {
+                                queue.push_back((candidate, depth + 1));
+                            }
+                        }
                     }
                     Resolution::Outside => {
                         outside.insert(name.to_string());
@@ -2470,7 +2516,7 @@ impl AstIndex {
         Some(ForwardClosure {
             symbol: start.symbol_path,
             reachable: reachable.into_iter().collect(),
-            ambiguous: ambiguous.into_iter().collect(),
+            over_approximated: over_approximated.into_iter().collect(),
             outside: outside.into_iter().collect(),
         })
     }
@@ -2484,16 +2530,23 @@ impl AstIndex {
         if nodes.contains_key(name) {
             return Resolution::One(name.to_string());
         }
-        let mut matches = nodes.keys().filter(|k| Self::is_suffix_match(k, name));
-        let Some(first) = matches.next() else {
+        let mut matches: Vec<String> = nodes
+            .keys()
+            .filter(|k| Self::is_suffix_match(k, name))
+            .cloned()
+            .collect();
+        match matches.len() {
             // Nothing in the index answers to this name at all, which on a real
             // tree usually means a crate outside it.
-            return Resolution::Outside;
-        };
-        if matches.next().is_some() {
-            return Resolution::Ambiguous;
+            0 => Resolution::Outside,
+            1 => Resolution::One(matches.pop().expect("length checked")),
+            // Sorted so the closure, and therefore the key, does not depend on
+            // the order a HashMap happened to yield.
+            _ => {
+                matches.sort();
+                Resolution::Several(matches)
+            }
         }
-        Resolution::One(first.clone())
     }
 }
 
@@ -2507,7 +2560,13 @@ impl AstIndex {
     /// is what makes the miss happen.
     pub fn closure_hash(&self, symbol_path: &str, environment: &EnvironmentKey) -> Option<String> {
         let closure = self.forward_closure(symbol_path, Self::CLOSURE_DEPTH)?;
-        if !closure.is_complete() {
+
+        // The one thing that still refuses a key. An ambiguous name is safe,
+        // because every candidate was taken; a name from outside the tree is
+        // safe only while something pins what it means. When the environment
+        // covers nothing, nothing does, and a key issued here would stay stable
+        // across the dependency upgrade that changed the answer.
+        if !closure.outside.is_empty() && environment.covers_nothing() {
             return None;
         }
 
@@ -2554,7 +2613,12 @@ impl AstIndex {
     /// disagree, a cache keyed on the closure would decide differently from the
     /// selector already shipping, and the direction says whether that is
     /// dangerous or merely wasteful.
-    pub fn audit_cache(&self, max_depth: usize, example_limit: usize) -> CacheAudit {
+    pub fn audit_cache(
+        &self,
+        environment: &EnvironmentKey,
+        max_depth: usize,
+        example_limit: usize,
+    ) -> CacheAudit {
         let (test_symbols, all_symbols) = {
             let nodes = self.nodes.read().unwrap();
             let tests: Vec<String> = nodes
@@ -2577,11 +2641,16 @@ impl AstIndex {
         let mut outside_counts: HashMap<String, usize> = HashMap::new();
         for test in &test_symbols {
             if let Some(closure) = self.forward_closure(test, Self::CLOSURE_DEPTH) {
-                if closure.is_complete() {
-                    audit.tests_with_complete_closure += 1;
+                if closure.is_precise() {
+                    audit.tests_with_precise_closure += 1;
                 }
-                for name in &closure.ambiguous {
-                    *ambiguous_counts.entry(name.clone()).or_insert(0) += 1;
+                audit.over_approximation_cost += closure.over_approximation_cost();
+                if self.closure_hash(test, environment).is_some() {
+                    audit.tests_with_a_key += 1;
+                }
+                for (name, candidates) in &closure.over_approximated {
+                    let entry = ambiguous_counts.entry(name.clone()).or_insert(0);
+                    *entry = (*entry).max(*candidates);
                 }
                 for name in &closure.outside {
                     *outside_counts.entry(name.clone()).or_insert(0) += 1;

@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
             let summary = index.scan_directory(root)?;
             let environment =
                 axiom_ast::EnvironmentKey::of(root, &axiom_vmm::native::toolchain_fingerprints());
-            let audit = index.audit_cache(depth, 5);
+            let audit = index.audit_cache(&environment, depth, 5);
 
             println!();
             println!(" Files scanned:              {}", summary.files_scanned);
@@ -275,7 +275,15 @@ async fn main() -> Result<()> {
             println!(" Tests in index:             {}", audit.tests_in_index);
             println!(
                 " Tests with a usable key:    {} of {}",
-                audit.tests_with_complete_closure, audit.tests_in_index
+                audit.tests_with_a_key, audit.tests_in_index
+            );
+            println!(
+                " Keyed without guessing:     {} of {}",
+                audit.tests_with_precise_closure, audit.tests_in_index
+            );
+            println!(
+                " Extra symbols dragged in:   {}   (cost of over-approximating)",
+                audit.over_approximation_cost
             );
             println!(" Symbols audited:            {}", audit.symbols_audited);
             println!();
@@ -305,12 +313,13 @@ async fn main() -> Result<()> {
 
             if !audit.top_ambiguous.is_empty() {
                 println!();
-                println!(" Names this tree defines more than once, so no edge was taken:");
+                println!(" Names this tree defines more than once, with candidates taken:");
                 for (name, count) in &audit.top_ambiguous {
                     println!("   {count:>4}x  {name}");
                 }
-                println!("   These are the gaps. Something here satisfies them and the graph");
-                println!("   cannot say what, so nothing covers a change behind them.");
+                println!("   Every candidate is taken rather than one guessed, so nothing is");
+                println!("   missed. The count is what that costs: editing any of them");
+                println!("   invalidates the key.");
             }
 
             if !audit.top_outside.is_empty() {
@@ -330,7 +339,7 @@ async fn main() -> Result<()> {
             }
 
             println!();
-            if audit.would_wrongly_skip == 0 && audit.tests_with_complete_closure > 0 {
+            if audit.would_wrongly_skip == 0 && audit.tests_with_a_key > 0 {
                 println!(" No disagreement in the dangerous direction on this repository.");
                 println!(" That is one measurement on one tree, not a proof. Run it on yours");
                 println!(" before letting anything skip a test on the strength of a key.");

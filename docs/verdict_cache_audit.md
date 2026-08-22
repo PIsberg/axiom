@@ -75,8 +75,9 @@ between runs changes them, which is the point.
 
 ## What it means
 
-**Do not build the cache.** Not because the idea is wrong, but because the
-precondition fails on the graph as it stands. Two separate things are failing,
+**Do not build the cache yet.** The first measurement below is the one that said
+so; the section after it is what changed. Not because the idea is wrong, but
+because the precondition failed on the graph as it stood. Two separate things are failing,
 and they want different fixes.
 
 **Almost nothing has a usable key.** A test is keyable only when every name it
@@ -128,6 +129,53 @@ unresolved-name problem seen from the other side. It has to reach zero, on more
 than one repository, before anything is allowed to skip a test on the strength of
 a key.
 
+## After over-approximating ambiguous names
+
+```
+ Tests in index:             51
+ Tests with a usable key:    51 of 51
+ Keyed without guessing:     2 of 51
+ Extra symbols dragged in:   812
+
+ Both mechanisms agree:      670
+ Cache would wrongly skip:   0
+ Cache would run unselected: 3895
+ Agreement:                  14.68%
+```
+
+An ambiguous name is now over-approximated rather than guessed: the closure
+depends on every symbol that could answer to it. The real target is among them
+whenever it is in the index, so nothing is missed. That took usable keys from
+1 of 51 to 51 of 51 and the dangerous disagreement from 312 to zero.
+
+Choosing the nearest candidate instead, by file or by directory, was the obvious
+alternative and is unsafe. A wrong pick produces a key that looks complete and
+omits the dependency that moved, which is the one failure this whole exercise is
+about. Only two of 51 closures resolve without guessing, so that choice would
+have been made 49 times.
+
+### Two reasons not to read that zero as a green light
+
+**It is partly structural.** The blast radius walks `reverse_deps` and the
+closure walks the same edges forward, over-approximated. If the reverse walk says
+a test reaches a symbol, the forward walk from that test will reach it too. So
+zero says the two mechanisms agree, not that either is right about the real
+dependency graph. A call the parsers never recorded is invisible to both, and
+this measurement cannot see it. That is the residual risk, and it is not small
+on line-based parsers.
+
+**It currently saves nothing over selection.** Across 284 symbols and 51 tests,
+the blast radius selects about 2.4 tests per symbol, and about 16 tests per
+symbol have a key that changes. Because the dangerous count is zero, every
+selected test also has a changed key, so for a single-symbol edit the cache skips
+nothing the selector was going to skip anyway.
+
+Where it would earn its place is the case selection cannot serve: a change whose
+extent is not known symbol by symbol, such as a merge or a pull. There, about 16
+of 51 keys move and the remaining 35 verdicts still hold, which is a two-thirds
+saving with no symbol named. That is worth having, and it is a different claim
+from the one the pruning numbers make.
+
 ## What would come next
 
 In order, each gated on the one before:
@@ -135,11 +183,16 @@ In order, each gated on the one before:
 1. ~~Split "unresolved" into "outside the tree" and "ambiguous inside it". Fold
    the first into the key as a toolchain and lockfile digest instead of a gap.~~
    Done. Usable keys went from 0 to 1, which is the honest size of that step.
-2. Resolve ambiguous short names, which needs more than the current parsers do.
-3. Re-run the audit. If `would wrongly skip` is zero on several real trees, build
-   the cache behind a flag, still shadowed, and compare its decisions against
-   real runs.
-4. Only then let it skip anything.
+2. ~~Resolve ambiguous short names, which needs more than the current parsers
+   do.~~ Answered a different way: over-approximate instead of resolving. The
+   cache wants the opposite bias from selection, so it does not need the type
+   information selection would.
+3. Run the audit on several real trees, not just this one. Everything above is
+   one measurement on 26 files.
+4. Find the references the parsers never recorded. This audit cannot: both
+   directions read the same edges, so a missing edge is invisible to it. That
+   needs a different check, comparing against a real test run.
+5. Only then let it skip anything.
 
 The measurement stays in the repository either way, because the number moves when
 the graph changes, and a cache is exactly the feature that must not be built on a
