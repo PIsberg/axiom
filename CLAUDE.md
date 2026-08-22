@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 69 tests across e2e, mcp, crdt, persistence, blast radius, eval
+cargo test                            # 91 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -154,6 +154,103 @@ snippet that did not terminate held the stdio pipe an agent was blocked on.
 resolves the name first, because comparing the caller's spelling against the stored keys returned
 `None` for every short name, and `None` meant Rust. An ambiguous name is refused with
 `AmbiguousSymbol` and its candidates rather than compiled as whichever language won.
+
+**A toolchain-conditional test can pass without ever running the thing it tests.**
+`crates/axiom-cli/tests/multi_language_eval.rs` branches on whether a toolchain is on
+PATH: with one it asserts the verdict, without one it asserts the refusal. Both
+branches are green, so the suite says nothing about which ran. The TypeScript recipe
+reached main that way, reasoned rather than executed (#9). When touching one of these,
+break an assertion that only the running branch reaches and confirm the test goes red.
+Doing exactly that is what found `resolve_program`: with `deno` and `tsc` both
+installed, the test was still taking the refusal branch.
+
+**Windows resolves a bare program name by appending `.exe`, and npm does not ship one.**
+`Command::new("tsc")` cannot see `tsc.cmd`, so a toolchain the user runs from their own
+shell was reported as not installed. `resolve_program` in `axiom-vmm/src/native.rs`
+searches PATHEXT. The order matters: npm drops `deno.cmd`, `deno.ps1` and an
+extension-less `deno` holding a POSIX shell script, and matching the bare name first
+finds the one Windows cannot execute. PATHEXT candidates win, and the bare name is only
+considered when it already carries an extension.
+
+**Kotlin shares Java's assertion trap; Scala does not, and the difference is per language.**
+Kotlin's `assert` compiles to a check of the JVM's assertion status, exactly as Java's
+does, so without `-J-ea` a false assertion is a no-op and the snippet exits zero.
+Measured: `assert(1 + 1 == 3)` printed the line after it and returned success until the
+flag was passed. Scala's `assert` is `Predef.assert`, which throws unconditionally, so
+no flag is needed and none is passed. A recipe copied from Java to Scala would carry a
+flag that does nothing; one copied the other way would lose a flag that decides whether
+a false assertion reports `PASSED`. Ask the question per language and answer it by
+running it.
+
+**A cold JVM toolchain can outlast the evaluation deadline, and CI is where that shows.**
+`scala` and `kotlinc` fetch their compiler on first use. Locally, warm, a Scala snippet
+evaluates in about a second; on a fresh CI runner the first one spent 187s downloading
+and was killed at the 30s deadline and reported as `TIMEOUT`. That verdict is correct,
+it says nothing is known about the snippet, and it is useless to a caller who thinks
+their code hung. CI raises `AXIOM_EVAL_TIMEOUT_SECS` to 300 so the tests measure the
+recipe rather than the download, which does not weaken the deadline guard:
+`eval_deadline.rs` passes its own two-second deadline to `native::evaluate` and never
+reads the variable. A bash warm-up step was the first attempt and was wrong for a
+Windows-specific reason worth remembering: coursier installs `scala.bat`, which bash
+cannot find under the bare name, while axiom's own PATHEXT lookup can. The step failed
+for a problem the product does not have. A user's first Scala evaluation on a cold machine will hit the
+same wall; the hint already names `AXIOM_EVAL_TIMEOUT_SECS`. This is also the general
+shape to expect from this suite: a local green says nothing about a machine with cold
+caches, which is why CI runs on two.
+
+**CI sets `AXIOM_REQUIRE_TOOLCHAINS` so a missing toolchain is red rather than green.**
+Every evaluator test branches, and both branches pass, so a runner where an install step
+silently did nothing runs no recipe and reports success.
+`every_language_has_a_toolchain_when_the_environment_promises_one` fails instead, naming
+the languages that had none. Unset locally, because a developer without kotlinc should
+not get a red suite.
+
+**The Java parser reads Kotlin and Scala at class granularity only, and `object` had to
+be taught.** `parse_java_content` matched `class`, `interface`, `enum` and `record`, so
+a Scala file declaring `object ScalaGate` indexed *nothing at all* and its evaluator
+could not be reached through any symbol. `object` and `trait` are now recognised, gated
+on the file extension so Java cannot regress: loosening a match here has form. Methods
+are still not indexed for either language, `fun` and `def` match no Java signature
+shape, so a Kotlin or Scala symbol is a type and never a method.
+
+**`LANGUAGES` in axiom-vmm and `parse_by_language` in axiom-ast are twins.** One decides
+what is indexed, the other what can be run, they live in different crates, and nothing
+made them agree; Kotlin and Scala sat on the first list and not the second for as long
+as the tier existed. `every_indexed_language_has_an_evaluator` now fails when they
+diverge. Rust is the deliberate exception: it belongs to tier 1.
+
+**A TypeScript snippet cannot assume Node's type declarations.** `import assert from
+"node:assert"` runs under deno and is TS2591 under `tsc`, which has no `@types/node`,
+so the same snippet passes on one machine and returns a compilation error on another.
+The portable form is a bare `throw`, which is why `throw ` is in the language's
+`assertion_tokens`: without it a snippet written the documented way reports
+`passed_checks_count: 0` beside `PASSED`.
+
+**The verdict cache is measured, not built, and the measurement says do not build it.**
+`axiom cache-audit` reads the same graph in the forward direction, from a test to what
+it depends on, and compares that against what the blast radius selects. Nothing is
+cached and no test is skipped. On this repository 51 of 51 tests produce a usable key,
+and 0 symbol/test pairs disagree in the direction that would skip a test the selector
+says must run. Two causes, needing different fixes. Names from crates outside the tree
+(`anyhow::Result`, `std::path::{Path, PathBuf}`) are now folded into `EnvironmentKey`,
+a digest over lock files, manifests and compiler versions, rather than counting as
+gaps; a `cargo update` or a compiler upgrade moves that digest and invalidates every
+key at once. The fingerprints have to be real for that to hold: reusing the evaluator's
+probe arguments, which are chosen to be silent, gave `node=` and `python=`, so an
+upgrade would have invalidated nothing, and `toolchain_fingerprints.rs` now fails on an
+empty version. Ambiguous short names are over-approximated rather than
+resolved: the closure depends on every symbol that could answer to the name. The two
+mechanisms want opposite biases from one graph, which is the thing to keep hold of. For
+selection a wrong extra edge costs one test run; for a key a missing edge skips a test
+and reports a pass for code that never ran. Choosing the nearest candidate by file or
+directory would have been wrong 49 times out of 51 here, and each wrong pick produces a
+key that looks complete. That took usable keys to 51 of 51 and the dangerous count to
+zero, but the zero is partly structural: both directions read the same edges, so a call
+the parsers never recorded is invisible to the audit as well as to the cache. `closure_hash` returns `Option` for this reason: an
+incomplete closure must produce no key at all, because a cache that keys on a partial
+view skips a test whose real dependency moved and reports a pass for code that never
+ran. Full reasoning in `docs/verdict_cache_audit.md`. Re-run the audit before quoting
+any of these numbers; they move with the graph.
 
 **A caller-supplied field that is printed is an injection surface.**
 `agent_identity` reaches `axiom_attest_commit` from the caller and is rendered by

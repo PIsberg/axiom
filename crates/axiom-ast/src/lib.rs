@@ -1,6 +1,6 @@
 use axiom_proto::AstNode;
 use regex::Regex;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -1420,6 +1420,31 @@ impl AstIndex {
 
     fn parse_java_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let is_test_file = Self::is_test_path_or_file(file_path);
+
+        // This parser reads Java, Kotlin and Scala. `object` and `trait` declare
+        // a type in the last two and nothing in Java, so they are recognised
+        // only for the extensions that have them.
+        //
+        // Gated on the extension rather than added to the list for everyone,
+        // because loosening a match here has form: a javadoc mention once
+        // hijacked an enclosing class name, and `new Foo(...)` was once indexed
+        // as a method. Java's behaviour cannot change if Java never sees the
+        // extra keywords.
+        //
+        // Without this a Scala file indexed nothing at all: `object ScalaGate`
+        // matched no type keyword, so no symbol existed to ask about and the
+        // Scala evaluator could not be reached through one.
+        let scala_or_kotlin = matches!(
+            std::path::Path::new(file_path)
+                .extension()
+                .and_then(|e| e.to_str()),
+            Some("scala") | Some("sc") | Some("kt") | Some("kts")
+        );
+        let type_keywords: &[&str] = if scala_or_kotlin {
+            &["class", "interface", "enum", "record", "object", "trait"]
+        } else {
+            &["class", "interface", "enum", "record"]
+        };
         let mut imports = Vec::new();
         let mut class_stack: Vec<(String, usize)> = Vec::new(); // (class_name, open_brace_depth)
         let mut current_brace_depth: usize = 0;
@@ -1499,27 +1524,22 @@ impl AstIndex {
                     .trim()
                     .to_string();
                 imports.push(imp);
-            } else if (trimmed.contains("class ")
-                || trimmed.contains("interface ")
-                || trimmed.contains("enum ")
-                || trimmed.contains("record "))
+            } else if type_keywords
+                .iter()
+                .any(|k| trimmed.contains(&format!("{k} ")))
                 && (trimmed.starts_with("public ")
                     || trimmed.starts_with("private ")
                     || trimmed.starts_with("protected ")
                     || trimmed.starts_with("abstract ")
                     || trimmed.starts_with("final ")
                     || trimmed.starts_with("static ")
-                    || trimmed.starts_with("class ")
-                    || trimmed.starts_with("interface ")
-                    || trimmed.starts_with("enum ")
-                    || trimmed.starts_with("record ")
-                    || trimmed.starts_with("@interface "))
+                    || trimmed.starts_with("@interface ")
+                    || type_keywords
+                        .iter()
+                        .any(|k| trimmed.starts_with(&format!("{k} "))))
             {
                 let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-                if let Some(pos) = tokens
-                    .iter()
-                    .position(|&t| t == "class" || t == "interface" || t == "enum" || t == "record")
-                {
+                if let Some(pos) = tokens.iter().position(|t| type_keywords.contains(t)) {
                     if pos + 1 < tokens.len() {
                         let raw_name = tokens[pos + 1]
                             .split('<')
@@ -2303,4 +2323,507 @@ pub struct BlastRadiusResult {
     pub tests_by_depth: HashMap<usize, Vec<String>>,
     pub total_tests_in_repo: usize,
     pub pruned_test_percentage: f64,
+}
+
+/// A symbol's forward dependency closure: everything it can reach.
+///
+/// The blast radius walks `reverse_deps`, from a changed symbol out to the tests
+/// that reach it. A verdict cache needs the other direction: given a test, what
+/// does its outcome depend on? If that set is unchanged since the last run, the
+/// previous verdict is still valid and neither the test nor the compilation
+/// behind it has to happen again.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForwardClosure {
+    pub symbol: String,
+    /// Indexed symbols reachable from `symbol`, including itself. Sorted, so the
+    /// hash over them does not depend on traversal order.
+    pub reachable: Vec<String>,
+    /// Names several indexed symbols answer to, with how many, where every
+    /// candidate was taken rather than one of them chosen.
+    ///
+    /// The direction of the guess is what matters, and it runs opposite to the
+    /// blast radius. There, a wrong extra edge costs one unnecessary test run.
+    /// Here, a missing edge means a test is skipped on the strength of a key
+    /// that did not cover the thing that changed, and a stale pass is reported
+    /// for code that never ran.
+    ///
+    /// So an ambiguous name is over-approximated: the closure depends on every
+    /// symbol that could answer to it. The real target is among them whenever it
+    /// is in the index at all, so nothing is missed. What it costs is precision,
+    /// and that cost is recorded here rather than hidden: editing any same-named
+    /// symbol invalidates the key, and these counts say how much of the tree
+    /// each name drags in.
+    ///
+    /// Picking the nearest candidate instead, by file or by directory, was the
+    /// obvious alternative and is unsafe for exactly this reason. A wrong pick
+    /// produces a key that looks complete and omits the dependency that moved.
+    pub over_approximated: Vec<(String, usize)>,
+    /// Names no indexed symbol answers to, which on a real tree means a crate
+    /// outside it: `anyhow::Result`, `std::path::{Path, PathBuf}`.
+    ///
+    /// These do not block a key. The index was never going to hold them, and
+    /// their contents cannot change between two runs on one machine unless the
+    /// toolchain or a lock file changes, which [`EnvironmentKey`] covers. Before
+    /// they were separated out, every test importing anything was unkeyable,
+    /// which was every test.
+    ///
+    /// They are still recorded, and still hashed, because *which* outside names
+    /// a test reaches is itself an input: adding an import changes what the test
+    /// does even when nothing inside the tree moved.
+    pub outside: Vec<String>,
+}
+
+/// What an indexed lookup of a dependency name found.
+///
+/// Three answers rather than two. Collapsing the last two into `None` is what
+/// made every closure incomplete: a crate outside the tree and a name this tree
+/// defines several times are both unresolved, and only one of them is a gap in
+/// the graph.
+enum Resolution {
+    One(String),
+    /// Several indexed symbols answer to the name and nothing here can say
+    /// which was meant. Every one of them is taken, not one of them chosen.
+    Several(Vec<String>),
+    /// Nothing in the index matches. Folded into the environment key instead.
+    Outside,
+}
+
+impl ForwardClosure {
+    /// True when every name resolved to exactly one symbol.
+    ///
+    /// Informational, not a gate. An imprecise closure is still safe to key on,
+    /// because over-approximation cannot miss a dependency; it just invalidates
+    /// more often than it needs to. What decides whether a key may be issued is
+    /// in [`AstIndex::closure_hash`], and it is about the environment rather
+    /// than about this.
+    pub fn is_precise(&self) -> bool {
+        self.over_approximated.is_empty()
+    }
+
+    /// How many symbols this closure drags in per name it could not pin down.
+    ///
+    /// A closure that over-approximates a handful of names is cheap. One that
+    /// over-approximates a name matching half the index is a key that changes
+    /// whenever anything does, which is a cache that never hits. The number is
+    /// reported so that failure mode is visible as a number rather than as
+    /// unexplained misses.
+    pub fn over_approximation_cost(&self) -> usize {
+        self.over_approximated.iter().map(|(_, n)| n).sum()
+    }
+}
+
+/// What a verdict cache would have decided, measured against what the blast
+/// radius selects, without skipping anything.
+///
+/// Shadow mode: this computes the decision and reports it. Nothing is cached and
+/// no test is skipped, because the number that decides whether a cache is safe
+/// to build is how often it would have been wrong, and that has to be measured
+/// before it is relied on rather than after.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CacheAudit {
+    pub symbols_audited: usize,
+    pub tests_in_index: usize,
+    /// Tests every one of whose names resolved to exactly one symbol.
+    ///
+    /// Not a gate. A test that over-approximates is still keyable, because
+    /// taking every candidate cannot miss the real one. This counts how often
+    /// the graph was precise enough not to need that.
+    pub tests_with_precise_closure: usize,
+    /// Tests that can be keyed at all, which is the number a cache would live
+    /// on. A key is refused only when a name from outside the tree is reached
+    /// and the environment covers nothing.
+    pub tests_with_a_key: usize,
+    /// Total extra symbols pulled in by over-approximation, across all tests.
+    ///
+    /// The cost side of the safety. A closure that drags in half the index for
+    /// one unpinnable name is a key that changes whenever anything does, so
+    /// this is the number that says whether the cache would ever hit.
+    pub over_approximation_cost: usize,
+    /// Symbol/test pairs where both mechanisms agree the test is affected.
+    pub agreements: usize,
+    /// The dangerous disagreement: the blast radius selects the test, and the
+    /// test's forward closure does not contain the symbol. A cache keyed on that
+    /// closure would skip a test the selector says must run.
+    pub would_wrongly_skip: usize,
+    /// The safe disagreement: the closure contains the symbol but the blast
+    /// radius did not select the test. Costs a test run, and points at
+    /// under-selection rather than at an unsound cache.
+    pub would_run_unselected: usize,
+    /// Up to this many examples of the dangerous case, for a report to name.
+    pub wrongly_skipped_examples: Vec<(String, String)>,
+    /// The names that most often blocked a key, with counts. These are the gaps
+    /// in the graph: something in this tree satisfies them and the graph cannot
+    /// say what.
+    pub top_ambiguous: Vec<(String, usize)>,
+    /// The out-of-tree names most often reached, with counts. Reported because
+    /// they are what [`EnvironmentKey`] has to cover, not because they are
+    /// defects.
+    pub top_outside: Vec<(String, usize)>,
+}
+
+impl CacheAudit {
+    /// Share of decisions the two mechanisms agreed on, or `None` when there
+    /// were no decisions to make. Reported rather than inferred from the counts,
+    /// so a zero-denominator run cannot read as 100%.
+    pub fn agreement_rate(&self) -> Option<f64> {
+        let total = self.agreements + self.would_wrongly_skip + self.would_run_unselected;
+        if total == 0 {
+            return None;
+        }
+        Some(self.agreements as f64 / total as f64)
+    }
+}
+
+impl AstIndex {
+    /// How deep the forward walk goes. The reverse walk bounds itself the same
+    /// way; an unbounded closure on a cyclic graph is the whole index, which
+    /// tells a cache nothing.
+    pub const CLOSURE_DEPTH: usize = 5;
+
+    /// Every indexed symbol reachable from `symbol_path` by following
+    /// dependencies, plus the names that resolved to nothing.
+    pub fn forward_closure(&self, symbol_path: &str, max_depth: usize) -> Option<ForwardClosure> {
+        let start = self.get_symbol(symbol_path)?;
+        let nodes = self.nodes.read().unwrap();
+
+        let mut reachable: BTreeSet<String> = BTreeSet::new();
+        let mut over_approximated: BTreeMap<String, usize> = BTreeMap::new();
+        let mut outside: BTreeSet<String> = BTreeSet::new();
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+
+        reachable.insert(start.symbol_path.clone());
+        queue.push_back((start.symbol_path.clone(), 0));
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            let Some(node) = nodes.get(&current) else {
+                continue;
+            };
+            for dependency in &node.dependencies {
+                let name = dependency.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                // Resolution goes through the same lookup a caller would use, or
+                // the closure would cover symbols the rest of the system cannot
+                // reach by that name. An ambiguous name resolves to nothing,
+                // which makes the closure incomplete rather than picking one.
+                match Self::resolve_within(&nodes, name) {
+                    Resolution::One(resolved) => {
+                        if reachable.insert(resolved.clone()) {
+                            queue.push_back((resolved, depth + 1));
+                        }
+                    }
+                    Resolution::Several(candidates) => {
+                        // Every candidate, not the likeliest one. The real
+                        // target is among them, so the closure cannot miss it.
+                        over_approximated.insert(name.to_string(), candidates.len());
+                        for candidate in candidates {
+                            if reachable.insert(candidate.clone()) {
+                                queue.push_back((candidate, depth + 1));
+                            }
+                        }
+                    }
+                    Resolution::Outside => {
+                        outside.insert(name.to_string());
+                    }
+                }
+            }
+        }
+
+        Some(ForwardClosure {
+            symbol: start.symbol_path,
+            reachable: reachable.into_iter().collect(),
+            over_approximated: over_approximated.into_iter().collect(),
+            outside: outside.into_iter().collect(),
+        })
+    }
+
+    /// Resolve a dependency name against an already-held read guard.
+    ///
+    /// `get_symbol` takes the lock itself, and the closure walk holds it for the
+    /// whole traversal, so the lookup is repeated here rather than dropping and
+    /// retaking the guard once per edge.
+    fn resolve_within(nodes: &HashMap<String, AstNode>, name: &str) -> Resolution {
+        if nodes.contains_key(name) {
+            return Resolution::One(name.to_string());
+        }
+        let mut matches: Vec<String> = nodes
+            .keys()
+            .filter(|k| Self::is_suffix_match(k, name))
+            .cloned()
+            .collect();
+        match matches.len() {
+            // Nothing in the index answers to this name at all, which on a real
+            // tree usually means a crate outside it.
+            0 => Resolution::Outside,
+            1 => Resolution::One(matches.pop().expect("length checked")),
+            // Sorted so the closure, and therefore the key, does not depend on
+            // the order a HashMap happened to yield.
+            _ => {
+                matches.sort();
+                Resolution::Several(matches)
+            }
+        }
+    }
+}
+
+impl AstIndex {
+    /// A digest over everything a symbol's outcome depends on, or `None` when
+    /// the closure is incomplete.
+    ///
+    /// `None` is the point of the return type. A cache that answers with a hash
+    /// whatever it knows will key on a partial view and skip a test whose real
+    /// dependency changed behind an unresolved name. Refusing to produce a key
+    /// is what makes the miss happen.
+    pub fn closure_hash(&self, symbol_path: &str, environment: &EnvironmentKey) -> Option<String> {
+        let closure = self.forward_closure(symbol_path, Self::CLOSURE_DEPTH)?;
+
+        // The one thing that still refuses a key. An ambiguous name is safe,
+        // because every candidate was taken; a name from outside the tree is
+        // safe only while something pins what it means. When the environment
+        // covers nothing, nothing does, and a key issued here would stay stable
+        // across the dependency upgrade that changed the answer.
+        if !closure.outside.is_empty() && environment.covers_nothing() {
+            return None;
+        }
+
+        let nodes = self.nodes.read().unwrap();
+        let mut hasher = blake3::Hasher::new();
+
+        // The environment first, so a lock file or compiler change moves every
+        // key at once rather than only the keys of tests that happen to import
+        // something.
+        hasher.update(environment.as_str().as_bytes());
+        hasher.update(
+            b"
+",
+        );
+
+        // Which out-of-tree names the test reaches is itself an input: adding an
+        // import changes what the test does even when nothing inside the tree
+        // moved. What is *behind* those names is the environment key's job.
+        for name in &closure.outside {
+            hasher.update(name.as_bytes());
+            hasher.update(
+                b"
+",
+            );
+        }
+
+        for symbol in &closure.reachable {
+            // Both the identity and the content: renaming a symbol changes what
+            // a test calls, and editing its body changes what that call does.
+            hasher.update(symbol.as_bytes());
+            hasher.update(b"\0");
+            if let Some(node) = nodes.get(symbol) {
+                hasher.update(node.hash.as_bytes());
+            }
+            hasher.update(b"\n");
+        }
+        Some(format!("closure_{}", hasher.finalize().to_hex()))
+    }
+
+    /// Measure a verdict cache without running one.
+    ///
+    /// For every symbol, the tests the blast radius selects are compared against
+    /// the tests whose forward closure contains that symbol. Where the two
+    /// disagree, a cache keyed on the closure would decide differently from the
+    /// selector already shipping, and the direction says whether that is
+    /// dangerous or merely wasteful.
+    pub fn audit_cache(
+        &self,
+        environment: &EnvironmentKey,
+        max_depth: usize,
+        example_limit: usize,
+    ) -> CacheAudit {
+        let (test_symbols, all_symbols) = {
+            let nodes = self.nodes.read().unwrap();
+            let tests: Vec<String> = nodes
+                .values()
+                .filter(|n| n.kind == "test")
+                .map(|n| n.symbol_path.clone())
+                .collect();
+            let all: Vec<String> = nodes.keys().cloned().collect();
+            (tests, all)
+        };
+
+        let mut audit = CacheAudit {
+            tests_in_index: test_symbols.len(),
+            ..Default::default()
+        };
+
+        // One closure per test, computed once and reused across every symbol.
+        let mut closures: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut ambiguous_counts: HashMap<String, usize> = HashMap::new();
+        let mut outside_counts: HashMap<String, usize> = HashMap::new();
+        for test in &test_symbols {
+            if let Some(closure) = self.forward_closure(test, Self::CLOSURE_DEPTH) {
+                if closure.is_precise() {
+                    audit.tests_with_precise_closure += 1;
+                }
+                audit.over_approximation_cost += closure.over_approximation_cost();
+                if self.closure_hash(test, environment).is_some() {
+                    audit.tests_with_a_key += 1;
+                }
+                for (name, candidates) in &closure.over_approximated {
+                    let entry = ambiguous_counts.entry(name.clone()).or_insert(0);
+                    *entry = (*entry).max(*candidates);
+                }
+                for name in &closure.outside {
+                    *outside_counts.entry(name.clone()).or_insert(0) += 1;
+                }
+                closures.insert(test.clone(), closure.reachable.into_iter().collect());
+            }
+        }
+
+        // By count, then by name, so two runs over the same tree report the same
+        // list rather than whatever order the map happened to yield.
+        let rank = |counts: HashMap<String, usize>| {
+            let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            ranked.truncate(example_limit);
+            ranked
+        };
+        audit.top_ambiguous = rank(ambiguous_counts);
+        audit.top_outside = rank(outside_counts);
+
+        for symbol in &all_symbols {
+            let Some(radius) = self.compute_blast_radius(symbol, max_depth) else {
+                continue;
+            };
+            audit.symbols_audited += 1;
+
+            let selected: HashSet<&String> = radius.impacted_tests.iter().collect();
+
+            for test in &test_symbols {
+                let Some(reachable) = closures.get(test) else {
+                    continue;
+                };
+                match (selected.contains(test), reachable.contains(symbol)) {
+                    (true, true) => audit.agreements += 1,
+                    (true, false) => {
+                        audit.would_wrongly_skip += 1;
+                        if audit.wrongly_skipped_examples.len() < example_limit {
+                            audit
+                                .wrongly_skipped_examples
+                                .push((symbol.clone(), test.clone()));
+                        }
+                    }
+                    (false, true) => audit.would_run_unselected += 1,
+                    (false, false) => {}
+                }
+            }
+        }
+
+        audit
+    }
+}
+
+/// Everything a verdict depends on that is not a symbol in this tree.
+///
+/// Separating out-of-tree names from ambiguous ones is only safe if something
+/// else covers them. This is that something else. A `cargo update` rewrites
+/// `Cargo.lock`, a compiler upgrade changes the version strings, and either one
+/// changes this digest, which changes every key derived from it and invalidates
+/// the whole cache at once. That is the correct blast radius for a change to the
+/// environment: nothing that was compiled against the old one is still known to
+/// hold.
+///
+/// It is deliberately coarse. A finer key would invalidate less, and getting it
+/// wrong would leave a verdict standing against a dependency that moved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnvironmentKey {
+    digest: String,
+    /// What went into it, so a report can say why a key changed rather than
+    /// only that it did.
+    pub inputs: Vec<String>,
+}
+
+impl EnvironmentKey {
+    /// Lock files and manifests that pin what an out-of-tree name resolves to.
+    ///
+    /// Manifests are included alongside lock files because a language without a
+    /// lock file still pins versions somewhere, and a key that covers neither is
+    /// worse than one that covers the looser of the two.
+    const MANIFESTS: &'static [&'static str] = &[
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "deno.lock",
+        "go.sum",
+        "poetry.lock",
+        "Pipfile.lock",
+        "requirements.txt",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "rust-toolchain.toml",
+        "rust-toolchain",
+        ".tool-versions",
+    ];
+
+    /// Digest the manifests under `root`, plus any toolchain fingerprints the
+    /// caller supplies.
+    ///
+    /// The fingerprints are passed in rather than probed here because this crate
+    /// indexes files and does not run compilers; the tier that already probes
+    /// them supplies the strings.
+    pub fn of(root: &Path, toolchains: &[String]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        let mut inputs: Vec<String> = Vec::new();
+
+        for name in Self::MANIFESTS {
+            let candidate = root.join(name);
+            let Ok(bytes) = std::fs::read(&candidate) else {
+                continue;
+            };
+            hasher.update(name.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(&bytes);
+            hasher.update(b"\n");
+            inputs.push((*name).to_string());
+        }
+
+        // Sorted, so two runs on one machine agree whatever order the caller
+        // probed the toolchains in.
+        let mut sorted: Vec<&String> = toolchains.iter().collect();
+        sorted.sort();
+        for fingerprint in sorted {
+            hasher.update(fingerprint.as_bytes());
+            hasher.update(b"\n");
+            inputs.push(fingerprint.clone());
+        }
+
+        Self {
+            digest: format!("env_{}", hasher.finalize().to_hex()),
+            inputs,
+        }
+    }
+
+    /// A key covering nothing, for a caller that has no environment to describe.
+    ///
+    /// Named rather than defaulted: a verdict keyed against this is keyed
+    /// against no environment at all, and that should be visible at the call
+    /// site instead of happening by omission.
+    pub fn uncovered() -> Self {
+        Self {
+            digest: "env_uncovered".to_string(),
+            inputs: Vec::new(),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.digest
+    }
+
+    /// True when nothing was found to cover. A key derived from this is not
+    /// wrong, but it says nothing about the environment, and a report should
+    /// say so rather than showing a digest that looks like an answer.
+    pub fn covers_nothing(&self) -> bool {
+        self.inputs.is_empty()
+    }
 }

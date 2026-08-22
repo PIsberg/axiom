@@ -23,7 +23,7 @@ agent pays on every iteration.
 ## 🚀 Key Features
 
 * **Repository as an Active MCP Server**: Direct structured AST and semantic graph navigation over JSON-RPC 2.0 (`stdio`), eliminating local file clones.
-* **Snippet Evaluation in the Symbol's Own Language**: a hypothesis is checked without a CI round trip. Rust goes to `rustc`, WebAssembly to wasmtime, and Python, JavaScript, TypeScript, Go and Java to their own toolchains. Measure it on your own machine with `axiom bench`; on the development machine the Rust median is around 175ms, which is `rustc` rather than the harness. A language with no evaluator, or a toolchain that is not installed, is refused rather than guessed at, and a snippet that does not terminate is killed rather than allowed to hold the session.
+* **Snippet Evaluation in the Symbol's Own Language**: a hypothesis is checked without a CI round trip. Rust goes to `rustc`, WebAssembly to wasmtime, and Python, JavaScript, TypeScript, Go, Java, Kotlin and Scala to their own toolchains. Measure it on your own machine with `axiom bench`; on the development machine the Rust median is around 175ms, which is `rustc` rather than the harness. A language with no evaluator, or a toolchain that is not installed, is refused rather than guessed at, and a snippet that does not terminate is killed rather than allowed to hold the session.
 * **Predictive Blast-Radius Test Pruning**: reverse dependency reachability narrows a change to the tests that reach the symbol, with the deeper layers surveyed and reported separately so a caller can widen. Measured on this repository, 154 symbols against 49 tests: a mean of 3.1 impacted tests, 93.7% pruned, and a mean overlap of 0.07 between the answers for two different symbols.
 * **Ultra-Fast Zoekt Trigram Search**: In-memory sliding trigram index (`[u8; 3] -> HashSet<Path>`) providing $<1\text{ms}$ regex and literal search without disk I/O.
 * **Concurrent Agents on One Workspace**: mutations are recorded to a shared, commutative operation log, so agents in separate processes converge on the same tree whatever order their work lands in. Measured with twelve agents mutating at once: twelve operations recorded, none lost or duplicated, and one identical Merkle root across four replay orders.
@@ -206,6 +206,7 @@ Copy the generated configuration into your AI client's settings:
 | `axiom eval --symbol <SYM> -c <CODE>` | Runs an isolated sandbox evaluation with compiler verification |
 | `axiom blast-radius --symbol <SYM>` | Computes impacted tests and pruned percentage |
 | `axiom symbol --path <SYM>` | Queries AST node metadata, signatures, and imports |
+| `axiom cache-audit --path <DIR>` | Measures what a verdict cache would decide against what the blast radius selects, without caching anything or skipping any test. See [docs/verdict_cache_audit.md](docs/verdict_cache_audit.md); on this repository it currently says do not build it |
 | `axiom bench --iterations <N>` | Measures how long a sandbox evaluation takes on this machine, reporting min, median, max and mean |
 | `axiom demo` | Runs live end-to-end self-healing agent demonstration |
 | `axiom swarm --agents <N> --ops <M>` | Runs multi-agent Tree-CRDT swarm concurrency simulation |

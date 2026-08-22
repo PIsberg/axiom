@@ -273,6 +273,24 @@ workspace does not lose its work to this one.
 
 ---
 
+#### Writing a TypeScript snippet
+
+Nothing is injected, and the two recipes do not offer the same environment, so a
+snippet has to bring assertions that need neither an import nor an ambient type
+declaration:
+
+```ts
+const n: number = 1 + 1;
+if (n !== 2) { throw new Error(`expected 2, got ${n}`); }
+```
+
+`import assert from "node:assert"` is not portable here. It runs under deno and
+is a type error under `tsc`, which has no `@types/node` installed, so the same
+snippet passes on one machine and comes back as a compilation error on another.
+A thrown error exits non-zero under both, which is what the report reads.
+
+---
+
 ### 3.6 `axiom_attest_commit`
 
 Record the provenance of a change.

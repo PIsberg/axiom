@@ -51,10 +51,28 @@ fn a_snippet_that_never_finishes_is_killed_and_reported() {
 
 #[test]
 fn a_language_with_no_recipe_is_not_silently_borrowed_from_another() {
-    // Kotlin and Scala are indexed by the Java parser. Sharing a parser is not
-    // sharing a compiler.
-    assert!(native::language_for("kt").is_none());
-    assert!(native::language_for("scala").is_none());
+    // Kotlin and Scala are indexed by the Java parser, and each is now run by
+    // its own compiler. Sharing a parser is not sharing a compiler: handing
+    // either to javac would file the error against the snippet rather than
+    // against the language.
+    assert_eq!(
+        native::language_for("kt").map(|l| l.engine),
+        Some("tier2_native_kotlin"),
+        ".kt must go to kotlinc, not to javac"
+    );
+    assert_eq!(
+        native::language_for("scala").map(|l| l.engine),
+        Some("tier2_native_scala"),
+        ".scala must go to the Scala runner, not to javac"
+    );
+    assert_eq!(
+        native::language_for("java").map(|l| l.engine),
+        Some("tier2_native_java")
+    );
+
+    // An extension nothing here reads is still refused rather than handed to
+    // whichever compiler happens to be nearest.
+    assert!(native::language_for("rb").is_none());
 
     // Node's extensions all resolve to the one recipe rather than each needing
     // their own entry.
