@@ -1395,8 +1395,45 @@ fn run_cache_validate(
         println!(" Every symbol is a test, so there is nothing to mutate.");
         return Ok(());
     }
-    let stride = (candidates.len() / samples.max(1)).max(1);
-    let chosen: Vec<String> = candidates
+    // Only symbols that can actually be mutated are worth a sample. Checking
+    // costs a file read; not checking cost whole sampling budgets, since the
+    // first run over this repository spent three of four samples on symbols
+    // with no swappable line and established nothing.
+    let mutable: Vec<String> = candidates
+        .iter()
+        .filter(|symbol| {
+            let Some(node) = index.get_symbol(symbol) else {
+                return false;
+            };
+            let Some(file) = index.file_of_symbol(symbol) else {
+                return false;
+            };
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                return false;
+            };
+            let short = node
+                .symbol_path
+                .rsplit("::")
+                .next()
+                .unwrap_or(&node.symbol_path)
+                .to_string();
+            mutate::mutate_lines(&content, &short).is_some()
+        })
+        .cloned()
+        .collect();
+
+    println!(
+        " {} of {} non-test symbols have a line that can be mutated.",
+        mutable.len(),
+        candidates.len()
+    );
+    if mutable.is_empty() {
+        println!(" Nothing can be mutated here, so this run would establish nothing.");
+        return Ok(());
+    }
+
+    let stride = (mutable.len() / samples.max(1)).max(1);
+    let chosen: Vec<String> = mutable
         .iter()
         .step_by(stride)
         .take(samples)
