@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 129 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 134 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -93,6 +93,17 @@ exists, in this or any earlier version reachable from here; `axiom_query_symbol`
 `dependencies`, `docstring`, `hash`, `id`, `kind`, `signature`, `source_range` and `symbol_path`.
 To tell a real index from an empty one, run `axiom scan` and read the symbol count it prints, or
 look for `.axiom/index.json` above the working directory.
+
+**A Go method belongs to its receiver, and `func (a *Alpha) Search(` has no name before
+the first paren.** `parse_go_content` took everything before that paren as the name, which
+for a method is the empty string, so every method was skipped and `type` was not matched
+at all: a Go codebase held package-level free functions and nothing else, one symbol from
+a file declaring three. `go_receiver_and_name` reads the receiver out of the parenthesis
+and treats a pointer receiver as the same type as a value one. Structs, interfaces and
+aliases are all indexed, since matching only `struct` leaves the same gap one keyword
+narrower. `crates/axiom-ast/tests/go_symbols.rs` is Go's equivalent of `jvm_symbols.rs`,
+and its absence is why this survived: `every_indexed_language_has_an_evaluator` checks Go
+is on both lists, and nothing checked that the parser finds what a Go file declares.
 
 **A declaration is decided from the stripped text; only what is stored comes from the
 raw line.** A repository whose subject is parsing writes source inside string literals
