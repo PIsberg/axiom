@@ -16,10 +16,16 @@
 //! never `PASSED`. And a command that outlives `AXIOM_EVAL_TIMEOUT_SECS` is
 //! killed and reported as a timeout, because one runaway loop would otherwise
 //! hang the stdio pipe an agent is waiting on.
+//!
+//! Two more keep the host's secrets out of the snippet's reach. The child gets
+//! an environment built from an allowlist rather than inherited, see
+//! [`confine_environment`], and the deadline ends everything the snippet
+//! started rather than only the process this tier spawned, see
+//! [`run_with_timeout`].
 
 use axiom_proto::{CtopReport, CtopStatus, FailedCheck};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -427,6 +433,159 @@ pub fn configured_timeout() -> Duration {
         .unwrap_or(DEFAULT_TIMEOUT)
 }
 
+/// Variables a snippet's process receives from this one, compared without
+/// regard to case because Windows does not distinguish it.
+///
+/// Each is here because a toolchain reads it: the search path and its Windows
+/// companions, a home and a temp directory, locale, and every language's own
+/// configuration. Nothing here is a credential, and nothing with a credential
+/// in it is listed under a prefix. `GO*` would have admitted
+/// `GOOGLE_APPLICATION_CREDENTIALS`, and `CARGO_*` the registry token, so the
+/// Go and Rust names are spelled out.
+const PASSED_NAMES: &[&str] = &[
+    // Process and platform.
+    "PATH",
+    "PATHEXT",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "USER",
+    "USERNAME",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "PROCESSOR_LEVEL",
+    "PROCESSOR_REVISION",
+    "OS",
+    // Go.
+    "GOPATH",
+    "GOROOT",
+    "GOCACHE",
+    "GOMODCACHE",
+    "GOFLAGS",
+    "GOPROXY",
+    "GOSUMDB",
+    "GONOSUMDB",
+    "GOPRIVATE",
+    "GOTOOLCHAIN",
+    "GOTOOLDIR",
+    "GOTMPDIR",
+    "GOENV",
+    "GOWORK",
+    "GOOS",
+    "GOARCH",
+    "GO111MODULE",
+    // Rust.
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUST_BACKTRACE",
+    // Node and Deno.
+    "NODE_PATH",
+    "NODE_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+    "DENO_DIR",
+    "DENO_INSTALL",
+    "DENO_INSTALL_ROOT",
+    "DENO_NO_UPDATE_CHECK",
+    "DENO_NO_PROMPT",
+    // Python.
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+    "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE",
+    "VIRTUAL_ENV",
+];
+
+/// Prefixes whose whole namespace belongs to a toolchain: the JVM launchers,
+/// Kotlin, Scala and the coursier resolver behind it, the JVM build tools, and
+/// the locale and XDG directory conventions.
+const PASSED_PREFIXES: &[&str] = &[
+    "JAVA_",
+    "JDK_",
+    "JRE_",
+    "KOTLIN_",
+    "SCALA_",
+    "COURSIER_",
+    "GRADLE_",
+    "SBT_",
+    "MAVEN_",
+    "M2_",
+    "LC_",
+    "XDG_",
+];
+
+/// Never passed, whatever `AXIOM_EVAL_ENV_PASS` says.
+const REFUSED_NAMES: &[&str] = &["AXIOM_SIGNING_KEY", "AXIOM_SIGNING_KEY_FILE"];
+
+/// Give `command` an environment a snippet may see.
+///
+/// A child inherits its parent's environment unless told otherwise, and this
+/// parent holds the signing key. Measured before this existed: a Python
+/// snippet printed `AXIOM_SIGNING_KEY` and the report carried the value back
+/// to the caller in `stdout`. That hands the party whose claims the signature
+/// exists to check the means to sign anything, and it is the same shape for
+/// every other secret an operator's shell carries.
+///
+/// So the child starts from nothing and receives [`PASSED_NAMES`], anything
+/// under [`PASSED_PREFIXES`], and whatever `AXIOM_EVAL_ENV_PASS` names as a
+/// comma-separated list, for a toolchain that reads something not listed.
+/// The two signing-key variables are refused even there.
+///
+/// The probe that decides whether a toolchain is usable runs under the same
+/// environment as the snippet, so a toolchain that needs a variable the
+/// confinement drops is reported as unavailable rather than failing the
+/// snippet.
+pub fn confine_environment(command: &mut Command) -> &mut Command {
+    let extra: Vec<String> = std::env::var("AXIOM_EVAL_ENV_PASS")
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    command.env_clear();
+    for (name, value) in std::env::vars_os() {
+        let upper = name.to_string_lossy().to_ascii_uppercase();
+        if REFUSED_NAMES.contains(&upper.as_str()) {
+            continue;
+        }
+        let passed = PASSED_NAMES.contains(&upper.as_str())
+            || PASSED_PREFIXES.iter().any(|p| upper.starts_with(p))
+            || extra.contains(&upper);
+        if passed {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
 /// What a child process did, once it either finished or was killed.
 pub struct Finished {
     pub status: Option<std::process::ExitStatus>,
@@ -435,6 +594,10 @@ pub struct Finished {
     /// True when the process was killed for running past the deadline. A killed
     /// process has no meaningful exit status, so this must be checked first.
     pub timed_out: bool,
+    /// False when the pipes were still open at the deadline, so `stdout` and
+    /// `stderr` may be missing a tail. Something the snippet started was
+    /// still holding them.
+    pub drained: bool,
 }
 
 impl Finished {
@@ -443,12 +606,113 @@ impl Finished {
     }
 }
 
-/// Run a command, killing it if it outlives `timeout`.
+/// Read a pipe on its own thread, handing chunks over as they arrive.
+///
+/// Chunks rather than one buffer at EOF, because EOF is not guaranteed: the
+/// pipe stays open for as long as any process holding it lives, and the child
+/// can hand it to processes of its own. A reader that only reports at EOF
+/// reports nothing when the collector gives up waiting.
+fn drain_in_background(
+    pipe: Option<impl std::io::Read + Send + 'static>,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(mut pipe) = pipe else {
+            return;
+        };
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(chunk[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Collect what a reader has sent, until EOF or `until`, whichever is first.
+/// The flag says which.
+fn collect_until(rx: &std::sync::mpsc::Receiver<Vec<u8>>, until: Instant) -> (Vec<u8>, bool) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut buf = Vec::new();
+    loop {
+        let now = Instant::now();
+        if now >= until {
+            return (buf, false);
+        }
+        match rx.recv_timeout(until - now) {
+            Ok(chunk) => buf.extend_from_slice(&chunk),
+            Err(RecvTimeoutError::Timeout) => return (buf, false),
+            Err(RecvTimeoutError::Disconnected) => return (buf, true),
+        }
+    }
+}
+
+/// End the child and everything it started.
+///
+/// The child was made the leader of its own process group when it was
+/// spawned, so signalling the negative pid reaches every process it started
+/// that has not called setsid itself.
+#[cfg(unix)]
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id() as i32;
+    // SAFETY: kill(2) with a pid this process spawned and has not yet reaped,
+    // so the id cannot have been reused.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// End the child and everything it started.
+///
+/// `taskkill /T` follows the parent links down from the child. A process that
+/// has reparented itself is out of its reach; a Job Object would close that
+/// gap, at the cost of FFI this crate does not otherwise carry, and the
+/// bounded drain in [`run_with_timeout`] keeps even that case from holding
+/// the call open.
+#[cfg(windows)]
+fn kill_tree(child: &mut std::process::Child) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &child.id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Run a command, killing it and everything it started if it outlives
+/// `timeout`.
 ///
 /// `Command::output` waits forever, which is fine for a compiler and not fine
 /// for agent-authored code: one runaway loop and the server stops answering.
+///
+/// The deadline bounds the whole call, not only the child. Measured before it
+/// did: a Python snippet that started a second process and slept was killed
+/// at its two-second deadline, and the call still returned after sixty,
+/// because the second process had inherited the stdout pipe and draining it
+/// to EOF meant waiting for that process to finish on its own. So the child
+/// is spawned as a process group of its own on Unix, the whole tree is ended
+/// on timeout, and the pipes are read for a bounded time after the child is
+/// gone rather than to EOF.
+///
+/// The environment is confined here too, so no caller can forget it.
 pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result<Finished> {
-    use std::io::Read;
+    confine_environment(&mut command);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 
     let mut child = command
         .stdin(Stdio::null())
@@ -456,25 +720,10 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-
     // Each pipe is drained on its own thread. Reading them after the wait
     // deadlocks as soon as a snippet writes more than one pipe buffer holds.
-    let out_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let err_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let out_rx = drain_in_background(child.stdout.take());
+    let err_rx = drain_in_background(child.stderr.take());
 
     let deadline = Instant::now() + timeout;
     let mut timed_out = false;
@@ -483,8 +732,7 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
             Some(status) => break Some(status),
             None => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_tree(&mut child);
                     timed_out = true;
                     break None;
                 }
@@ -493,14 +741,26 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
         }
     };
 
-    let stdout = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).to_string();
-    let stderr = String::from_utf8_lossy(&err_thread.join().unwrap_or_default()).to_string();
+    // After the child exits its pipes close at once in the ordinary case. A
+    // process it started and left behind can hold them open, and that process
+    // is not the one being judged, so the wait for EOF is bounded: by the
+    // deadline when the child finished early, by a short grace when the
+    // deadline is what ended it.
+    let grace = Duration::from_secs(1);
+    let until = if timed_out {
+        Instant::now() + grace
+    } else {
+        deadline.max(Instant::now() + grace)
+    };
+    let (out, out_done) = collect_until(&out_rx, until);
+    let (err, err_done) = collect_until(&err_rx, until);
 
     Ok(Finished {
         status,
-        stdout,
-        stderr,
+        stdout: String::from_utf8_lossy(&out).to_string(),
+        stderr: String::from_utf8_lossy(&err).to_string(),
         timed_out,
+        drained: out_done && err_done,
     })
 }
 
@@ -588,7 +848,12 @@ fn probe_usable(probe: &str, args: &[&str]) -> bool {
         return *known;
     }
 
-    let usable = Command::new(resolve_program(probe))
+    // Under the snippet's environment, so that a toolchain which needs a
+    // variable the confinement drops is reported as missing rather than
+    // failing the snippet.
+    let mut command = Command::new(resolve_program(probe));
+    confine_environment(&mut command);
+    let usable = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -654,6 +919,7 @@ fn unavailable(
             hint: Some(hint),
         }],
         passed_checks_count: 0,
+        passed_checks_basis: String::new(),
         stdout: String::new(),
         stderr: actual,
         memory_allocated_bytes: None,
@@ -690,6 +956,7 @@ fn timed_out_report(
             ),
         }],
         passed_checks_count: 0,
+        passed_checks_basis: String::new(),
         stdout: String::new(),
         stderr: format!("timed out after {}s", timeout.as_secs()),
         memory_allocated_bytes: None,
@@ -724,18 +991,24 @@ fn compilation_error(
             hint: Some(format!("Fix the error {program} reported.")),
         }],
         passed_checks_count: 0,
+        passed_checks_basis: String::new(),
         stdout: done.stdout,
         stderr: detail,
         memory_allocated_bytes: None,
     }
 }
 
-fn temp_work_dir(tag: &str) -> std::io::Result<PathBuf> {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("axiom_eval_{tag}_{}_{seq}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+/// A fresh, unpredictably named directory for one evaluation, removed when the
+/// handle is dropped.
+///
+/// It used to be `axiom_eval_<tag>_<pid>_<seq>` under the shared temp
+/// directory, created with `create_dir_all`, which succeeds on a directory
+/// that already exists: anyone else on the machine who could guess the name
+/// could create it first and own what the snippet was written into.
+pub fn temp_work_dir(tag: &str) -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(&format!("axiom_eval_{tag}_"))
+        .tempdir()
 }
 
 /// Evaluate `snippet` as `language`, allowing `timeout` for each command.
@@ -845,7 +1118,7 @@ pub fn evaluate(
         (language.wrap)(snippet)
     };
 
-    let work_dir = match temp_work_dir(language.extension) {
+    let work = match temp_work_dir(language.extension) {
         Ok(d) => d,
         Err(e) => {
             return unavailable(
@@ -858,11 +1131,12 @@ pub fn evaluate(
             );
         }
     };
+    // Removed when `work` drops, on every path out of this function.
+    let work_dir = work.path().to_path_buf();
     let src_file = work_dir.join(recipe.file_name);
 
     if let Err(e) = std::fs::write(&src_file, &source) {
         let elapsed = ms(&start);
-        let _ = std::fs::remove_dir_all(&work_dir);
         return unavailable(
             task_id,
             language.engine,
@@ -880,7 +1154,6 @@ pub fn evaluate(
         match run_with_timeout(cmd, timeout) {
             Ok(done) if done.timed_out => {
                 let elapsed = ms(&start);
-                let _ = std::fs::remove_dir_all(&work_dir);
                 return timed_out_report(
                     task_id,
                     language.engine,
@@ -892,7 +1165,6 @@ pub fn evaluate(
             }
             Ok(done) if !done.succeeded() => {
                 let elapsed = ms(&start);
-                let _ = std::fs::remove_dir_all(&work_dir);
                 // A build that could not fetch its own dependencies has not
                 // found anything wrong with the snippet, so it is not a
                 // compilation error any more than it is a failure.
@@ -920,7 +1192,6 @@ pub fn evaluate(
             Ok(_) => {}
             Err(e) => {
                 let elapsed = ms(&start);
-                let _ = std::fs::remove_dir_all(&work_dir);
                 return unavailable(
                     task_id,
                     language.engine,
@@ -940,7 +1211,6 @@ pub fn evaluate(
         Ok(d) => d,
         Err(e) => {
             let elapsed = ms(&start);
-            let _ = std::fs::remove_dir_all(&work_dir);
             return unavailable(
                 task_id,
                 language.engine,
@@ -952,7 +1222,7 @@ pub fn evaluate(
         }
     };
     let duration = ms(&start);
-    let _ = std::fs::remove_dir_all(&work_dir);
+    drop(work);
 
     if done.timed_out {
         return timed_out_report(
@@ -1057,7 +1327,9 @@ pub fn toolchain_fingerprints() -> Vec<String> {
         let Some(recipe) = pick_recipe(language) else {
             continue;
         };
-        let version = Command::new(resolve_program(recipe.probe))
+        let mut command = Command::new(resolve_program(recipe.probe));
+        confine_environment(&mut command);
+        let version = command
             .args(recipe.version_args)
             .stdin(Stdio::null())
             .output()

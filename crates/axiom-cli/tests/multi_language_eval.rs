@@ -413,7 +413,7 @@ async fn the_language_is_taken_from_the_symbol_not_from_the_spelling() -> Result
     let short = eval(&server, "KotlinGate", "assert!(true);").await;
     assert_ne!(
         engine(&short),
-        "tier1_wasi_cranelift",
+        "tier1_native_rustc",
         "a Kotlin symbol must not be answered by the Rust tier: {short:?}"
     );
     assert_ne!(
@@ -449,7 +449,7 @@ async fn an_ambiguous_name_is_not_resolved_by_picking_a_compiler() -> Result<()>
             .unwrap_or(false),
         "the caller needs the candidates to pick from: {result:?}"
     );
-    assert_ne!(engine(&result), "tier1_wasi_cranelift", "{result:?}");
+    assert_ne!(engine(&result), "tier1_native_rustc", "{result:?}");
 
     std::fs::remove_dir_all(&root).ok();
     Ok(())

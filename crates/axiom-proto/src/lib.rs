@@ -38,10 +38,21 @@ pub struct CtopReport {
     pub blast_radius_nodes: usize,
     pub failed_checks: Vec<FailedCheck>,
     pub passed_checks_count: usize,
+    /// What `passed_checks_count` counts. For the native tiers it is the
+    /// number of assertion tokens found in the snippet's text, because no
+    /// toolchain reports how many assertions ran; a snippet with the word
+    /// `assert` in a comment counts it. A count that does not say what it
+    /// counts reads as a measurement, so this travels with it.
+    #[serde(default)]
+    pub passed_checks_basis: String,
     pub stdout: String,
     pub stderr: String,
     pub memory_allocated_bytes: Option<u64>,
 }
+
+/// The basis for a count of assertion tokens, see `CtopReport::passed_checks_basis`.
+pub const ASSERTION_TOKENS_BASIS: &str =
+    "assertion tokens found in the snippet text; not assertions observed to execute";
 
 /// AST Node metadata in the Merkle Graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +121,14 @@ pub struct ProvenanceAttestation {
     /// seal from whatever arguments it was handed.
     #[serde(default)]
     pub symbol_path: String,
+    /// A real Merkle root of the state before, not a constant. `axiom` fills it
+    /// with the CRDT tree root. It was the literal `merkle_root_prev_77a1` on
+    /// every record until that was found to distinguish nothing.
     pub parent_merkle_root: String,
+    /// A real Merkle root of the attested code: `axiom` fills it with the AST
+    /// index root, a digest over every indexed symbol and its body hash, so it
+    /// moves when the code the record is about moves. It was a truncated slice
+    /// of the CRDT root before.
     pub commit_merkle_root: String,
     pub agent_identity: String,
     pub prompt_digest: String,
@@ -143,6 +161,50 @@ pub struct NewAttestation<'a> {
     pub previous_seal: &'a str,
 }
 
+/// Re-derive the seal from a record's stored fields and the prompt it is
+/// claimed for.
+///
+/// Every field is here, and every field is length-prefixed. The old seal
+/// covered the roots, the identity, the prompt, the symbol, the task id and
+/// the previous seal, so editing `verified_by`, `verification_detail` or
+/// `timestamp` left a record that still verified. Measured: a `reported`
+/// record was re-labelled `sandbox` in the ledger and `axiom verify` still
+/// said VALID. Those three are inside it now, and the prefixing stops two
+/// different field splits, `a` + `bc` against `ab` + `c`, from hashing alike.
+///
+/// `generate` and `verify` both go through here so they cannot drift.
+#[allow(clippy::too_many_arguments)]
+fn seal_over(
+    parent_merkle_root: &str,
+    commit_merkle_root: &str,
+    agent_identity: &str,
+    symbol_path: &str,
+    ctop_proof_hash: &str,
+    verified_by: &str,
+    verification_detail: &str,
+    timestamp: &str,
+    previous_seal: &str,
+    prompt: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for field in [
+        parent_merkle_root,
+        commit_merkle_root,
+        agent_identity,
+        symbol_path,
+        ctop_proof_hash,
+        verified_by,
+        verification_detail,
+        timestamp,
+        previous_seal,
+        prompt,
+    ] {
+        hasher.update(&(field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    format!("blake3_seal_{}", hasher.finalize().to_hex())
+}
+
 impl ProvenanceAttestation {
     pub fn generate(details: NewAttestation<'_>) -> Self {
         let NewAttestation {
@@ -157,15 +219,38 @@ impl ProvenanceAttestation {
             previous_seal,
         } = details;
 
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(parent_merkle_root.as_bytes());
-        hasher.update(commit_merkle_root.as_bytes());
-        hasher.update(agent_identity.as_bytes());
-        hasher.update(prompt.as_bytes());
-        hasher.update(symbol_path.as_bytes());
-        hasher.update(ctop_task_id.as_bytes());
-        hasher.update(previous_seal.as_bytes());
-        let digest = hasher.finalize().to_hex().to_string();
+        // The timestamp is inside the seal, so it is chosen before the seal is
+        // computed rather than after the struct is built.
+        let timestamp = chrono::Utc::now().to_rfc3339();
+
+        // A real digest of the prompt alone, not a slice of the seal. Two
+        // records for one prompt share it; two for different prompts do not,
+        // which is what lets a reader group records by prompt without holding
+        // the prompt text.
+        let prompt_digest = format!("blake3:{}", &blake3::hash(prompt.as_bytes()).to_hex()[..32]);
+
+        // A digest of what was checked and how: the kind, the detail, and the
+        // task id it rests on. It used to be a slice of the same combined
+        // digest as everything else, so it named no trace in particular.
+        let mut trace = blake3::Hasher::new();
+        for part in [verified_by, verification_detail, ctop_task_id] {
+            trace.update(&(part.len() as u64).to_le_bytes());
+            trace.update(part.as_bytes());
+        }
+        let sandbox_trace_hash = format!("trace:{}", &trace.finalize().to_hex()[..32]);
+
+        let seal = seal_over(
+            parent_merkle_root,
+            commit_merkle_root,
+            agent_identity,
+            symbol_path,
+            ctop_task_id,
+            verified_by,
+            verification_detail,
+            &timestamp,
+            previous_seal,
+            prompt,
+        );
 
         Self {
             previous_seal: previous_seal.to_string(),
@@ -179,11 +264,11 @@ impl ProvenanceAttestation {
             parent_merkle_root: parent_merkle_root.to_string(),
             commit_merkle_root: commit_merkle_root.to_string(),
             agent_identity: agent_identity.to_string(),
-            prompt_digest: format!("blake3:{}", &digest[..16]),
-            sandbox_trace_hash: format!("trace:{}", &digest[16..32]),
+            prompt_digest,
+            sandbox_trace_hash,
             ctop_proof_hash: ctop_task_id.to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            seal: format!("blake3_seal_{}", &digest[32..]),
+            timestamp,
+            seal,
         }
     }
 
@@ -209,17 +294,18 @@ impl ProvenanceAttestation {
             return false;
         }
 
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(self.parent_merkle_root.as_bytes());
-        hasher.update(self.commit_merkle_root.as_bytes());
-        hasher.update(self.agent_identity.as_bytes());
-        hasher.update(prompt.as_bytes());
-        hasher.update(expected_symbol.as_bytes());
-        hasher.update(self.ctop_proof_hash.as_bytes());
-        hasher.update(self.previous_seal.as_bytes());
-        let digest = hasher.finalize().to_hex().to_string();
-
-        let expected = format!("blake3_seal_{}", &digest[32..]);
+        let expected = seal_over(
+            &self.parent_merkle_root,
+            &self.commit_merkle_root,
+            &self.agent_identity,
+            expected_symbol,
+            &self.ctop_proof_hash,
+            &self.verified_by,
+            &self.verification_detail,
+            &self.timestamp,
+            &self.previous_seal,
+            prompt,
+        );
         self.seal == expected
     }
 }
@@ -240,6 +326,7 @@ impl CtopReport {
             blast_radius_nodes: 1,
             failed_checks: Vec::new(),
             passed_checks_count: passed_count,
+            passed_checks_basis: ASSERTION_TOKENS_BASIS.to_string(),
             stdout,
             stderr: String::new(),
             memory_allocated_bytes: None,
@@ -262,6 +349,7 @@ impl CtopReport {
             blast_radius_nodes: failed_checks.len().max(1),
             failed_checks,
             passed_checks_count: 0,
+            passed_checks_basis: String::new(),
             stdout,
             stderr,
             memory_allocated_bytes: None,

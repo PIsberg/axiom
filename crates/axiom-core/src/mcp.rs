@@ -42,6 +42,30 @@ pub const UNATTRIBUTED: &str = "unattributed";
 /// than truncated at each of those.
 const MAX_AGENT_IDENTITY: usize = 128;
 
+/// What an agent is meant to do with these tools, and in what order. Returned
+/// from `initialize`, which is where MCP expects a server to say so.
+const INSTRUCTIONS: &str = "\
+Axiom indexes a codebase into a symbol graph and answers queries against it. The \
+index is a snapshot from `axiom scan`; it does not track edits made since, so a \
+result reflects the code as last scanned.
+
+A change to one symbol is checked like this:
+1. axiom_query_symbol to read a symbol, its signature and its dependencies. A \
+short name that matches several symbols comes back as candidates, not a guess.
+2. axiom_get_blast_radius to list the tests that reach the symbol, so only those \
+need running. An empty list means none were found in the index, not that nothing \
+is affected.
+3. axiom_eval_patch to compile and run a snippet in the language of the symbol's \
+file. It never returns PASSED for something that did not run, and the snippet \
+runs with a confined environment.
+4. Either attest against that run, or run the project's own tests and report the \
+outcome with axiom_record_verification, then axiom_attest_commit. A record is \
+only issued for a check that happened and passed, and says whether axiom ran it \
+or an agent reported it.
+
+axiom_apply_mutation records a Tree-CRDT change, and axiom_search_regex searches \
+source text.";
+
 /// The identity a caller asked to be recorded as, or an error naming the field.
 ///
 /// Self-declared and unverified: axiom stores what it is told. That is honest
@@ -83,8 +107,29 @@ fn agent_identity_of(args: &Value) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// The `.axiom` directory for the workspace the working directory sits in.
+///
+/// Walks up for an existing `.axiom`, so `axiom verify` run from a subdirectory
+/// reads the same ledger the server, which discovers its index the same way,
+/// writes. Falls back to `<cwd>/.axiom` when none is found, which is where a
+/// first `axiom scan` will create one.
+pub fn find_axiom_dir() -> PathBuf {
+    if let Ok(mut curr) = std::env::current_dir() {
+        loop {
+            let candidate = curr.join(".axiom");
+            if candidate.is_dir() {
+                return candidate;
+            }
+            if !curr.pop() {
+                break;
+            }
+        }
+    }
+    PathBuf::from(".axiom")
+}
+
 pub fn attestation_ledger_path() -> PathBuf {
-    PathBuf::from(".axiom").join("attestations.json")
+    find_axiom_dir().join("attestations.json")
 }
 
 /// Every attestation issued so far. A missing ledger is an empty one: nothing
@@ -254,7 +299,7 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 
 /// Where the Tree-CRDT operation log lives, beside the index it describes.
 pub fn crdt_op_log_path() -> PathBuf {
-    PathBuf::from(".axiom").join("crdt_ops.json")
+    find_axiom_dir().join("crdt_ops.json")
 }
 
 /// Every operation recorded so far. A missing log is an empty one.
@@ -312,6 +357,33 @@ pub struct AxiomMcpServer {
     pub ast_index: Arc<AstIndex>,
     pub wasi_engine: Arc<WasiEngine>,
     pub tree_crdt: Arc<TreeCrdt>,
+    /// The `.axiom` directory this server reads from and writes to.
+    ///
+    /// `find_index_file` walks up from the working directory to find the index,
+    /// and the server inherits its client's working directory, which may be a
+    /// subdirectory of the project. Reads came from the discovered directory
+    /// while every write, the ledger, the op log and a persisted mutation, went
+    /// to `<cwd>/.axiom`, so an agent working from a subdirectory wrote where
+    /// the next read would not look. Recording the directory here and deriving
+    /// every path from it keeps the two together.
+    axiom_dir: PathBuf,
+}
+
+impl AxiomMcpServer {
+    /// The ledger of issued attestations, under this server's `.axiom`.
+    pub fn ledger_path(&self) -> PathBuf {
+        self.axiom_dir.join("attestations.json")
+    }
+
+    /// The Tree-CRDT operation log, under this server's `.axiom`.
+    pub fn op_log_path(&self) -> PathBuf {
+        self.axiom_dir.join("crdt_ops.json")
+    }
+
+    /// The index this server persists a mutated symbol into.
+    pub fn index_path(&self) -> PathBuf {
+        self.axiom_dir.join("index.json")
+    }
 }
 
 fn find_index_file() -> Option<std::path::PathBuf> {
@@ -351,6 +423,16 @@ impl AxiomMcpServer {
             None => Arc::new(AstIndex::new()),
         };
 
+        // Reads and writes share one directory. When an index was discovered,
+        // it is that index's own `.axiom`; otherwise it is `<cwd>/.axiom`, so a
+        // server started with no index still writes somewhere consistent.
+        let axiom_dir = match index_path.and_then(|p| p.parent()) {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".axiom"),
+        };
+
         let wasi_engine = Arc::new(WasiEngine::new()?);
         // Each server is a distinct replica. Sharing one id across processes
         // makes concurrent agents produce identical Lamport stamps, and a
@@ -359,8 +441,8 @@ impl AxiomMcpServer {
 
         // Replay what other agents have recorded, so this server starts from the
         // shared state rather than an empty tree of its own.
-        if let Some(index) = index_path {
-            let ops = load_crdt_ops(&index.with_file_name("crdt_ops.json"));
+        {
+            let ops = load_crdt_ops(&axiom_dir.join("crdt_ops.json"));
             for op in ops {
                 tree_crdt.apply_op(op);
             }
@@ -371,6 +453,7 @@ impl AxiomMcpServer {
             ast_index,
             wasi_engine,
             tree_crdt,
+            axiom_dir,
         })
     }
 
@@ -427,7 +510,13 @@ impl AxiomMcpServer {
                     },
                     "capabilities": {
                         "tools": {}
-                    }
+                    },
+                    // The loop these tools are for, in the field MCP provides so
+                    // a client can put it in front of the model without the
+                    // agent having to discover the order by trial. The index is
+                    // a snapshot taken by `axiom scan`; a change on disk since
+                    // then is not reflected until the next scan.
+                    "instructions": INSTRUCTIONS
                 })),
                 error: None,
             },
@@ -462,14 +551,14 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_eval_patch",
-                            "description": "Run a snippet and report what happened. The snippet is written in the language of the file the symbol came from, and is run by that language's toolchain: rustc for Rust, wasmtime for a WAT or wasm snippet, and python, node, deno or tsc, go and javac for the rest. Takes a few hundred milliseconds, since it invokes a real compiler. engine says which one answered. A language with no evaluator, a toolchain that is not installed, and a name matching several symbols are all refused rather than guessed at, and a snippet that does not terminate is killed and reported as TIMEOUT. Never returns PASSED for something that did not run.",
+                            "description": "Run a snippet and report what happened. The snippet is written in the language of the file the symbol came from, and is run by that language's toolchain: rustc for Rust, wasmtime for a WAT or wasm snippet, and python, node, deno or tsc, go and javac for the rest. A symbol the index does not recognise is treated as Rust, and 'anonymous' forces it; pass a symbol that is indexed to have its own language chosen. Takes a few hundred milliseconds, since it invokes a real compiler. engine says which one answered. The snippet runs with a confined environment, so it cannot read the signing key or the operator's other secrets. A language with no evaluator, a toolchain that is not installed, and a name matching several symbols are all refused rather than guessed at, and a snippet that does not terminate is killed, along with anything it started, and reported as TIMEOUT. Never returns PASSED for something that did not run.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "symbol_path": { "type": "string" },
-                                    "code_snippet": { "type": "string" },
-                                    "test_target": { "type": "string" }
-                                }
+                                    "symbol_path": { "type": "string", "description": "The symbol whose language to evaluate in; an unrecognised name is treated as Rust, 'anonymous' forces Rust" },
+                                    "code_snippet": { "type": "string", "description": "The code to run. Rust and WAT run in tier 1; other languages in their own toolchain" }
+                                },
+                                "required": ["code_snippet"]
                             }
                         },
                         {
@@ -542,19 +631,29 @@ impl AxiomMcpServer {
 
                 let result = self.execute_tool(tool_name, args).await;
                 match result {
-                    Ok(val) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id,
-                        result: Some(json!({
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": serde_json::to_string_pretty(&val).unwrap_or_default()
-                                }
-                            ]
-                        })),
-                        error: None,
-                    },
+                    Ok(val) => {
+                        // A tool that ran and reported a problem carries an
+                        // `error` field in its payload. MCP surfaces such a
+                        // result to the model only when `isError` is set, so a
+                        // not-found or refusal reaches the agent as something to
+                        // react to rather than as an ordinary answer. It stays a
+                        // result, not a JSON-RPC error, because the tool did run.
+                        let is_error = val.get("error").is_some();
+                        JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: Some(json!({
+                                "isError": is_error,
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": serde_json::to_string_pretty(&val).unwrap_or_default()
+                                    }
+                                ]
+                            })),
+                            error: None,
+                        }
+                    }
                     Err(e) => JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id,
@@ -736,7 +835,7 @@ impl AxiomMcpServer {
                 // to be known before the record is sealed, and the seal before it
                 // is signed, so reading the tail and writing the record cannot be
                 // two separate steps without a second agent slipping between them.
-                let ledger_path = attestation_ledger_path();
+                let ledger_path = self.ledger_path();
                 let _ledger_lock = match axiom_ast::IndexLock::acquire(&ledger_path) {
                     Ok(l) => l,
                     Err(e) => {
@@ -746,10 +845,19 @@ impl AxiomMcpServer {
                 let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
                 let previous_seal = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
 
-                let commit_root = format!("merkle_root_{}", &root[..8]);
+                // Two real Merkle roots the engine maintains, not a constant and
+                // a slice of one. `parent_merkle_root` used to be the literal
+                // `merkle_root_prev_77a1` on every record ever issued, and
+                // `commit_merkle_root` the first eight hex of the CRDT root, so
+                // a reader could not tell one attested state from another. The
+                // AST index root is a digest over every indexed symbol and its
+                // body hash, so it moves when the code the record is about
+                // moves; the CRDT tree root is the multi-agent mutation state.
+                // Both are covered by the seal.
+                let code_root = self.ast_index.compute_merkle_root();
                 let attestation = ProvenanceAttestation::generate(NewAttestation {
-                    parent_merkle_root: "merkle_root_prev_77a1",
-                    commit_merkle_root: &commit_root,
+                    parent_merkle_root: &root,
+                    commit_merkle_root: &code_root,
                     agent_identity: &agent_identity,
                     prompt,
                     symbol_path: symbol,
@@ -791,22 +899,29 @@ impl AxiomMcpServer {
             }
 
             "axiom_apply_mutation" => {
-                let node_id = args
-                    .get("node_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("node_01");
-                let symbol = args
-                    .get("symbol_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("module::fn");
-                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                // Required, not defaulted. A missing symbol_path used to become
+                // the literal `module::fn`, so a malformed call wrote a node
+                // under a name no source declares and persisted it to the
+                // index. The same for node_id, which keyed the CRDT op.
+                let symbol = match required_str(&args, "symbol_path") {
+                    Ok(s) => s,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+                let node_id = match required_str(&args, "node_id") {
+                    Ok(s) => s,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+                let content = match required_str(&args, "content") {
+                    Ok(s) => s,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
 
                 let op = self
                     .tree_crdt
                     .insert_node("root", node_id, symbol, "function", content);
 
                 // Record it where the next agent will see it.
-                if let Err(e) = append_crdt_op(&crdt_op_log_path(), &op) {
+                if let Err(e) = append_crdt_op(&self.op_log_path(), &op) {
                     return Ok(json!({
                         "error": format!("could not record the mutation: {e}")
                     }));
@@ -819,11 +934,9 @@ impl AxiomMcpServer {
                 // Persist just this symbol. Writing the whole in-memory index
                 // here would also write back every other symbol as this process
                 // last saw it, discarding what another agent recorded meanwhile.
-                if let Err(e) = self
-                    .ast_index
-                    .persist_symbol(std::path::Path::new(".axiom/index.json"), symbol)
-                {
-                    eprintln!("Warning: Failed to save .axiom/index.json: {}", e);
+                let index_path = self.index_path();
+                if let Err(e) = self.ast_index.persist_symbol(&index_path, symbol) {
+                    eprintln!("Warning: Failed to save {}: {}", index_path.display(), e);
                 }
 
                 Ok(json!({

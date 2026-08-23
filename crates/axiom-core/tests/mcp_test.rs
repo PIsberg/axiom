@@ -28,7 +28,32 @@ async fn test_mcp_initialize() {
 
     let resp = server.handle_request(req).await;
     assert_eq!(resp.jsonrpc, "2.0");
-    assert!(resp.result.is_some());
+    let result = resp.result.expect("initialize returns a result");
+
+    // MCP puts server guidance in front of the model through this field, so the
+    // agent does not have to learn the tool order by trial. It has to be there
+    // and it has to name the loop.
+    let instructions = result
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .expect("initialize must carry instructions");
+    for tool in [
+        "axiom_query_symbol",
+        "axiom_get_blast_radius",
+        "axiom_eval_patch",
+        "axiom_record_verification",
+        "axiom_attest_commit",
+    ] {
+        assert!(
+            instructions.contains(tool),
+            "the instructions must name {tool}: {instructions:?}"
+        );
+    }
+    // And it must say the index is a snapshot, or an agent trusts a stale read.
+    assert!(
+        instructions.contains("snapshot") || instructions.contains("scan"),
+        "the instructions must say the index is a snapshot: {instructions:?}"
+    );
 }
 
 #[tokio::test]

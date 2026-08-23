@@ -65,6 +65,102 @@ struct HostState {
     wasi: WasiP1Ctx,
 }
 
+/// The report for a WAT module's `run` export: `Ok` when it returned,
+/// `Err(Some(trap))` when it trapped, `Err(None)` when there was no such
+/// export and so nothing was executed.
+fn wat_verdict(
+    outcome: Result<(), Option<wasmtime::Error>>,
+    task_id: String,
+    symbol_path: &str,
+    duration_ms: f64,
+) -> CtopReport {
+    let engine = "tier1_wasi_cranelift".to_string();
+    match outcome {
+        Ok(()) => {
+            let mut report = CtopReport::pass(
+                task_id,
+                engine,
+                duration_ms,
+                1,
+                "WebAssembly WAT module compiled and its `run` export returned".to_string(),
+            );
+            report.passed_checks_basis =
+                "the exported `run` function returned without trapping".to_string();
+            report
+        }
+        Err(Some(trap)) => CtopReport::fail(
+            task_id,
+            engine,
+            duration_ms,
+            vec![FailedCheck {
+                symbol: symbol_path.to_string(),
+                error_type: "Trap/ExecutionError".to_string(),
+                expected: Some("`run` to return".to_string()),
+                actual: Some(trap.to_string()),
+                stack_trace_ast_nodes: vec![symbol_path.to_string()],
+                hint: Some(
+                    "The module trapped: check memory bounds, unreachable instructions and fuel"
+                        .to_string(),
+                ),
+            }],
+            String::new(),
+            trap.to_string(),
+        ),
+        Err(None) => CtopReport::fail(
+            task_id,
+            engine,
+            duration_ms,
+            vec![FailedCheck {
+                symbol: symbol_path.to_string(),
+                error_type: "SymbolNotFound".to_string(),
+                expected: Some(
+                    "an exported function named `run` taking and returning nothing".to_string(),
+                ),
+                actual: Some("no such export, so nothing was executed".to_string()),
+                stack_trace_ast_nodes: vec![],
+                hint: Some("Export the entry point as `run`".to_string()),
+            }],
+            String::new(),
+            "the module has no `run` export".to_string(),
+        ),
+    }
+}
+
+/// The rustc tier could not run anything: no compiler, or no writable work
+/// directory. Never a verdict about the snippet.
+fn unavailable_rustc(
+    task_id: String,
+    symbol_path: &str,
+    duration_ms: f64,
+    actual: String,
+) -> CtopReport {
+    CtopReport {
+        task_id,
+        engine: RUSTC_ENGINE.to_string(),
+        status: CtopStatus::EvaluatorUnavailable,
+        execution_duration_ms: duration_ms,
+        blast_radius_nodes: 1,
+        failed_checks: vec![FailedCheck {
+            symbol: symbol_path.to_string(),
+            error_type: "EvaluatorUnavailable".to_string(),
+            expected: Some("rustc on PATH and a writable temp directory".to_string()),
+            actual: Some(actual.clone()),
+            stack_trace_ast_nodes: vec![symbol_path.to_string()],
+            hint: Some("Install rustc and put it on PATH, or run the project's own tests and report the outcome with axiom_record_verification".to_string()),
+        }],
+        passed_checks_count: 0,
+        passed_checks_basis: String::new(),
+        stdout: String::new(),
+        stderr: actual,
+        memory_allocated_bytes: None,
+    }
+}
+
+/// What the Rust path calls itself. It used to say `tier1_wasi_cranelift`,
+/// naming an engine it does not use; a reader of a provenance record sees
+/// this under "Checked by", so it has to say what ran.
+const RUSTC_ENGINE: &str = "tier1_native_rustc";
+
 #[async_trait]
 impl SandboxEngine for WasiEngine {
     async fn execute_wasi(&self, wasm_binary: &[u8], entrypoint: &str) -> Result<CtopReport> {
@@ -90,6 +186,7 @@ impl SandboxEngine for WasiEngine {
                         hint: Some("Verify WASM bytecode structure and magic header".to_string()),
                     }],
                     passed_checks_count: 0,
+                    passed_checks_basis: String::new(),
                     stdout: String::new(),
                     stderr: e.to_string(),
                     memory_allocated_bytes: None,
@@ -213,18 +310,17 @@ impl SandboxEngine for WasiEngine {
 
                     match linker.instantiate(&mut store, &module) {
                         Ok(instance) => {
+                            // The call's result used to be discarded, so a
+                            // `run` that trapped, and a module with no `run`
+                            // at all, both came back PASSED with one passed
+                            // check. Nothing that did not return cleanly is a
+                            // pass.
+                            let outcome = instance
+                                .get_typed_func::<(), ()>(&mut store, "run")
+                                .map_err(|_| None)
+                                .and_then(|func| func.call(&mut store, ()).map_err(Some));
                             let dur = start.elapsed().as_secs_f64() * 1000.0;
-                            if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, "run") {
-                                let _ = func.call(&mut store, ());
-                            }
-                            return Ok(CtopReport::pass(
-                                task_id,
-                                "tier1_wasi_cranelift".to_string(),
-                                dur,
-                                1,
-                                "WebAssembly WAT module compiled and executed via Wasmtime"
-                                    .to_string(),
-                            ));
+                            return Ok(wat_verdict(outcome, task_id, symbol_path, dur));
                         }
                         Err(e) => {
                             let dur = start.elapsed().as_secs_f64() * 1000.0;
@@ -263,6 +359,7 @@ impl SandboxEngine for WasiEngine {
                             hint: Some("Fix WebAssembly text format syntax".to_string()),
                         }],
                         passed_checks_count: 0,
+                        passed_checks_basis: String::new(),
                         stdout: String::new(),
                         stderr: e.to_string(),
                         memory_allocated_bytes: None,
@@ -309,6 +406,7 @@ impl SandboxEngine for WasiEngine {
                             ),
                         }],
                         passed_checks_count: 0,
+                        passed_checks_basis: String::new(),
                         stdout: String::new(),
                         stderr: format!("no evaluator for .{ext}"),
                         memory_allocated_bytes: None,
@@ -317,44 +415,29 @@ impl SandboxEngine for WasiEngine {
             }
         }
 
-        // 2. Real Syntax & Token Validation
-        if code_snippet.contains("@@@")
-            || code_snippet.contains("???")
-            || code_snippet.contains("this is not valid")
-            || code_snippet.contains("invalid syntax")
-        {
-            let dur = start.elapsed().as_secs_f64() * 1000.0;
-            return Ok(CtopReport {
-                task_id,
-                engine: "tier1_wasi_cranelift".to_string(),
-                status: CtopStatus::CompilationError,
-                execution_duration_ms: dur,
-                blast_radius_nodes: 1,
-                failed_checks: vec![FailedCheck {
-                    symbol: symbol_path.to_string(),
-                    error_type: "CompilationError".to_string(),
-                    expected: Some("Valid token stream".to_string()),
-                    actual: Some("Syntax error: unexpected illegal token in stream".to_string()),
-                    stack_trace_ast_nodes: vec![symbol_path.to_string()],
-                    hint: Some("Fix syntax error and remove illegal characters".to_string()),
-                }],
-                passed_checks_count: 0,
-                stdout: String::new(),
-                stderr: "Compilation error: illegal token".to_string(),
-                memory_allocated_bytes: None,
-            });
-        }
-
-        // 3. Real Rust/Native Sandbox Execution via rustc
-        static EVAL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let seq = EVAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temp_dir = std::env::temp_dir().join(format!(
-            "axiom_eval_{}_{}_{:x}",
-            std::process::id(),
-            seq,
-            start.elapsed().as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&temp_dir);
+        // 3. Rust, compiled by rustc and run as a process of its own.
+        //
+        // A substring check used to sit here and return CompilationError for
+        // any snippet containing `???`, `@@@`, "invalid syntax" or "this is
+        // not valid", before rustc saw it. `println!("???")` compiles, and the
+        // only thing allowed to say otherwise is the compiler.
+        //
+        // Not a sandbox, whatever the old engine label said: this is the same
+        // arrangement as tier 2, a temp directory and the real toolchain with
+        // this process's privileges, and the label now says so. The work
+        // directory is removed when `work` drops, on every path out.
+        let work = match native::temp_work_dir("rs") {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(unavailable_rustc(
+                    task_id,
+                    symbol_path,
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    format!("could not create a work directory: {e}"),
+                ));
+            }
+        };
+        let temp_dir = work.path().to_path_buf();
         let src_file = temp_dir.join("eval_main.rs");
         let bin_file = temp_dir.join(if cfg!(windows) {
             "eval_main.exe"
@@ -381,138 +464,170 @@ fn main() {{
             )
         };
 
-        let write_ok = std::fs::write(&src_file, &source_code);
-
-        if write_ok.is_ok() {
-            // Attempt compile with rustc
-            let timeout = native::configured_timeout();
-            let mut rustc = Command::new("rustc");
-            rustc
-                .arg(&src_file)
-                .arg("-o")
-                .arg(&bin_file)
-                .arg("--crate-type")
-                .arg("bin");
-            let compile_output = native::run_with_timeout(rustc, timeout);
-
-            if let Ok(c_out) = compile_output {
-                if !c_out.succeeded() {
-                    let stderr = c_out.stderr.clone();
-                    let dur = start.elapsed().as_secs_f64() * 1000.0;
-                    let _ = std::fs::remove_dir_all(&temp_dir);
-                    return Ok(CtopReport {
-                        task_id,
-                        engine: "tier1_wasi_cranelift".to_string(),
-                        status: CtopStatus::CompilationError,
-                        execution_duration_ms: dur,
-                        blast_radius_nodes: 1,
-                        failed_checks: vec![FailedCheck {
-                            symbol: symbol_path.to_string(),
-                            error_type: "RustcCompilationError".to_string(),
-                            expected: Some("Clean compilation".to_string()),
-                            actual: Some(stderr.clone()),
-                            stack_trace_ast_nodes: vec![symbol_path.to_string()],
-                            hint: Some("Fix syntax or type error reported by compiler".to_string()),
-                        }],
-                        passed_checks_count: 0,
-                        stdout: String::new(),
-                        stderr,
-                        memory_allocated_bytes: None,
-                    });
-                }
-
-                // Run compiled binary in isolated process
-                let run_output = native::run_with_timeout(Command::new(&bin_file), timeout);
-                let dur = start.elapsed().as_secs_f64() * 1000.0;
-                let _ = std::fs::remove_dir_all(&temp_dir);
-
-                if let Ok(r_out) = run_output {
-                    if r_out.timed_out {
-                        return Ok(CtopReport {
-                            task_id,
-                            engine: "tier1_wasi_cranelift".to_string(),
-                            status: CtopStatus::Timeout,
-                            execution_duration_ms: dur,
-                            blast_radius_nodes: 1,
-                            failed_checks: vec![FailedCheck {
-                                symbol: symbol_path.to_string(),
-                                error_type: "EvaluationTimeout".to_string(),
-                                expected: Some(format!(
-                                    "the snippet to finish within {}s",
-                                    timeout.as_secs()
-                                )),
-                                actual: Some("still running when the deadline passed".to_string()),
-                                stack_trace_ast_nodes: vec![symbol_path.to_string()],
-                                hint: Some(
-                                    "The snippet did not terminate, so nothing is known about whether it would have passed. Raise AXIOM_EVAL_TIMEOUT_SECS if the work is genuinely slow."
-                                        .to_string(),
-                                ),
-                            }],
-                            passed_checks_count: 0,
-                            stdout: r_out.stdout,
-                            stderr: r_out.stderr,
-                            memory_allocated_bytes: None,
-                        });
-                    }
-                    if r_out.succeeded() {
-                        let assert_count = code_snippet.matches("assert").count();
-                        return Ok(CtopReport::pass(
-                            task_id,
-                            "tier1_wasi_cranelift".to_string(),
-                            dur,
-                            assert_count,
-                            format!(
-                                "Sandbox evaluated successfully: {}",
-                                code_snippet.lines().next().unwrap_or("")
-                            ),
-                        ));
-                    } else {
-                        let stderr = r_out.stderr.clone();
-                        return Ok(CtopReport::fail(
-                            task_id,
-                            "tier1_wasi_cranelift".to_string(),
-                            dur,
-                            vec![FailedCheck {
-                                symbol: symbol_path.to_string(),
-                                error_type: "Panic/AssertionFailure".to_string(),
-                                expected: Some("Invariant expression == true".to_string()),
-                                actual: Some(if stderr.is_empty() { "Process exited with non-zero status".to_string() } else { stderr.clone() }),
-                                stack_trace_ast_nodes: vec![symbol_path.to_string()],
-                                hint: Some("Assertion expression evaluated to false during sandbox execution".to_string()),
-                            }],
-                            r_out.stdout.clone(),
-                            stderr,
-                        ));
-                    }
-                }
-            }
+        if let Err(e) = std::fs::write(&src_file, &source_code) {
+            return Ok(unavailable_rustc(
+                task_id,
+                symbol_path,
+                start.elapsed().as_secs_f64() * 1000.0,
+                format!("could not write the snippet to {}: {e}", src_file.display()),
+            ));
         }
 
-        let dur = start.elapsed().as_secs_f64() * 1000.0;
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        // Compile. run_with_timeout confines the environment and ends the
+        // whole process tree on timeout, for rustc and for the binary alike.
+        let timeout = native::configured_timeout();
+        let mut rustc = Command::new("rustc");
+        rustc
+            .arg(&src_file)
+            .arg("-o")
+            .arg(&bin_file)
+            .arg("--crate-type")
+            .arg("bin");
+        let c_out = match native::run_with_timeout(rustc, timeout) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(unavailable_rustc(
+                    task_id,
+                    symbol_path,
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    format!("could not run rustc: {e}"),
+                ));
+            }
+        };
+        if c_out.timed_out {
+            let dur = start.elapsed().as_secs_f64() * 1000.0;
+            return Ok(rustc_timeout(
+                task_id,
+                symbol_path,
+                dur,
+                timeout,
+                "rustc",
+                c_out,
+            ));
+        }
+        if !c_out.succeeded() {
+            let stderr = c_out.stderr.clone();
+            let dur = start.elapsed().as_secs_f64() * 1000.0;
+            return Ok(CtopReport {
+                task_id,
+                engine: RUSTC_ENGINE.to_string(),
+                status: CtopStatus::CompilationError,
+                execution_duration_ms: dur,
+                blast_radius_nodes: 1,
+                failed_checks: vec![FailedCheck {
+                    symbol: symbol_path.to_string(),
+                    error_type: "RustcCompilationError".to_string(),
+                    expected: Some("Clean compilation".to_string()),
+                    actual: Some(stderr.clone()),
+                    stack_trace_ast_nodes: vec![symbol_path.to_string()],
+                    hint: Some("Fix syntax or type error reported by compiler".to_string()),
+                }],
+                passed_checks_count: 0,
+                passed_checks_basis: String::new(),
+                stdout: c_out.stdout,
+                stderr,
+                memory_allocated_bytes: None,
+            });
+        }
 
-        // Explicit error when real evaluator could not execute
-        Ok(CtopReport {
+        // Run the binary as a process of its own.
+        let r_out = match native::run_with_timeout(Command::new(&bin_file), timeout) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(unavailable_rustc(
+                    task_id,
+                    symbol_path,
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    format!("could not run the compiled snippet: {e}"),
+                ));
+            }
+        };
+        let dur = start.elapsed().as_secs_f64() * 1000.0;
+        drop(work);
+
+        if r_out.timed_out {
+            return Ok(rustc_timeout(
+                task_id,
+                symbol_path,
+                dur,
+                timeout,
+                "the compiled snippet",
+                r_out,
+            ));
+        }
+        if r_out.succeeded() {
+            let mut report = CtopReport::pass(
+                task_id,
+                RUSTC_ENGINE.to_string(),
+                dur,
+                code_snippet.matches("assert").count(),
+                String::new(),
+            );
+            report.stdout = r_out.stdout;
+            report.stderr = r_out.stderr;
+            return Ok(report);
+        }
+        let stderr = r_out.stderr.clone();
+        Ok(CtopReport::fail(
             task_id,
-            engine: "tier1_wasi_cranelift".to_string(),
-            status: CtopStatus::EvaluatorUnavailable,
-            execution_duration_ms: dur,
-            blast_radius_nodes: 1,
-            failed_checks: vec![FailedCheck {
+            RUSTC_ENGINE.to_string(),
+            dur,
+            vec![FailedCheck {
                 symbol: symbol_path.to_string(),
-                error_type: "EvaluatorUnavailable".to_string(),
-                expected: Some("Native sandbox execution".to_string()),
-                actual: Some("Failed to invoke native compiler sandbox in environment".to_string()),
+                error_type: "Panic/AssertionFailure".to_string(),
+                expected: Some("the snippet to run to completion".to_string()),
+                actual: Some(if stderr.is_empty() {
+                    "Process exited with non-zero status".to_string()
+                } else {
+                    stderr.clone()
+                }),
                 stack_trace_ast_nodes: vec![symbol_path.to_string()],
-                hint: Some(
-                    "Verify compiler (rustc) is available and temp directory is writable"
-                        .to_string(),
-                ),
+                hint: Some("The snippet ran under rustc's output and failed; the output above is the program's own".to_string()),
             }],
-            passed_checks_count: 0,
-            stdout: String::new(),
-            stderr: "Evaluator unavailable: native execution failed".to_string(),
-            memory_allocated_bytes: None,
-        })
+            r_out.stdout,
+            stderr,
+        ))
+    }
+}
+
+/// A rustc-tier command ran past the deadline. `what` names it.
+fn rustc_timeout(
+    task_id: String,
+    symbol_path: &str,
+    duration_ms: f64,
+    timeout: std::time::Duration,
+    what: &str,
+    done: native::Finished,
+) -> CtopReport {
+    CtopReport {
+        task_id,
+        engine: RUSTC_ENGINE.to_string(),
+        status: CtopStatus::Timeout,
+        execution_duration_ms: duration_ms,
+        blast_radius_nodes: 1,
+        failed_checks: vec![FailedCheck {
+            symbol: symbol_path.to_string(),
+            error_type: "EvaluationTimeout".to_string(),
+            expected: Some(format!("{what} to finish within {}s", timeout.as_secs())),
+            actual: Some(format!(
+                "{what} was still running after {}s and was killed{}",
+                timeout.as_secs(),
+                if done.drained {
+                    ""
+                } else {
+                    "; something it started was still holding its output open, so the output below may be incomplete"
+                }
+            )),
+            stack_trace_ast_nodes: vec![symbol_path.to_string()],
+            hint: Some(
+                "The snippet did not terminate, so nothing is known about whether it would have passed. Raise AXIOM_EVAL_TIMEOUT_SECS if the work is genuinely slow."
+                    .to_string(),
+            ),
+        }],
+        passed_checks_count: 0,
+        passed_checks_basis: String::new(),
+        stdout: done.stdout,
+        stderr: done.stderr,
+        memory_allocated_bytes: None,
     }
 }
