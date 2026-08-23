@@ -214,7 +214,7 @@ fn test_token_validation() {
     let wrong_lang_res = extract_tool_result(&server.handle_request(wrong_lang_req).await);
     assert_ne!(
         wrong_lang_res.get("engine").and_then(|v| v.as_str()),
-        Some("tier1_wasi_cranelift"),
+        Some("tier1_native_rustc"),
         "a Java symbol must not be answered by the Rust tier, got {wrong_lang_res:?}"
     );
     assert_ne!(
