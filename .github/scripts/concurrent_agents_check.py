@@ -78,6 +78,26 @@ def read_nodes(work):
     return json.loads(raw)["nodes"]
 
 
+def read_records(path):
+    """Read a record file that is either a JSON array (the old whole-file
+    format) or JSONL, one record per line (the append-only format). A blank or
+    torn final line is skipped, as the Rust loaders do."""
+    raw = path.read_text(encoding="utf-8")
+    if raw.lstrip().startswith("["):
+        return json.loads(raw)
+    records = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            # Only the last line can be torn, because appends add at the end.
+            pass
+    return records
+
+
 def uniform(binary):
     """N agents mutate at once. Every symbol and every operation must survive."""
     work = new_workspace(binary)
@@ -97,7 +117,7 @@ def uniform(binary):
 
     nodes = read_nodes(work)
     kept = [i for i in range(AGENTS) if f"agent{i}::sym" in nodes]
-    ops = json.loads((work / ".axiom" / "crdt_ops.json").read_text(encoding="utf-8"))
+    ops = read_records(work / ".axiom" / "crdt_ops.json")
 
     problems = []
     if len(kept) != AGENTS:
@@ -199,7 +219,7 @@ def chained(binary):
     ledger = work / ".axiom" / "attestations.json"
     if not ledger.exists():
         return "no ledger", ["no ledger was written at all"]
-    records = json.loads(ledger.read_text(encoding="utf-8"))
+    records = read_records(ledger)
 
     if len(records) != ATTESTERS:
         problems.append(f"records lost: {len(records)} of {ATTESTERS}")
