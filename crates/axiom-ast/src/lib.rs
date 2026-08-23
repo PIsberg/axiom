@@ -262,13 +262,19 @@ pub struct AstIndex {
     /// by looking up what a file owned, and for those languages the answer was
     /// always nothing.
     parsing_file: RwLock<Option<String>>,
-    /// The line each symbol was declared on, used to attribute a call site to
+    /// The lines each symbol was declared on, used to attribute a call site to
     /// the function it sits inside rather than to the whole file.
+    ///
+    /// A list rather than a line, because two declarations can share one key:
+    /// a file-keyed language has nowhere to record the difference between the
+    /// `#[cfg(windows)]` and `#[cfg(unix)]` spellings of one function. Keeping
+    /// only the last of them moved the key's line to the bottom of the file, so
+    /// every call inside the first was charged to whatever symbol preceded it.
     ///
     /// Scan-scoped and not persisted: it exists only long enough for
     /// `resolve_reference_edges` to turn references into dependencies, which
     /// are what survive to disk.
-    symbol_lines: RwLock<HashMap<String, usize>>,
+    symbol_lines: RwLock<HashMap<String, Vec<usize>>>,
     /// Every name each file mentions, with the line it was mentioned on.
     ///
     /// Collected while parsing and resolved once the whole tree has been read,
@@ -327,10 +333,11 @@ impl AstIndex {
         declared_on: Option<usize>,
     ) -> AstNode {
         if let Some(line) = declared_on {
-            self.symbol_lines
-                .write()
-                .unwrap()
-                .insert(symbol.to_string(), line);
+            let mut lines = self.symbol_lines.write().unwrap();
+            let seen = lines.entry(symbol.to_string()).or_default();
+            if !seen.contains(&line) {
+                seen.push(line);
+            }
         }
         let normalized = content.trim();
         let mut hasher = blake3::Hasher::new();
@@ -1103,7 +1110,8 @@ impl AstIndex {
                 .get(&file)
                 .into_iter()
                 .flatten()
-                .filter_map(|s| lines.get(s).map(|l| (*l, s)))
+                .filter_map(|s| lines.get(s).map(|ls| (s, ls)))
+                .flat_map(|(s, ls)| ls.iter().map(move |l| (*l, s)))
                 .collect();
             if declared.is_empty() {
                 continue;
@@ -1252,7 +1260,7 @@ impl AstIndex {
             return;
         }
 
-        let clean = Self::strip_comments_and_strings(content);
+        let clean = Self::strip_comments_and_strings(content, matches!(ext, "py" | "js" | "ts"));
         let mut refs: Vec<(usize, String)> = Vec::new();
 
         for (line_no, line) in clean.lines().enumerate() {
@@ -1405,7 +1413,7 @@ impl AstIndex {
         )
     }
 
-    fn strip_comments_and_strings(content: &str) -> String {
+    fn strip_comments_and_strings(content: &str, single_quotes_are_strings: bool) -> String {
         let mut result = String::with_capacity(content.len());
         let chars: Vec<char> = content.chars().collect();
         let mut i = 0;
@@ -1441,6 +1449,11 @@ impl AstIndex {
                 i += 1;
                 while i < chars.len() && chars[i] != '"' {
                     if chars[i] == '\\' && i + 1 < chars.len() {
+                        // A line continuation escapes the newline, and a
+                        // newline dropped here moves every line below it.
+                        if chars[i + 1] == '\n' {
+                            result.push('\n');
+                        }
                         i += 2;
                     } else {
                         if chars[i] == '\n' {
@@ -1455,20 +1468,11 @@ impl AstIndex {
                     i += 1; // skip closing quote
                 }
                 result.push(' ');
-            } else if chars[i] == '\'' {
-                // Char literal
+            } else if let Some(len) = Self::quoted_run_len(&chars, i, single_quotes_are_strings) {
+                // Only a quote that closes is skipped past; a lifetime is
+                // left to the branch below. See `quoted_run_len`.
                 result.push(' ');
-                i += 1;
-                while i < chars.len() && chars[i] != '\'' {
-                    if chars[i] == '\\' && i + 1 < chars.len() {
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                if i < chars.len() {
-                    i += 1;
-                }
+                i += len;
                 result.push(' ');
             } else {
                 result.push(chars[i]);
@@ -1477,6 +1481,57 @@ impl AstIndex {
         }
 
         result
+    }
+
+    /// How many characters the apostrophe at `i` consumes, when it opens
+    /// something that closes.
+    ///
+    /// Rust and the JVM languages write a character as `'a'` or `'\n'`, and a
+    /// Rust lifetime opens with the same character and never closes. Scanning
+    /// to the next apostrophe in the file therefore ran from `Holder<'a>` to
+    /// wherever the next one happened to be, dropping the newlines in between:
+    /// every line number after the first lifetime in a file was short by one,
+    /// and `record_references` charged each call to the function declared above
+    /// the one it sits in. Returning `None` for a lifetime leaves the
+    /// apostrophe as ordinary punctuation, which is what it is.
+    ///
+    /// Python, JavaScript and TypeScript spell a string this way instead. Those
+    /// hold anything, but they end on the line they start, so an unclosed one
+    /// is a syntax error rather than something to skip past.
+    fn quoted_run_len(chars: &[char], i: usize, single_quotes_are_strings: bool) -> Option<usize> {
+        if chars.get(i) != Some(&'\'') {
+            return None;
+        }
+
+        if single_quotes_are_strings {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '\n' {
+                match chars[j] {
+                    '\\' => j += 2,
+                    '\'' => return Some(j - i + 1),
+                    _ => j += 1,
+                }
+            }
+            return None;
+        }
+
+        if chars.get(i + 1) == Some(&'\\') {
+            // An escape, up to the longest form there is: '\u{10FFFF}'.
+            let limit = (i + 12).min(chars.len());
+            for (j, c) in chars.iter().enumerate().take(limit).skip(i + 2) {
+                match c {
+                    '\'' => return Some(j - i + 1),
+                    '\n' => return None,
+                    _ => {}
+                }
+            }
+            return None;
+        }
+
+        match (chars.get(i + 1), chars.get(i + 2)) {
+            (Some(c), Some('\'')) if *c != '\'' && *c != '\n' => Some(3),
+            _ => None,
+        }
     }
 
     fn parse_java_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
@@ -1541,7 +1596,7 @@ impl AstIndex {
         }
 
         // Strip comments and string literals to eliminate false edges from prose/javadoc
-        let clean_code = Self::strip_comments_and_strings(content);
+        let clean_code = Self::strip_comments_and_strings(content, false);
 
         // Scan stripped code for referenced type identifiers (same-package, imported, FQN, and .class literals)
         let mut referenced_types: HashSet<String> = HashSet::new();
@@ -1809,74 +1864,172 @@ impl AstIndex {
         }
     }
 
+    /// A Rust symbol carries the type it is declared under.
+    ///
+    /// Keyed by file and short name alone, two impls in one file collide. This
+    /// repository declares `search` on both `AstIndex` and `ZoektIndex` in
+    /// `lib.rs`: the second overwrote the first, leaving one node holding the
+    /// second's dependencies and hash under a name an agent reads as the first.
+    /// The blast radius then missed a test that really fails, because
+    /// `looks_like_a_pattern` is called from `AstIndex::search` and the edge
+    /// went to a node that no longer existed.
+    ///
+    /// Modules are not tracked, so two same-named functions in two `mod` blocks
+    /// of one file still share a key. `symbol_lines` keeps every declaration
+    /// line for exactly that case, so the calls inside each are still charged
+    /// to the right key even when the key cannot tell them apart.
     fn parse_rust_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let mut uses = Vec::new();
 
+        // Braces are counted on comment- and string-stripped text: a brace in a
+        // format string would otherwise open a block that never closes, and
+        // every function below it would be filed under the wrong type.
+        let clean = Self::strip_comments_and_strings(content, false);
+        let counted: Vec<&str> = clean.lines().collect();
+        let mut owner_stack: Vec<(String, usize)> = Vec::new();
+        let mut depth: usize = 0;
+
         for (line_no, line) in content.lines().enumerate() {
+            let braces = counted.get(line_no).copied().unwrap_or("");
             let trimmed = line.trim();
-            if trimmed.is_empty()
+
+            let opens = braces.matches('{').count();
+            let closes = braces.matches('}').count();
+
+            if !(trimmed.is_empty()
                 || trimmed.starts_with("//")
                 || trimmed.starts_with("/*")
                 || trimmed.starts_with('*')
-                || trimmed.starts_with("*/")
+                || trimmed.starts_with("*/"))
             {
-                continue;
+                if let Some(owner) = Self::rust_owner_opened_by(trimmed) {
+                    owner_stack.push((owner, depth + opens.max(1)));
+                } else if trimmed.starts_with("use ") {
+                    uses.push(
+                        trimmed
+                            .replace("use ", "")
+                            .replace(';', "")
+                            .trim()
+                            .to_string(),
+                    );
+                } else if trimmed.contains("fn ")
+                    && (trimmed.starts_with("fn ")
+                        || trimmed.starts_with("pub ")
+                        || trimmed.starts_with("async ")
+                        || trimmed.starts_with("pub async ")
+                        || trimmed.starts_with("pub(crate) "))
+                {
+                    let name = trimmed
+                        .split('(')
+                        .next()
+                        .unwrap_or("")
+                        .split("fn ")
+                        .last()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+
+                    if Self::is_valid_identifier(&name) {
+                        let symbol = match owner_stack.last() {
+                            Some((owner, _)) => format!("{}::{}::{}", file_path, owner, name),
+                            None => format!("{}::{}", file_path, name),
+                        };
+                        let is_test = name.starts_with("test_") || trimmed.contains("#[test]");
+                        let kind = if is_test { "test" } else { "function" };
+
+                        self.index_node_at(&symbol, kind, trimmed, uses.clone(), Some(line_no));
+                        *nodes_count += 1;
+                    }
+                } else if trimmed.starts_with("struct ")
+                    || trimmed.starts_with("pub struct ")
+                    || trimmed.starts_with("pub(crate) struct ")
+                    || trimmed.starts_with("enum ")
+                    || trimmed.starts_with("pub enum ")
+                {
+                    let name = trimmed
+                        .split_whitespace()
+                        .nth(if trimmed.starts_with("pub ") { 2 } else { 1 })
+                        .unwrap_or("")
+                        .replace(['{', ';'], "")
+                        .trim()
+                        .to_string();
+
+                    if Self::is_valid_identifier(&name) {
+                        let symbol = format!("{}::{}", file_path, name);
+                        self.index_node_at(&symbol, "struct", trimmed, uses.clone(), Some(line_no));
+                        *nodes_count += 1;
+                    }
+                }
             }
 
-            if trimmed.starts_with("use ") {
-                uses.push(
-                    trimmed
-                        .replace("use ", "")
-                        .replace(';', "")
-                        .trim()
-                        .to_string(),
-                );
-            } else if trimmed.contains("fn ")
-                && (trimmed.starts_with("fn ")
-                    || trimmed.starts_with("pub ")
-                    || trimmed.starts_with("async ")
-                    || trimmed.starts_with("pub async ")
-                    || trimmed.starts_with("pub(crate) "))
-            {
-                let name = trimmed
-                    .split('(')
-                    .next()
-                    .unwrap_or("")
-                    .split("fn ")
-                    .last()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-
-                if Self::is_valid_identifier(&name) {
-                    let symbol = format!("{}::{}", file_path, name);
-                    let is_test = name.starts_with("test_") || trimmed.contains("#[test]");
-                    let kind = if is_test { "test" } else { "function" };
-
-                    self.index_node_at(&symbol, kind, trimmed, uses.clone(), Some(line_no));
-                    *nodes_count += 1;
-                }
-            } else if trimmed.starts_with("struct ")
-                || trimmed.starts_with("pub struct ")
-                || trimmed.starts_with("pub(crate) struct ")
-                || trimmed.starts_with("enum ")
-                || trimmed.starts_with("pub enum ")
-            {
-                let name = trimmed
-                    .split_whitespace()
-                    .nth(if trimmed.starts_with("pub ") { 2 } else { 1 })
-                    .unwrap_or("")
-                    .replace(['{', ';'], "")
-                    .trim()
-                    .to_string();
-
-                if Self::is_valid_identifier(&name) {
-                    let symbol = format!("{}::{}", file_path, name);
-                    self.index_node_at(&symbol, "struct", trimmed, uses.clone(), Some(line_no));
-                    *nodes_count += 1;
+            depth += opens;
+            depth = depth.saturating_sub(closes);
+            while let Some((_, closes_at)) = owner_stack.last() {
+                if depth < *closes_at {
+                    owner_stack.pop();
+                } else {
+                    break;
                 }
             }
         }
+    }
+
+    /// The type whose methods a line opens, when it opens one.
+    ///
+    /// `impl Foo`, `impl<T> Foo<T>`, `impl Trait for Foo` and `trait Foo` all
+    /// name the owner of the methods below them. The generic list is skipped
+    /// with a depth counter rather than split on the closing angle, because
+    /// `impl<T: Into<String>> Foo` closes two of them before the type starts.
+    fn rust_owner_opened_by(trimmed: &str) -> Option<String> {
+        let after_keyword = ["impl", "trait", "pub trait", "pub(crate) trait"]
+            .iter()
+            // `implements_something()` also starts with `impl`. A declaration
+            // is followed by a space or by its generic list, never by more
+            // identifier.
+            .filter_map(|kw| trimmed.strip_prefix(*kw))
+            .find(|rest| rest.starts_with(' ') || rest.starts_with('<'))?;
+
+        let rest = Self::skip_angle_group(after_keyword.trim_start()).trim_start();
+        // `impl Trait for Type`: the methods belong to the type, which is what
+        // a caller changing one of them would name.
+        let target = match rest.rfind(" for ") {
+            Some(at) => &rest[at + " for ".len()..],
+            None => rest,
+        };
+
+        let name = target
+            .trim_start()
+            .split(|c: char| c == '<' || c == '{' || c == '(' || c.is_whitespace())
+            .next()
+            .unwrap_or("");
+        let name = name.rsplit("::").next().unwrap_or(name);
+
+        if Self::is_valid_identifier(name) {
+            Some(name.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Everything after a leading generic list, with nesting counted.
+    fn skip_angle_group(s: &str) -> &str {
+        if !s.starts_with('<') {
+            return s;
+        }
+        let mut depth = 0usize;
+        for (i, c) in s.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &s[i + 1..];
+                    }
+                }
+                _ => {}
+            }
+        }
+        s
     }
 
     fn parse_python_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
@@ -3025,5 +3178,71 @@ impl EnvironmentKey {
     /// say so rather than showing a digest that looks like an answer.
     pub fn covers_nothing(&self) -> bool {
         self.inputs.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod stripping {
+    use super::AstIndex;
+
+    /// Stripping must not move a line.
+    ///
+    /// Two things read the result by line number: `record_references` charges a
+    /// call to the last symbol declared above it, and `parse_rust_content`
+    /// counts braces to know which type a method belongs to. A swallowed
+    /// newline files everything below it under the wrong symbol, silently and
+    /// for the rest of the file.
+    #[test]
+    fn stripping_preserves_every_line() {
+        let cases: [(&str, bool, &str); 5] = [
+            (
+                "let e = format!(\n    \"one \\n     two\"\n);\nfn after() {}\n",
+                false,
+                "a string continued with a backslash escapes the newline",
+            ),
+            (
+                "struct Holder<'a> {\n    inner: &'a str,\n}\nfn after() {}\n",
+                false,
+                "a lifetime opens a quote that never closes",
+            ),
+            (
+                "/* block\n   comment */\nfn after() {}\n",
+                false,
+                "a block comment spans lines",
+            ),
+            (
+                "let s = \"a\nb\";\nfn after() {}\n",
+                false,
+                "a string holding a real newline",
+            ),
+            (
+                "x = 'it is a string here'\ndef after():\n    pass\n",
+                true,
+                "an apostrophe delimits a string in Python",
+            ),
+        ];
+
+        for (src, single_quotes_are_strings, why) in cases {
+            let clean = AstIndex::strip_comments_and_strings(src, single_quotes_are_strings);
+            assert_eq!(
+                clean.split('\n').count(),
+                src.split('\n').count(),
+                "{why}: stripping moved a line in {src:?} -> {clean:?}"
+            );
+        }
+    }
+
+    /// The same invariant against real source rather than a fixture, because
+    /// the shapes that swallow a newline are the shapes real code has: the
+    /// backslash continuation this pins was found here, not in a fixture.
+    #[test]
+    fn stripping_preserves_every_line_of_this_file() {
+        let src = include_str!("lib.rs");
+        let clean = AstIndex::strip_comments_and_strings(src, false);
+        assert_eq!(
+            clean.split('\n').count(),
+            src.split('\n').count(),
+            "stripping this crate's own source moved a line"
+        );
     }
 }
