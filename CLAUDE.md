@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 125 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 129 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -93,6 +93,18 @@ exists, in this or any earlier version reachable from here; `axiom_query_symbol`
 `dependencies`, `docstring`, `hash`, `id`, `kind`, `signature`, `source_range` and `symbol_path`.
 To tell a real index from an empty one, run `axiom scan` and read the symbol count it prints, or
 look for `.axiom/index.json` above the working directory.
+
+**A declaration is decided from the stripped text; only what is stored comes from the
+raw line.** A repository whose subject is parsing writes source inside string literals
+constantly, and matching the raw line indexed those fixtures:
+`blast_radius.rs::looks_like_a_pattern` existed as a symbol because a test writes a Rust
+fixture as a string, which made the real function ambiguous and got
+`axiom symbol --path looks_like_a_pattern` refused by name. Python, Go and Java already
+read stripped text; Rust and TypeScript did not. `strip_comments_and_strings` preserves
+the line count, which is what makes indexing the stripped lines alongside the raw ones
+safe, and `stripping_preserves_every_line` pins that. The raw line is still what is
+stored, so a signature keeps a string the declaration genuinely contains, and
+`a_declaration_containing_a_string_keeps_it_in_the_signature` pins that half.
 
 **The parsers are line-based heuristics, not ASTs.** `parse_java_content` and its siblings walk
 lines and match on shape. That approach has already produced: javadoc lines containing the words
