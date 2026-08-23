@@ -3,6 +3,8 @@ use axiom_ast::SearchMode;
 use axiom_core::{mcp::JsonRpcRequest, AxiomMcpServer};
 use axiom_vmm::SandboxEngine;
 use clap::{Parser, Subcommand};
+
+mod mutate;
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,6 +40,19 @@ enum Commands {
     BlastRadius {
         #[arg(short, long)]
         symbol: String,
+        #[arg(short, long, default_value_t = 1)]
+        depth: usize,
+    },
+    /// Break symbols on purpose and check the graph predicted what really failed
+    CacheValidate {
+        #[arg(short, long, default_value = ".")]
+        path: String,
+        /// The project's own test command, run once per mutation.
+        #[arg(short, long, default_value = "cargo test")]
+        test_command: String,
+        /// How many symbols to mutate. Each one costs a full test run.
+        #[arg(short, long, default_value_t = 5)]
+        samples: usize,
         #[arg(short, long, default_value_t = 1)]
         depth: usize,
     },
@@ -256,6 +271,15 @@ async fn main() -> Result<()> {
             if deps.len() > 12 {
                 println!("    ... and {} more", deps.len() - 12);
             }
+        }
+
+        Commands::CacheValidate {
+            path,
+            test_command,
+            samples,
+            depth,
+        } => {
+            run_cache_validate(&path, &test_command, samples, depth)?;
         }
 
         Commands::CacheAudit { path, depth } => {
@@ -1303,4 +1327,363 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// One mutation's outcome.
+enum Outcome {
+    /// The mutation did not compile, so every test failed for the same reason
+    /// and none of it says anything about a dependency.
+    DidNotCompile,
+    /// Nothing failed. The mutation was equivalent, or nothing covers the
+    /// symbol. Either way there is no ground truth in it.
+    NothingFailed,
+    /// Tests failed, and here is what the graph said about each.
+    Failed {
+        missed_by_closure: Vec<String>,
+        missed_by_blast_radius: Vec<String>,
+        total_failed: usize,
+    },
+}
+
+/// Break a symbol, run the project's own tests, and compare what failed against
+/// what the graph predicted.
+///
+/// The audit compares two readings of one graph, so agreement between them is
+/// not evidence about the code. This asks the code.
+fn run_cache_validate(
+    path: &str,
+    test_command: &str,
+    samples: usize,
+    depth: usize,
+) -> anyhow::Result<()> {
+    let root = std::path::Path::new(path);
+    println!("Validating the dependency graph against real test runs.");
+    println!("This edits source files in place and restores them. Commit first.");
+    println!();
+
+    let index = axiom_ast::AstIndex::new();
+    let summary = index.scan_directory(root)?;
+    let tests = index.test_symbol_paths();
+    println!(
+        " Scanned {} files, {} symbols, {} tests.",
+        summary.files_scanned,
+        summary.total_symbols,
+        tests.len()
+    );
+
+    if tests.is_empty() {
+        println!(" No tests in the index, so there is nothing to validate against.");
+        return Ok(());
+    }
+
+    // A test's key moves exactly when the mutated symbol is in its closure, so
+    // the closures are computed once here rather than re-scanned per mutation.
+    let closures: std::collections::HashMap<String, std::collections::HashSet<String>> = tests
+        .iter()
+        .filter_map(|t| {
+            index
+                .forward_closure(t, axiom_ast::AstIndex::CLOSURE_DEPTH)
+                .map(|c| (t.clone(), c.reachable.into_iter().collect()))
+        })
+        .collect();
+
+    // Deterministic sampling, evenly spaced through the sorted symbols, so two
+    // runs over one tree mutate the same things and can be compared.
+    let all = index.symbol_paths();
+    // Test files are excluded, not just symbols whose kind is "test". Breaking a
+    // test's own body makes that test fail and its own closure trivially
+    // contains it, so both mechanisms score a free hit and the run looks better
+    // than the graph is. Three of six samples in the first real run went that
+    // way and established nothing.
+    let candidates: Vec<String> = all
+        .iter()
+        .filter(|s| !tests.contains(s))
+        .filter(|s| {
+            index
+                .file_of_symbol(s)
+                .map(|f| {
+                    let f = f.replace('\\', "/");
+                    !f.contains("/tests/") && !f.contains("_test.") && !f.contains("/test_")
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        println!(" Every symbol is a test, so there is nothing to mutate.");
+        return Ok(());
+    }
+    // Only symbols that can actually be mutated are worth a sample. Checking
+    // costs a file read; not checking cost whole sampling budgets, since the
+    // first run over this repository spent three of four samples on symbols
+    // with no swappable line and established nothing.
+    let mutable: Vec<String> = candidates
+        .iter()
+        .filter(|symbol| {
+            let Some(node) = index.get_symbol(symbol) else {
+                return false;
+            };
+            let Some(file) = index.file_of_symbol(symbol) else {
+                return false;
+            };
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                return false;
+            };
+            let short = node
+                .symbol_path
+                .rsplit("::")
+                .next()
+                .unwrap_or(&node.symbol_path)
+                .to_string();
+            mutate::mutate_lines(&content, &short).is_some()
+        })
+        .cloned()
+        .collect();
+
+    println!(
+        " {} of {} non-test symbols have a line that can be mutated.",
+        mutable.len(),
+        candidates.len()
+    );
+    if mutable.is_empty() {
+        println!(" Nothing can be mutated here, so this run would establish nothing.");
+        return Ok(());
+    }
+
+    let stride = (mutable.len() / samples.max(1)).max(1);
+    let chosen: Vec<String> = mutable
+        .iter()
+        .step_by(stride)
+        .take(samples)
+        .cloned()
+        .collect();
+
+    let mut produced_failure = 0usize;
+    let mut equivalent = 0usize;
+    let mut skipped = 0usize;
+    let mut closure_holes: Vec<(String, String)> = Vec::new();
+    let mut radius_holes: Vec<(String, String)> = Vec::new();
+
+    for (n, symbol) in chosen.iter().enumerate() {
+        use std::io::Write;
+        print!(" [{}/{}] {symbol} ... ", n + 1, chosen.len());
+        let _ = std::io::stdout().flush();
+
+        match mutate_and_run(&index, symbol, test_command, root, depth, &closures)? {
+            None => {
+                skipped += 1;
+                println!("no mutable line in range, skipped");
+            }
+            Some(Outcome::DidNotCompile) => {
+                skipped += 1;
+                println!("did not compile, skipped");
+            }
+            Some(Outcome::NothingFailed) => {
+                equivalent += 1;
+                println!("no test failed");
+            }
+            Some(Outcome::Failed {
+                missed_by_closure,
+                missed_by_blast_radius,
+                total_failed,
+            }) => {
+                produced_failure += 1;
+                println!(
+                    "{total_failed} failed, {} missed by closure, {} by blast radius",
+                    missed_by_closure.len(),
+                    missed_by_blast_radius.len()
+                );
+                for t in missed_by_closure {
+                    closure_holes.push((symbol.clone(), t));
+                }
+                for t in missed_by_blast_radius {
+                    radius_holes.push((symbol.clone(), t));
+                }
+            }
+        }
+    }
+
+    println!();
+    println!(" Mutations that produced a real failure: {produced_failure}");
+    println!(" Mutations nothing noticed:              {equivalent}");
+    println!(" Mutations skipped:                      {skipped}");
+    println!();
+
+    // An empty findings list means nothing only if something was actually
+    // tested. Absence of findings is not evidence of correctness, and a run
+    // where no mutation broke anything must not read like a clean bill.
+    if produced_failure == 0 {
+        println!(" No mutation produced a failing test, so this run establishes nothing.");
+        println!(" Raise --samples, or point --test-command at a suite that covers the");
+        println!(" code being mutated.");
+        return Ok(());
+    }
+
+    if radius_holes.is_empty() {
+        println!(" Blast radius: every failing test was selected.");
+    } else {
+        println!(
+            " BLAST RADIUS MISSED {} test(s) that really failed:",
+            radius_holes.len()
+        );
+        for (symbol, test) in radius_holes.iter().take(10) {
+            println!("   changing {symbol} broke {test}, which it did not select");
+        }
+        println!("   This is the shipped feature under-selecting, which matters more");
+        println!("   than anything the cache does: those tests would not have run.");
+    }
+
+    if closure_holes.is_empty() {
+        println!(" Closure: every failing test had a key that moved.");
+    } else {
+        println!(
+            " CLOSURE MISSED {} test(s) that really failed:",
+            closure_holes.len()
+        );
+        for (symbol, test) in closure_holes.iter().take(10) {
+            println!("   changing {symbol} broke {test}, whose key did not move");
+        }
+        println!("   A cache keyed on these closures would report a pass for code that");
+        println!("   was never run.");
+    }
+
+    Ok(())
+}
+
+fn mutate_and_run(
+    index: &axiom_ast::AstIndex,
+    symbol: &str,
+    test_command: &str,
+    root: &std::path::Path,
+    depth: usize,
+    closures: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> anyhow::Result<Option<Outcome>> {
+    let Some(node) = index.get_symbol(symbol) else {
+        return Ok(None);
+    };
+    let Some(file) = index.file_of_symbol(symbol) else {
+        return Ok(None);
+    };
+    let file_path = std::path::Path::new(&file);
+    let Ok(content) = std::fs::read_to_string(file_path) else {
+        return Ok(None);
+    };
+    // Located by the declaration in the source, because neither stored field can
+    // do it: `source_range` is (0, signature length) rather than a position, and
+    // `signature` holds the symbol path rather than the declaration. Trusting
+    // `source_range` made the mutator edit from line 0 to line `len`, which on a
+    // short file is all of it, and produced a run blaming one symbol for
+    // breaking a test that a different symbol covered.
+    let short = node
+        .symbol_path
+        .rsplit("::")
+        .next()
+        .unwrap_or(&node.symbol_path)
+        .to_string();
+    let Some((mutated, _description)) = mutate::mutate_lines(&content, &short) else {
+        return Ok(None);
+    };
+
+    // Restore before looking at the output, so a parse that panics still leaves
+    // the tree as it was found.
+    let guard = mutate::Restore::write(file_path, &mutated)?;
+    let output = run_test_command(test_command, root);
+    guard.restore()?;
+    let output = output?;
+
+    if output.contains("error[E") || output.contains("could not compile") {
+        return Ok(Some(Outcome::DidNotCompile));
+    }
+
+    let failed = failing_test_names(&output);
+    if failed.is_empty() {
+        return Ok(Some(Outcome::NothingFailed));
+    }
+
+    let canonical = node.symbol_path;
+    let selected: std::collections::HashSet<String> = index
+        .compute_blast_radius(&canonical, depth)
+        .map(|r| r.impacted_tests.into_iter().collect())
+        .unwrap_or_default();
+
+    let mut missed_by_closure = Vec::new();
+    let mut missed_by_blast_radius = Vec::new();
+
+    for name in &failed {
+        // A failing test is reported by its short name, and several indexed
+        // symbols can answer to one. A hole is claimed only when none of them
+        // covers the symbol: accusing the graph on an ambiguous match would be
+        // the confident wrong answer this tool exists to catch.
+        let matching: Vec<&String> = closures
+            .keys()
+            .filter(|k| k.rsplit("::").next().map(|s| s == name).unwrap_or(false))
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        if !matching
+            .iter()
+            .any(|k| closures.get(*k).is_some_and(|c| c.contains(&canonical)))
+        {
+            missed_by_closure.push(name.clone());
+        }
+        if !matching.iter().any(|k| selected.contains(*k)) {
+            missed_by_blast_radius.push(name.clone());
+        }
+    }
+
+    Ok(Some(Outcome::Failed {
+        missed_by_closure,
+        missed_by_blast_radius,
+        total_failed: failed.len(),
+    }))
+}
+
+fn run_test_command(test_command: &str, root: &std::path::Path) -> anyhow::Result<String> {
+    let mut parts = test_command.split_whitespace();
+    let program = parts.next().unwrap_or("cargo");
+    let args: Vec<&str> = parts.collect();
+
+    let out = std::process::Command::new(program)
+        .args(&args)
+        .current_dir(root)
+        .output()?;
+
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok(combined)
+}
+
+/// Test names a run reported as failing, in cargo's shape:
+/// `test some::name ... FAILED`.
+///
+/// A suite reporting differently yields nothing here, which is why the summary
+/// counts how many mutations produced a real failure. A run where nothing parses
+/// reads as "this establishes nothing" rather than as a clean bill of health.
+fn failing_test_names(output: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in output.lines() {
+        let Some(rest) = line.trim().strip_prefix("test ") else {
+            continue;
+        };
+        // `test result: FAILED. 1 passed; 1 failed` also begins with "test " and
+        // also contains FAILED, and counting it invented a failing test called
+        // "result:". It matched no indexed symbol so it accused nobody, but it
+        // inflated the count this tool reports, which is the number a reader
+        // would use to judge how much ground truth a run produced.
+        if rest.starts_with("result:") {
+            continue;
+        }
+        let Some((name, status)) = rest.split_once(" ... ") else {
+            continue;
+        };
+        if !status.trim_start().starts_with("FAILED") || name.is_empty() {
+            continue;
+        }
+        let short = name.rsplit("::").next().unwrap_or(name).to_string();
+        if !names.contains(&short) {
+            names.push(short);
+        }
+    }
+    names
 }

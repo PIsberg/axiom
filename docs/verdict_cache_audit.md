@@ -277,6 +277,50 @@ purpose, and `behind_the_selector_saving_and_unsafety_are_the_same_number` pins
 it, so if the two ever come apart the reasoning here is wrong and has to be
 redone rather than quietly outlived.
 
+## Ground truth, and the hole it found
+
+Everything above is the graph's opinion of itself. `axiom cache-validate` asks
+the code instead: it breaks a symbol, runs the project's own suite, and checks
+that every test that really failed was selected by the blast radius and had its
+key move.
+
+Six mutations on this repository, sampled from the 69 non-test symbols that have
+a line worth changing:
+
+```
+ [1/6] axiom-ast/src/lib.rs::acquire ............... 2 failed, 0 missed
+ [2/6] axiom-ast/src/lib.rs::looks_like_a_pattern .. 1 failed, 1 missed by both
+```
+
+The second one is what the audit could never have told us.
+
+Breaking `looks_like_a_pattern` really fails
+`test_e2e_search_modes_are_explicit_and_honest`, confirmed by hand: the source
+was edited, that one test was run on its own, and it failed. **The blast radius
+does not select it at any depth.** Depth 1 reports zero tests. The deeper survey
+reports one test at depth 3, and it is a different test.
+
+So this is a missing edge, not a depth setting. Following it:
+
+- `search` does reach that test, at depth 2, along with three others.
+- So the break is between `looks_like_a_pattern` and `search`.
+- `axiom symbol --path search` lists nine dependencies: the file's imports, plus
+  `SearchMode`, `ZoektMatch` and `new`. `looks_like_a_pattern` is not among
+  them, although `search` calls it at `lib.rs:509`.
+
+The reference was never recorded, so the reverse edge does not exist, so the
+walk cannot find the test. Call-site references clearly are recorded in general,
+since `new` is in that list, which makes this a specific failure rather than a
+missing feature. Why it was missed is not established here and is tracked
+separately.
+
+This is the shipped selector under-selecting: an agent asking what to run after
+changing `looks_like_a_pattern` is told nothing reaches it, and the test that
+does would not have run. It matters more than anything the cache does, and the
+audit reported `would wrongly skip: 0` on this same repository twice without
+seeing it, because both walks read the same edges and are blind to a missing one
+together.
+
 ## What would come next
 
 In order, each gated on the one before:
@@ -297,7 +341,8 @@ In order, each gated on the one before:
    selector it cannot pay for itself at any precision. If it is worth building,
    it is as the answer to a change of unknown extent, and that is what should be
    measured and gated next.
-6. Find the references the parsers never recorded. This audit cannot: both
+6. ~~Find the references the parsers never recorded.~~ `cache-validate` finds
+   them now, and the first six mutations found one. This audit cannot: both
    directions read the same edges, so a missing edge is invisible to it. That
    needs a different check, comparing against a real test run.
 7. Only then let it skip anything.
