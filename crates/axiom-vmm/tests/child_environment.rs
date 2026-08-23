@@ -127,19 +127,26 @@ fn the_signing_key_is_refused_even_when_the_pass_list_names_it() {
 
 /// The Rust tier spawns `rustc` and then the compiled binary itself, neither
 /// of them through the tier 2 recipes, so it has to be checked on its own.
-#[tokio::test]
-async fn the_rust_tier_confines_the_environment_too() {
+///
+/// Sync rather than `#[tokio::test]`, and the async call is driven with
+/// `block_on`, so the environment lock is never held across an await: the env
+/// has to stay set for the whole synchronous compile-and-run underneath.
+#[test]
+fn the_rust_tier_confines_the_environment_too() {
     let _turn = take_turn();
     let _key = Var::set("AXIOM_SIGNING_KEY", "marker-private-key-bytes");
 
     let engine = WasiEngine::new().expect("engine");
-    let report = engine
-        .execute_eval_in(
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let report = rt
+        .block_on(engine.execute_eval_in(
             "anonymous",
             "panic!(\"RUST_LEAK={:?}\", std::env::var(\"AXIOM_SIGNING_KEY\"));",
             None,
-        )
-        .await
+        ))
         .expect("a report");
 
     if report.status == CtopStatus::EvaluatorUnavailable {

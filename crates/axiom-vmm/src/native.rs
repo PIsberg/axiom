@@ -578,7 +578,7 @@ pub fn confine_environment(command: &mut Command) -> &mut Command {
         }
         let passed = PASSED_NAMES.contains(&upper.as_str())
             || PASSED_PREFIXES.iter().any(|p| upper.starts_with(p))
-            || extra.iter().any(|e| *e == upper);
+            || extra.contains(&upper);
         if passed {
             command.env(name, value);
         }
