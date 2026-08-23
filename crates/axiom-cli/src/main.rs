@@ -94,7 +94,7 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         path: String,
     },
-    /// Launch real-time Terminal UI Dashboard displaying Swarm and Engine metrics
+    /// Print a one-shot snapshot of the workspace: symbol counts, index size, Merkle root, provenance records
     Dashboard,
     /// Generate an Ed25519 keypair for signing provenance records
     Keygen {
@@ -113,7 +113,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         once: bool,
     },
-    /// Export current Merkle state to a Git-compatible patch / commit summary
+    /// Write .axiom/export.md summarising the index and Merkle root. Does not touch git
     GitExport,
     /// Fast Zoekt-style trigram regex and literal text search across repository
     Search {
