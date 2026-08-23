@@ -1128,14 +1128,24 @@ async fn main() -> Result<()> {
             );
             let p = std::path::Path::new(&path);
             let start = Instant::now();
-            let summary = server.ast_index.scan_directory(p)?;
+            // Anchored to the local index, not the ancestor the shared server
+            // discovers. `scan` states what the target tree contains now;
+            // loading an index from a directory above and merging it in wrote
+            // that ancestor's symbols into the target's own index. The existing
+            // local index is still loaded, so a re-scan purges what a file
+            // dropped rather than starting blind.
+            let index_file = std::path::Path::new(".axiom/index.json");
+            let index = if index_file.exists() {
+                axiom_ast::AstIndex::load_from_disk(index_file).unwrap_or_default()
+            } else {
+                axiom_ast::AstIndex::new()
+            };
+            let summary = index.scan_directory(p)?;
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
             // Automatically persist index to .axiom/index.json with error propagation
-            let saved_path = server
-                .ast_index
-                .save_to_disk(std::path::Path::new(".axiom/index.json"))?;
-            let real_merkle_root = server.ast_index.compute_merkle_root();
+            let saved_path = index.save_to_disk(index_file)?;
+            let real_merkle_root = index.compute_merkle_root();
 
             println!(
                 "================================================================================"
@@ -1222,8 +1232,15 @@ async fn main() -> Result<()> {
             let p = std::path::Path::new(&path);
             let index_path = std::path::Path::new(".axiom/index.json");
 
-            let summary = server.ast_index.scan_directory(p)?;
-            let saved = server.ast_index.save_to_disk(index_path)?;
+            // Anchored to the local index, as `scan` is: watching a tree must
+            // not fold an ancestor index into it on every re-scan.
+            let index = if index_path.exists() {
+                axiom_ast::AstIndex::load_from_disk(index_path).unwrap_or_default()
+            } else {
+                axiom_ast::AstIndex::new()
+            };
+            let summary = index.scan_directory(p)?;
+            let saved = index.save_to_disk(index_path)?;
             println!("👀 Watching '{}'", path);
             println!(
                 "   Initial scan: {} files, {} AST nodes -> {:?}",
@@ -1238,21 +1255,21 @@ async fn main() -> Result<()> {
             // Poll a fingerprint of the tree rather than parsing it every tick:
             // one stat per source file, against a full re-parse only when
             // something has actually changed.
-            let mut fingerprint = server.ast_index.tree_fingerprint(p);
+            let mut fingerprint = index.tree_fingerprint(p);
             println!("   Polling every {}ms. Ctrl+C to stop.", interval_ms);
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(interval_ms));
 
-                let current = server.ast_index.tree_fingerprint(p);
+                let current = index.tree_fingerprint(p);
                 if current == fingerprint {
                     continue;
                 }
                 fingerprint = current;
 
                 let started = Instant::now();
-                match server.ast_index.scan_directory(p) {
-                    Ok(summary) => match server.ast_index.save_to_disk(index_path) {
+                match index.scan_directory(p) {
+                    Ok(summary) => match index.save_to_disk(index_path) {
                         Ok(_) => println!(
                             "   change detected: re-indexed {} files, {} nodes in {:.0}ms",
                             summary.files_scanned,

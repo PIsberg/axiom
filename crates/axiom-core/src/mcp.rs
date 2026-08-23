@@ -83,8 +83,29 @@ fn agent_identity_of(args: &Value) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// The `.axiom` directory for the workspace the working directory sits in.
+///
+/// Walks up for an existing `.axiom`, so `axiom verify` run from a subdirectory
+/// reads the same ledger the server, which discovers its index the same way,
+/// writes. Falls back to `<cwd>/.axiom` when none is found, which is where a
+/// first `axiom scan` will create one.
+pub fn find_axiom_dir() -> PathBuf {
+    if let Ok(mut curr) = std::env::current_dir() {
+        loop {
+            let candidate = curr.join(".axiom");
+            if candidate.is_dir() {
+                return candidate;
+            }
+            if !curr.pop() {
+                break;
+            }
+        }
+    }
+    PathBuf::from(".axiom")
+}
+
 pub fn attestation_ledger_path() -> PathBuf {
-    PathBuf::from(".axiom").join("attestations.json")
+    find_axiom_dir().join("attestations.json")
 }
 
 /// Every attestation issued so far. A missing ledger is an empty one: nothing
@@ -254,7 +275,7 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 
 /// Where the Tree-CRDT operation log lives, beside the index it describes.
 pub fn crdt_op_log_path() -> PathBuf {
-    PathBuf::from(".axiom").join("crdt_ops.json")
+    find_axiom_dir().join("crdt_ops.json")
 }
 
 /// Every operation recorded so far. A missing log is an empty one.
@@ -312,6 +333,33 @@ pub struct AxiomMcpServer {
     pub ast_index: Arc<AstIndex>,
     pub wasi_engine: Arc<WasiEngine>,
     pub tree_crdt: Arc<TreeCrdt>,
+    /// The `.axiom` directory this server reads from and writes to.
+    ///
+    /// `find_index_file` walks up from the working directory to find the index,
+    /// and the server inherits its client's working directory, which may be a
+    /// subdirectory of the project. Reads came from the discovered directory
+    /// while every write, the ledger, the op log and a persisted mutation, went
+    /// to `<cwd>/.axiom`, so an agent working from a subdirectory wrote where
+    /// the next read would not look. Recording the directory here and deriving
+    /// every path from it keeps the two together.
+    axiom_dir: PathBuf,
+}
+
+impl AxiomMcpServer {
+    /// The ledger of issued attestations, under this server's `.axiom`.
+    pub fn ledger_path(&self) -> PathBuf {
+        self.axiom_dir.join("attestations.json")
+    }
+
+    /// The Tree-CRDT operation log, under this server's `.axiom`.
+    pub fn op_log_path(&self) -> PathBuf {
+        self.axiom_dir.join("crdt_ops.json")
+    }
+
+    /// The index this server persists a mutated symbol into.
+    pub fn index_path(&self) -> PathBuf {
+        self.axiom_dir.join("index.json")
+    }
 }
 
 fn find_index_file() -> Option<std::path::PathBuf> {
@@ -351,6 +399,16 @@ impl AxiomMcpServer {
             None => Arc::new(AstIndex::new()),
         };
 
+        // Reads and writes share one directory. When an index was discovered,
+        // it is that index's own `.axiom`; otherwise it is `<cwd>/.axiom`, so a
+        // server started with no index still writes somewhere consistent.
+        let axiom_dir = match index_path.and_then(|p| p.parent()) {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".axiom"),
+        };
+
         let wasi_engine = Arc::new(WasiEngine::new()?);
         // Each server is a distinct replica. Sharing one id across processes
         // makes concurrent agents produce identical Lamport stamps, and a
@@ -359,8 +417,8 @@ impl AxiomMcpServer {
 
         // Replay what other agents have recorded, so this server starts from the
         // shared state rather than an empty tree of its own.
-        if let Some(index) = index_path {
-            let ops = load_crdt_ops(&index.with_file_name("crdt_ops.json"));
+        {
+            let ops = load_crdt_ops(&axiom_dir.join("crdt_ops.json"));
             for op in ops {
                 tree_crdt.apply_op(op);
             }
@@ -371,6 +429,7 @@ impl AxiomMcpServer {
             ast_index,
             wasi_engine,
             tree_crdt,
+            axiom_dir,
         })
     }
 
@@ -746,7 +805,7 @@ impl AxiomMcpServer {
                 // to be known before the record is sealed, and the seal before it
                 // is signed, so reading the tail and writing the record cannot be
                 // two separate steps without a second agent slipping between them.
-                let ledger_path = attestation_ledger_path();
+                let ledger_path = self.ledger_path();
                 let _ledger_lock = match axiom_ast::IndexLock::acquire(&ledger_path) {
                     Ok(l) => l,
                     Err(e) => {
@@ -832,7 +891,7 @@ impl AxiomMcpServer {
                     .insert_node("root", node_id, symbol, "function", content);
 
                 // Record it where the next agent will see it.
-                if let Err(e) = append_crdt_op(&crdt_op_log_path(), &op) {
+                if let Err(e) = append_crdt_op(&self.op_log_path(), &op) {
                     return Ok(json!({
                         "error": format!("could not record the mutation: {e}")
                     }));
@@ -845,11 +904,9 @@ impl AxiomMcpServer {
                 // Persist just this symbol. Writing the whole in-memory index
                 // here would also write back every other symbol as this process
                 // last saw it, discarding what another agent recorded meanwhile.
-                if let Err(e) = self
-                    .ast_index
-                    .persist_symbol(std::path::Path::new(".axiom/index.json"), symbol)
-                {
-                    eprintln!("Warning: Failed to save .axiom/index.json: {}", e);
+                let index_path = self.index_path();
+                if let Err(e) = self.ast_index.persist_symbol(&index_path, symbol) {
+                    eprintln!("Warning: Failed to save {}: {}", index_path.display(), e);
                 }
 
                 Ok(json!({
