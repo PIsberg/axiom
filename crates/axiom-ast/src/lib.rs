@@ -17,6 +17,11 @@ use std::sync::RwLock;
 pub struct IndexLock {
     path: PathBuf,
     token: String,
+    /// Set on drop to stop the heartbeat, which then exits at its next tick.
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The heartbeat thread, joined on drop so it cannot touch the lock file
+    /// after the lock is released.
+    heartbeat: Option<std::thread::JoinHandle<()>>,
 }
 
 impl IndexLock {
@@ -29,8 +34,60 @@ impl IndexLock {
     /// agent for half a minute per operation after a single crash.
     const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
+    /// How often a held lock refreshes its own mtime, well under `STALE_AFTER`
+    /// so several refreshes fall inside one staleness window.
+    ///
+    /// Without this a write that runs longer than `STALE_AFTER`, a large index
+    /// save under contention, left the lock untouched, so a live writer looked
+    /// like a crashed one and another agent took the lock over mid-write. The
+    /// heartbeat means an aged mtime is evidence the holder is really gone.
+    const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
+
     /// How long to keep waiting for a live holder before giving up.
     const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Start the heartbeat that keeps a held lock's mtime fresh. It refreshes
+    /// only while the file still holds our token: if another agent judged us
+    /// stale and took over, the heartbeat stops rather than stamping on their
+    /// lock.
+    fn start_heartbeat(
+        path: PathBuf,
+        token: String,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let handle = std::thread::spawn(move || {
+            loop {
+                // Sleep in small steps so a drop is noticed promptly rather than
+                // after a full interval.
+                let mut waited = std::time::Duration::ZERO;
+                while waited < Self::HEARTBEAT {
+                    if stop_thread.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    waited += std::time::Duration::from_millis(50);
+                }
+                if stop_thread.load(Ordering::Relaxed) {
+                    return;
+                }
+                // Refresh only if the lock is still ours. Rewriting the token
+                // updates the mtime; if the file is gone or holds someone
+                // else's token, stop.
+                match std::fs::read_to_string(&path) {
+                    Ok(found) if found == token => {
+                        let _ = std::fs::write(&path, token.as_bytes());
+                    }
+                    _ => return,
+                }
+            }
+        });
+        (stop, handle)
+    }
 
     pub fn acquire(index_path: &Path) -> std::io::Result<Self> {
         let path = index_path.with_extension("lock");
@@ -61,7 +118,16 @@ impl IndexLock {
                     // Confirm the lock still says what we wrote. If another agent
                     // judged ours stale and replaced it, we do not hold it.
                     match std::fs::read_to_string(&path) {
-                        Ok(found) if found == token => return Ok(Self { path, token }),
+                        Ok(found) if found == token => {
+                            let (stop, handle) =
+                                Self::start_heartbeat(path.clone(), token.clone());
+                            return Ok(Self {
+                                path,
+                                token,
+                                stop,
+                                heartbeat: Some(handle),
+                            });
+                        }
                         _ => continue,
                     }
                 }
@@ -111,6 +177,13 @@ impl IndexLock {
 
 impl Drop for IndexLock {
     fn drop(&mut self) {
+        // Stop the heartbeat and wait for it to exit before touching the file,
+        // or a late refresh could recreate the lock just after it is removed.
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.heartbeat.take() {
+            let _ = handle.join();
+        }
+
         // Only remove the lock if it is still ours. If another agent judged it
         // stale and took over, deleting it here would release that agent's lock
         // rather than our own.
