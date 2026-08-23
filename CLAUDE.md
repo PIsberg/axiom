@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 136 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 138 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -105,15 +105,20 @@ symbol below it is filed under a module whose body is in another file.
 one is ever compiled, so a single node with both declaration lines recorded is honest
 rather than a gap.
 
-**A node's hash covers the declaration line, not the body (#40).** Editing what a
-multi-line function does leaves its hash unchanged, which defeats the verdict cache at
-its foundation: `closure_hash` is a digest over node hashes, so a changed body does not
-move the key and a cache would report a pass for code that changed, walking past every
-guard because the closure looks complete. It also means
-`editing_a_dependency_changes_the_hash_of_the_test_that_uses_it` passes for the wrong
-reason, its fixture being a one-line function whose body sits on the declaration line.
-Treat any cache-audit or cache-validate number taken before that is fixed as resting on
-hashes that do not cover the code.
+**A node's hash covers the body, and a one-line fixture is why it did not.** It used to
+cover the declaration line alone, so editing what a multi-line function does moved
+nothing, which defeated the verdict cache at its foundation: `closure_hash` is a digest
+over node hashes, so a changed body left the key where it was and a cache would report a
+pass for code that changed, past every guard because the closure still looked complete.
+`body_span` bounds a body by brace balance, or by indentation where the declaration opens
+no brace, and `index_node_at` takes it as a separate argument so `signature` and
+`source_range` keep meaning the declaration.
+The test guarding the property could not see it break: its fixture was
+`pub fn is_open(depth: i32) -> bool { depth > 0 }`, one line, body on the declaration, so
+the hash moved for the wrong reason. It is multi-line now, and reverting the source makes
+it fail along with the two new ones. Any cache-audit or cache-validate figure taken
+before this rests on hashes that did not cover the code and is not comparable with one
+taken after.
 
 **A Go method belongs to its receiver, and `func (a *Alpha) Search(` has no name before
 the first paren.** `parse_go_content` took everything before that paren as the name, which
