@@ -1390,7 +1390,25 @@ fn run_cache_validate(
     // Deterministic sampling, evenly spaced through the sorted symbols, so two
     // runs over one tree mutate the same things and can be compared.
     let all = index.symbol_paths();
-    let candidates: Vec<String> = all.iter().filter(|s| !tests.contains(s)).cloned().collect();
+    // Test files are excluded, not just symbols whose kind is "test". Breaking a
+    // test's own body makes that test fail and its own closure trivially
+    // contains it, so both mechanisms score a free hit and the run looks better
+    // than the graph is. Three of six samples in the first real run went that
+    // way and established nothing.
+    let candidates: Vec<String> = all
+        .iter()
+        .filter(|s| !tests.contains(s))
+        .filter(|s| {
+            index
+                .file_of_symbol(s)
+                .map(|f| {
+                    let f = f.replace('\\', "/");
+                    !f.contains("/tests/") && !f.contains("_test.") && !f.contains("/test_")
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
     if candidates.is_empty() {
         println!(" Every symbol is a test, so there is nothing to mutate.");
         return Ok(());
