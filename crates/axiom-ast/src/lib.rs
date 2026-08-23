@@ -263,6 +263,15 @@ pub struct AstIndex {
     /// by looking up what a file owned, and for those languages the answer was
     /// always nothing.
     parsing_file: RwLock<Option<String>>,
+    /// The file each symbol was indexed from, the inverse of `file_to_symbols`.
+    ///
+    /// `file_of_symbol` and `language_of_symbol` are asked on every eval, and
+    /// answered them by scanning every file's symbol list; this maps a symbol to
+    /// its file directly. Maintained at the one attribution point in
+    /// `index_node_at` and cleared for a symbol in `forget_file`, so it cannot
+    /// hold a stale file for a symbol that has moved or gone. Rebuilt from
+    /// `file_to_symbols` on load; not persisted, since it is derivable.
+    symbol_to_file: RwLock<HashMap<String, String>>,
     /// The lines each symbol was declared on, used to attribute a call site to
     /// the function it sits inside rather than to the whole file.
     ///
@@ -303,6 +312,7 @@ impl AstIndex {
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             parsing_file: RwLock::new(None),
+            symbol_to_file: RwLock::new(HashMap::new()),
             symbol_lines: RwLock::new(HashMap::new()),
             pending_refs: RwLock::new(HashMap::new()),
         }
@@ -453,6 +463,10 @@ impl AstIndex {
             if !entry.iter().any(|s| s == symbol) {
                 entry.push(symbol.to_string());
             }
+            self.symbol_to_file
+                .write()
+                .unwrap()
+                .insert(symbol.to_string(), file.clone());
         }
 
         node
@@ -668,13 +682,9 @@ impl AstIndex {
     /// really breaks when it changes.
     pub fn file_of_symbol(&self, symbol_path: &str) -> Option<String> {
         let canonical = self.get_symbol(symbol_path)?.symbol_path;
-        let file_syms = self.file_to_symbols.read().unwrap();
-        for (file, symbols) in file_syms.iter() {
-            if symbols.iter().any(|s| s == &canonical) {
-                return Some(file.clone());
-            }
-        }
-        None
+        // Direct, not a scan of every file's symbol list. `symbol_to_file` is
+        // the maintained inverse of `file_to_symbols`.
+        self.symbol_to_file.read().unwrap().get(&canonical).cloned()
     }
 
     /// Every test symbol in the index, sorted.
@@ -691,15 +701,10 @@ impl AstIndex {
 
     pub fn language_of_symbol(&self, symbol_path: &str) -> Option<String> {
         let canonical = self.get_symbol(symbol_path)?.symbol_path;
-        let file_syms = self.file_to_symbols.read().unwrap();
-        for (file, symbols) in file_syms.iter() {
-            if symbols.iter().any(|s| s == &canonical) {
-                return Path::new(file)
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_string());
-            }
-        }
-        None
+        let file = self.symbol_to_file.read().unwrap().get(&canonical).cloned()?;
+        Path::new(&file)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
     }
 
     /// A cheap summary of every source file under `root`: path, size and
@@ -1070,9 +1075,11 @@ impl AstIndex {
             let mut nodes = self.nodes.write().unwrap();
             let mut forgotten = self.forgotten_symbols.write().unwrap();
             let mut lines = self.symbol_lines.write().unwrap();
+            let mut sym_file = self.symbol_to_file.write().unwrap();
             for symbol in symbols {
                 nodes.remove(&symbol);
                 lines.remove(&symbol);
+                sym_file.remove(&symbol);
                 forgotten.insert(symbol);
             }
         }
@@ -2673,6 +2680,14 @@ impl AstIndex {
             }
         }
 
+        // The inverse of file_to_symbols, rebuilt on load rather than persisted.
+        let mut symbol_to_file = HashMap::new();
+        for (file, symbols) in &payload.file_to_symbols {
+            for symbol in symbols {
+                symbol_to_file.insert(symbol.clone(), file.clone());
+            }
+        }
+
         Ok(Self {
             nodes: RwLock::new(payload.nodes),
             reverse_deps: RwLock::new(reverse_deps),
@@ -2684,6 +2699,7 @@ impl AstIndex {
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             parsing_file: RwLock::new(None),
+            symbol_to_file: RwLock::new(symbol_to_file),
             // Both are scan-scoped. A loaded index already carries the edges
             // they were used to produce, in the nodes' own dependencies.
             symbol_lines: RwLock::new(HashMap::new()),
