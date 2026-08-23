@@ -315,7 +315,7 @@ impl AstIndex {
         content: &str,
         deps: Vec<String>,
     ) -> AstNode {
-        self.index_node_at(symbol, kind, content, deps, None)
+        self.index_node_at(symbol, kind, content, "", deps, None)
     }
 
     /// Insert a node, recording the lines its declaration spans.
@@ -328,11 +328,66 @@ impl AstIndex {
     /// all of them for one reference is the same as charging none of them. And
     /// it is what `source_range` reports, one-based, so a caller can open the
     /// file and find the declaration where the node says it is.
+    /// The lines a symbol's body occupies, starting at its declaration.
+    ///
+    /// `structure` is the comment- and string-stripped text, so a brace inside a
+    /// format string does not open a block, and `strip_comments_and_strings`
+    /// preserves the line count, which is what lets the two be indexed together.
+    ///
+    /// A declaration that opens a brace runs until the brace closes. One that
+    /// does not runs while the indentation stays deeper, which is Python, and
+    /// also `fun f() = expr` in Kotlin and `def f = expr` in Scala.
+    fn body_span(structure: &[&str], start: usize) -> (usize, usize) {
+        let Some(decl) = structure.get(start) else {
+            return (start, start);
+        };
+        let indent = decl.len() - decl.trim_start().len();
+        let opens = decl.matches('{').count();
+        let closes = decl.matches('}').count();
+
+        if opens > closes {
+            let mut depth = opens - closes;
+            for (offset, line) in structure.iter().enumerate().skip(start + 1) {
+                depth += line.matches('{').count();
+                depth = depth.saturating_sub(line.matches('}').count());
+                if depth == 0 {
+                    return (start + 1, offset + 1);
+                }
+            }
+            return (start + 1, structure.len());
+        }
+
+        let mut end = start + 1;
+        while end < structure.len() {
+            let line = structure[end];
+            if !line.trim().is_empty() {
+                let this = line.len() - line.trim_start().len();
+                if this <= indent {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        (start + 1, end)
+    }
+
+    /// The raw text of a symbol's body, for hashing.
+    fn body_of(raw: &[&str], structure: &[&str], start: usize) -> String {
+        let (from, to) = Self::body_span(structure, start);
+        if from >= to || from >= raw.len() {
+            return String::new();
+        }
+        raw[from..to.min(raw.len())].join("\n")
+    }
+
     pub fn index_node_at(
         &self,
         symbol: &str,
         kind: &str,
         content: &str,
+        // The symbol's body, which is what the hash exists to cover. Empty for a
+        // node inserted by hand and for a declaration with no body.
+        body: &str,
         deps: Vec<String>,
         declared_on: Option<(usize, usize)>,
     ) -> AstNode {
@@ -346,6 +401,16 @@ impl AstIndex {
         let normalized = content.trim();
         let mut hasher = blake3::Hasher::new();
         hasher.update(normalized.as_bytes());
+        // The body, not only the declaration. Hashing the declaration alone
+        // meant editing what a multi-line function does left its hash where it
+        // was, so `closure_hash`, which is a digest over these, did not move
+        // either: a verdict cache would have reported a pass for code that
+        // changed, past every guard, because the closure still looked complete.
+        //
+        // The separator keeps a declaration and a body from running together
+        // into the same bytes as a different split of the same text.
+        hasher.update(b"\0body\0");
+        hasher.update(body.trim().as_bytes());
         for dep in &deps {
             hasher.update(dep.as_bytes());
         }
@@ -1644,6 +1709,8 @@ impl AstIndex {
             .insert(file_path.to_string(), Self::extract_call_names(&clean_code));
 
         let lines: Vec<&str> = content.lines().collect();
+        let structure_text = Self::strip_comments_and_strings(content, true);
+        let structure: Vec<&str> = structure_text.lines().collect();
         let mut i = 0;
 
         while i < lines.len() {
@@ -1726,6 +1793,7 @@ impl AstIndex {
                                 &full_symbol,
                                 kind,
                                 trimmed,
+                                &Self::body_of(&lines, &structure, i),
                                 node_deps,
                                 Some((i, i)),
                             );
@@ -1860,6 +1928,10 @@ impl AstIndex {
                         &full_symbol,
                         kind,
                         signature_clean,
+                        // From the last line of the signature: a wrapped
+                        // parameter list means the body starts after `i`, not
+                        // after the line the declaration opened on.
+                        &Self::body_of(&lines, &structure, i),
                         node_deps,
                         Some((decl_start, i)),
                     );
@@ -1915,6 +1987,7 @@ impl AstIndex {
         // every function below it would be filed under the wrong type.
         let clean = Self::strip_comments_and_strings(content, false);
         let counted: Vec<&str> = clean.lines().collect();
+        let raw: Vec<&str> = content.lines().collect();
         let mut owner_stack: Vec<(String, usize)> = Vec::new();
         let mut depth: usize = 0;
 
@@ -1977,6 +2050,7 @@ impl AstIndex {
                             &symbol,
                             kind,
                             trimmed,
+                            &Self::body_of(&raw, &counted, line_no),
                             uses.clone(),
                             Some((line_no, line_no)),
                         );
@@ -2002,6 +2076,7 @@ impl AstIndex {
                             &symbol,
                             "struct",
                             trimmed,
+                            &Self::body_of(&raw, &counted, line_no),
                             uses.clone(),
                             Some((line_no, line_no)),
                         );
@@ -2121,6 +2196,7 @@ impl AstIndex {
     fn parse_python_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let mut imports = Vec::new();
         let mut current_class = String::new();
+        let raw: Vec<&str> = content.lines().collect();
 
         for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
@@ -2155,6 +2231,7 @@ impl AstIndex {
                         &symbol,
                         kind,
                         trimmed,
+                        &Self::body_of(&raw, &raw, line_no),
                         imports.clone(),
                         Some((line_no, line_no)),
                     );
@@ -2183,6 +2260,7 @@ impl AstIndex {
                         &symbol,
                         kind,
                         trimmed,
+                        &Self::body_of(&raw, &raw, line_no),
                         imports.clone(),
                         Some((line_no, line_no)),
                     );
@@ -2203,6 +2281,7 @@ impl AstIndex {
         // signature keeps any string the declaration genuinely contains.
         let clean = Self::strip_comments_and_strings(content, true);
         let stripped: Vec<&str> = clean.lines().collect();
+        let raw: Vec<&str> = content.lines().collect();
 
         for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
@@ -2234,6 +2313,7 @@ impl AstIndex {
                         &symbol,
                         kind,
                         trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
                         imports.clone(),
                         Some((line_no, line_no)),
                     );
@@ -2260,6 +2340,7 @@ impl AstIndex {
                         &symbol,
                         "class",
                         trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
                         imports.clone(),
                         Some((line_no, line_no)),
                     );
@@ -2310,6 +2391,7 @@ impl AstIndex {
         // declaration.
         let clean = Self::strip_comments_and_strings(content, false);
         let stripped: Vec<&str> = clean.lines().collect();
+        let raw: Vec<&str> = content.lines().collect();
 
         for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
@@ -2330,7 +2412,14 @@ impl AstIndex {
                 } else {
                     "function"
                 };
-                self.index_node_at(&symbol, kind, trimmed, vec![], Some((line_no, line_no)));
+                self.index_node_at(
+                    &symbol,
+                    kind,
+                    trimmed,
+                    &Self::body_of(&raw, &stripped, line_no),
+                    vec![],
+                    Some((line_no, line_no)),
+                );
                 *nodes_count += 1;
             } else if let Some(after_type) = decl.strip_prefix("type ") {
                 // `type Alpha struct {` and `type Reader interface {`. A type
@@ -2351,7 +2440,14 @@ impl AstIndex {
                     _ => "type",
                 };
                 let symbol = format!("{file_path}::{name}");
-                self.index_node_at(&symbol, kind, trimmed, vec![], Some((line_no, line_no)));
+                self.index_node_at(
+                    &symbol,
+                    kind,
+                    trimmed,
+                    &Self::body_of(&raw, &stripped, line_no),
+                    vec![],
+                    Some((line_no, line_no)),
+                );
                 *nodes_count += 1;
             }
         }

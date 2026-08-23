@@ -321,6 +321,40 @@ audit reported `would wrongly skip: 0` on this same repository twice without
 seeing it, because both walks read the same edges and are blind to a missing one
 together.
 
+## Re-measured after the hashes started covering the code
+
+Until #40 a node's hash covered the declaration line and not the body, so
+editing what a multi-line function does moved nothing. Every number above rested
+on that, and none of them is comparable across the fix. Taken again on this
+repository once the body was in the hash:
+
+```
+ Tests in index:             49
+ Tests with a usable key:    49 of 49
+ Keyed without guessing:     1 of 49
+ Extra symbols dragged in:   1,726
+
+ Cache would wrongly skip:   0
+ Agreement:                  22.89%
+
+   Change one known symbol: the blast radius runs 2.4 of 49 tests.
+   Adding the cache behind it skips 0 more.
+
+   Change something of unknown extent: the cache alone runs 10.5 of
+   49 tests, so 79% of verdicts still hold.
+```
+
+The conclusions do not move. Behind the selector the cache still saves nothing,
+for the arithmetic reason above rather than for any measurable one. The
+unknown-extent case improved, 72% of verdicts standing to 79%, which is what the
+extra precision from the parser fixes bought.
+
+What is worth noticing is that the earlier numbers were not merely stale. They
+were computed over hashes that did not cover the code, so "the key did not move"
+sometimes meant "the body changed and nothing noticed". A zero in the dangerous
+column meant less than it appeared to, and that is the second time in this
+document a zero has needed qualifying.
+
 ## What would come next
 
 In order, each gated on the one before:

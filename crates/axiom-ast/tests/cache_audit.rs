@@ -68,7 +68,11 @@ fn editing_a_dependency_changes_the_hash_of_the_test_that_uses_it() {
     // Splitting them means only a followed edge can explain a changed key.
     dir.write(
         "gate.rs",
-        "pub fn is_open(depth: i32) -> bool { depth > 0 }\n",
+        // Multi-line on purpose. With the body on the declaration line this
+        // test passed while the property it asserts was false: a hash covered
+        // the declaration only, so editing a real function moved nothing.
+        // That is #40, and this is the shape that would have caught it.
+        "pub fn is_open(depth: i32) -> bool {\n    depth > 0\n}\n",
     );
     dir.write(
         "gate_test.rs",
@@ -93,7 +97,7 @@ fn editing_a_dependency_changes_the_hash_of_the_test_that_uses_it() {
     // Only the dependency's body changes. The test file is not touched.
     dir.write(
         "gate.rs",
-        "pub fn is_open(depth: i32) -> bool { depth > 100 }\n",
+        "pub fn is_open(depth: i32) -> bool {\n    depth > 100\n}\n",
     );
 
     let after = scan(&dir)
@@ -531,5 +535,78 @@ fn the_audit_reports_what_a_cache_driven_run_would_cost() {
     assert!(
         cached <= audit.tests_in_index as f64,
         "a run cannot contain more tests than exist: {audit:?}"
+    );
+}
+
+/// A node's hash covers the body, not only the declaration line.
+///
+/// This was #40, and it defeated the cache at its foundation. `closure_hash` is
+/// a digest over node hashes, so a body that changes without moving its node's
+/// hash leaves the key where it was: a cache would report a pass for code that
+/// changed, past every guard, because the closure still looks complete.
+///
+/// The one test that guarded the property could not see it. Its fixture was a
+/// one-line function whose body sits on the declaration line, so the hash moved
+/// for the wrong reason and the assertion held while the property was false.
+#[test]
+fn editing_a_body_moves_the_hash_even_when_the_declaration_does_not_change() {
+    let dir = TempDir::new("bodyhash");
+    dir.write(
+        "m.rs",
+        "pub fn multi_line(depth: i32) -> bool {\n    depth > 0\n}\n",
+    );
+    let before = scan(&dir).get_symbol("multi_line").expect("indexed").hash;
+
+    // Only the body changes. The declaration line is byte-for-byte the same.
+    dir.write(
+        "m.rs",
+        "pub fn multi_line(depth: i32) -> bool {\n    depth > 999\n}\n",
+    );
+    let after = scan(&dir).get_symbol("multi_line").expect("indexed").hash;
+
+    assert_ne!(
+        before, after,
+        "the declaration is identical, so if the hash does not move it is not \
+         covering what the function does"
+    );
+}
+
+/// Two functions declared alike with different bodies are different content.
+///
+/// The same property from the other side, and the shape that found it: two
+/// modules each declaring `helper` hashed alike however their bodies differed.
+#[test]
+fn two_identically_declared_functions_with_different_bodies_hash_differently() {
+    let dir = TempDir::new("twins");
+    dir.write(
+        "twins.rs",
+        "mod alpha {\n\
+         \x20   pub fn helper() -> bool {\n\
+         \x20       true\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         mod beta {\n\
+         \x20   pub fn helper() -> bool {\n\
+         \x20       false\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let index = scan(&dir);
+    let symbols = index.symbol_paths();
+    let alpha = symbols
+        .iter()
+        .find(|s| s.ends_with("::alpha::helper"))
+        .expect("alpha::helper");
+    let beta = symbols
+        .iter()
+        .find(|s| s.ends_with("::beta::helper"))
+        .expect("beta::helper");
+
+    assert_ne!(
+        index.get_symbol(alpha).expect("alpha").hash,
+        index.get_symbol(beta).expect("beta").hash,
+        "one returns true and the other false, so they are not the same content"
     );
 }
