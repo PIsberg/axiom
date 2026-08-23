@@ -340,6 +340,18 @@ pub fn append_attestation_unlinked_to(
 ///
 /// With no key configured, records are still written and still tamper-evident
 /// through `seal`. They are simply anonymous, and say so.
+/// How long `axiom_run_tests` lets a suite run before killing it. A test suite
+/// is slower than a snippet, so this is minutes by default, separate from the
+/// evaluator's `AXIOM_EVAL_TIMEOUT_SECS`.
+fn test_timeout() -> std::time::Duration {
+    std::env::var("AXIOM_TEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(600))
+}
+
 pub fn configured_signing_key() -> Option<String> {
     if let Ok(key) = std::env::var("AXIOM_SIGNING_KEY") {
         if !key.trim().is_empty() {
@@ -694,6 +706,19 @@ impl AxiomMcpServer {
                                     "max_results": { "type": "integer", "default": 20 }
                                 },
                                 "required": ["query"]
+                            }
+                        },
+                        {
+                            "name": "axiom_run_tests",
+                            "description": "Run the project's own test command and record the outcome so a provenance record can rest on it. Unlike axiom_record_verification, axiom runs the command itself and observes the exit code, so the record says 'executed', not 'reported'. Build the command from the tests axiom_get_blast_radius named, so only the affected tests run: for example 'cargo test --test e2e_test search_modes', or 'pytest tests/test_gate.py::test_is_open'. The command runs in the workspace root with a confined environment, so it cannot read the signing key, and is killed with everything it started if it outruns AXIOM_TEST_TIMEOUT_SECS (default 600). A non-zero exit is recorded as a failed check; attesting against a failed check is refused.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "command": { "type": "string", "description": "The test command to run, e.g. 'cargo test --test e2e_test name' or 'pytest file::test'" },
+                                    "task_id": { "type": "string", "description": "Identifier to attest against later; one is generated if omitted" },
+                                    "symbol_path": { "type": "string", "description": "The symbol the tests cover, recorded for context; optional" }
+                                },
+                                "required": ["command"]
                             }
                         }
                     ]
@@ -1080,6 +1105,100 @@ impl AxiomMcpServer {
                         Ok(json!({ "error": e, "query": query, "mode_requested": requested }))
                     }
                 }
+            }
+
+            "axiom_run_tests" => {
+                let command = match required_str(&args, "command") {
+                    Ok(c) => c.to_string(),
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+                let task_id = args
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty())
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| format!("test_run_{}", std::process::id()));
+
+                // Run in the workspace the index describes: the parent of the
+                // `.axiom` directory, so the project's own test runner sees its
+                // own tree.
+                let workspace = self
+                    .axiom_dir
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+                // Through the shell, so a full command line with arguments works
+                // as written. run_with_timeout confines the environment, so the
+                // command cannot read the signing key, and ends the whole
+                // process tree if it outruns the deadline.
+                let mut cmd = if cfg!(windows) {
+                    let mut c = std::process::Command::new("cmd");
+                    c.args(["/C", &command]);
+                    c
+                } else {
+                    let mut c = std::process::Command::new("sh");
+                    c.args(["-c", &command]);
+                    c
+                };
+                cmd.current_dir(&workspace);
+
+                let done = match axiom_vmm::native::run_with_timeout(cmd, test_timeout()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Ok(json!({
+                            "error": format!("could not run the test command: {e}")
+                        }));
+                    }
+                };
+
+                if done.timed_out {
+                    // A run that was killed says nothing about whether the tests
+                    // would have passed, so it is not recorded as a verification.
+                    return Ok(json!({
+                        "task_id": task_id,
+                        "status": "TIMEOUT",
+                        "passed": false,
+                        "note": format!(
+                            "the command was killed after {}s; raise AXIOM_TEST_TIMEOUT_SECS if the suite is genuinely slow. Nothing was recorded.",
+                            test_timeout().as_secs()
+                        )
+                    }));
+                }
+
+                let passed = done.succeeded();
+                let tail = |s: &str| {
+                    s.lines()
+                        .rev()
+                        .take(40)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+
+                // Recorded as "executed": axiom ran it and saw the exit code, so
+                // it can vouch for the outcome, unlike a "reported" check.
+                self.verifications.write().unwrap().insert(
+                    task_id.clone(),
+                    Verification {
+                        passed,
+                        kind: "executed".to_string(),
+                        detail: format!("axiom ran: {command}"),
+                    },
+                );
+
+                Ok(json!({
+                    "task_id": task_id,
+                    "status": if passed { "PASSED" } else { "FAILED" },
+                    "passed": passed,
+                    "recorded_as": "executed",
+                    "command": command,
+                    "stdout": tail(&done.stdout),
+                    "stderr": tail(&done.stderr),
+                    "note": "Axiom ran this command and observed its exit code. A provenance record issued against this task will say the outcome was executed by axiom."
+                }))
             }
 
             _ => anyhow::bail!("Unknown tool: {}", tool_name),

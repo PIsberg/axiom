@@ -66,11 +66,19 @@ The CLI is not a separate code path. Every subcommand constructs an `AxiomMcpSer
 same crates the MCP tools use, so a bug reproduced through `axiom blast-radius` is the same bug an
 agent sees through `axiom_get_blast_radius`.
 
-Seven MCP tools, all declared and dispatched in `axiom-core/src/mcp.rs`: `axiom_query_symbol`,
+Eight MCP tools, all declared and dispatched in `axiom-core/src/mcp.rs`: `axiom_query_symbol`,
 `axiom_get_blast_radius`, `axiom_eval_patch`, `axiom_apply_mutation`, `axiom_attest_commit`,
-`axiom_record_verification`, `axiom_search_regex`. The tool list in `handle_request` and the
-dispatch `match` below it are two places that must be edited together; a tool declared but not
-dispatched fails at call time, not at startup.
+`axiom_record_verification`, `axiom_search_regex`, `axiom_run_tests`. The tool list in
+`handle_request` and the dispatch `match` below it are two places that must be edited together; a
+tool declared but not dispatched fails at call time, not at startup, and
+`declared_tools_are_dispatched.rs` pins the set so the count here cannot drift.
+
+`axiom_run_tests` runs the project's own test command in the workspace and records the outcome as a
+third verification kind, `executed`: axiom ran it and saw the exit code, so it can vouch for it,
+between `sandbox` (axiom's own evaluator ran it) and `reported` (an agent says it ran something).
+The command runs with the confined environment `run_with_timeout` gives every evaluation, so it
+cannot read the signing key, and is killed as a whole process tree past `AXIOM_TEST_TIMEOUT_SECS`
+(default 600, separate from the evaluator's).
 
 Language dispatch is by file extension in `parse_file_content`: Java (shared with Kotlin and Scala),
 Rust, Python, TypeScript/JavaScript, and Go each have their own line parser.
