@@ -814,11 +814,54 @@ async fn main() -> Result<()> {
                 let for_symbol = ledger.iter().filter(|a| a.symbol_path == symbol).count();
                 if for_symbol == 0 {
                     println!("❌ NO ATTESTATION: no record has been issued for this symbol.");
-                } else {
-                    println!(
-                        "❌ NO MATCH: {for_symbol} record(s) exist for this symbol, none for this prompt."
-                    );
+                    std::process::exit(1);
                 }
+
+                // Two different things land here and this used to name only one
+                // of them. A seal is re-derived from the record's stored fields
+                // together with the symbol and prompt being claimed, so it fails
+                // both when the prompt is not the one the record was issued for
+                // and when a stored field has been edited since. Reporting
+                // "none for this prompt" asserted the first, and sent anyone
+                // holding an altered record looking for a typo.
+                //
+                // Nothing here can separate the two. The prompt is not stored,
+                // only a digest over it and everything else, so there is no
+                // prompt-independent copy of the record to compare against.
+                // Saying so is the honest answer; picking one would be the
+                // confident wrong one.
+                println!(
+                    "❌ NO MATCH: {for_symbol} record(s) exist for this symbol, and none of them"
+                );
+                println!("   verifies against this prompt. Two things do that, and this check");
+                println!("   cannot tell them apart:");
+                println!();
+                println!("     - the prompt is not the one the record was issued for, or");
+                println!("     - the record has been altered since it was written.");
+                println!();
+                println!("   The prompt itself is not stored, only a digest covering it, so the");
+                println!("   ledger cannot tell you which prompt was used.");
+
+                // A broken chain is the one piece of evidence available here
+                // that points at tampering rather than at a wrong prompt, and it
+                // was previously reported only on the paths that found a record.
+                match &chain {
+                    Ok(()) => println!(
+                        "   The ledger chain is intact across {} record(s), so no record has",
+                        ledger.len()
+                    ),
+                    Err(e) => {
+                        println!();
+                        println!("⚠  LEDGER ALTERED: {e}");
+                        println!(
+                            "   The ledger has been altered, which makes the second explanation"
+                        );
+                        println!("   the likelier of the two.");
+                        std::process::exit(1);
+                    }
+                }
+                println!("   been removed or reordered; that says nothing about the fields");
+                println!("   inside one.");
                 std::process::exit(1);
             }
 

@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 100 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 102 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -272,6 +272,16 @@ incomplete closure must produce no key at all, because a cache that keys on a pa
 view skips a test whose real dependency moved and reports a pass for code that never
 ran. Full reasoning in `docs/verdict_cache_audit.md`. Re-run the audit before quoting
 any of these numbers; they move with the graph.
+
+**A seal that fails to re-derive does not say why, and `verify` must not pretend it does.**
+The seal is recomputed from a record's stored fields together with the symbol and prompt
+being claimed, so it fails both when the prompt is not the one the record was issued for
+and when a stored field has been edited since. There is no prompt-independent copy to
+compare against, because the prompt is not stored, only a digest covering it. So the
+no-match path names both causes rather than picking one: it used to report "none for
+this prompt", which sent anyone holding an altered ledger looking for a typo. A broken
+chain is the one piece of evidence that does point at tampering, and it is reported
+here too.
 
 **A caller-supplied field that is printed is an injection surface.**
 `agent_identity` reaches `axiom_attest_commit` from the caller and is rendered by
