@@ -10,9 +10,9 @@
 //! that the answer is `EVALUATOR_UNAVAILABLE` and never `PASSED`.
 
 use anyhow::Result;
-use axiom_core::{mcp::JsonRpcRequest, mcp::JsonRpcResponse, AxiomMcpServer};
+use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest, mcp::JsonRpcResponse};
 use axiom_vmm::native;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use axiom_ast::SearchMode;
-use axiom_core::{mcp::JsonRpcRequest, AxiomMcpServer};
+use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest};
 use axiom_vmm::SandboxEngine;
 use clap::{Parser, Subcommand};
 
@@ -172,7 +172,10 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Serve => {
             let total_syms = server.ast_index.total_symbols_count();
-            eprintln!("Axiom MCP Server running over stdio (JSON-RPC 2.0)... (Loaded {} symbols into Merkle CAS)", total_syms);
+            eprintln!(
+                "Axiom MCP Server running over stdio (JSON-RPC 2.0)... (Loaded {} symbols into Merkle CAS)",
+                total_syms
+            );
             let stdin = io::stdin();
             let mut stdout = io::stdout();
 
@@ -564,7 +567,9 @@ async fn main() -> Result<()> {
                 "================================================================================"
             );
             println!("   ⚡ AXIOM: THE AGENT-NATIVE AUTONOMOUS SOFTWARE ENGINE DEMONSTRATION ⚡");
-            println!("================================================================================\n");
+            println!(
+                "================================================================================\n"
+            );
 
             let t0 = Instant::now();
 
@@ -628,7 +633,9 @@ async fn main() -> Result<()> {
             );
 
             // Step 3: Agent proposes buggy patch -> Instant Sandbox catches bug
-            println!("\n🔹 [Step 3/5] Simulating Agent testing a BUGGY hypothesis (empty token) in sandbox...");
+            println!(
+                "\n🔹 [Step 3/5] Simulating Agent testing a BUGGY hypothesis (empty token) in sandbox..."
+            );
             let s3 = Instant::now();
             let _failed_report = server
                 .wasi_engine
@@ -650,7 +657,9 @@ async fn main() -> Result<()> {
             println!("   ↳ Structured Diagnostic Hint: '{}'", hint);
 
             // Step 4: Agent self-corrects -> Instant Sandbox passes
-            println!("\n🔹 [Step 4/5] Agent automatically self-heals using the diagnostic hint & re-tests...");
+            println!(
+                "\n🔹 [Step 4/5] Agent automatically self-heals using the diagnostic hint & re-tests..."
+            );
             let s4 = Instant::now();
             let pass_report = server
                 .wasi_engine
@@ -660,7 +669,10 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             let el4 = s4.elapsed().as_secs_f64() * 1000.0;
-            println!("   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: {:.3} ms)", el4);
+            println!(
+                "   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: {:.3} ms)",
+                el4
+            );
 
             // Step 5: record the provenance of the change
             println!(
@@ -690,7 +702,9 @@ async fn main() -> Result<()> {
                 el5
             );
 
-            println!("\n================================================================================");
+            println!(
+                "\n================================================================================"
+            );
             println!("                         📊 PERFORMANCE BENCHMARK MATRIX");
             println!(
                 "================================================================================"
@@ -699,20 +713,34 @@ async fn main() -> Result<()> {
             println!(
                 " -------------------------------------------------------------------------------"
             );
-            println!(" Workspace Sync            git clone (500 MB / ~12s)     MCP Graph Query (2 KB / {:.2} ms)", el1);
-            println!(" Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)", );
-            println!(" Sandbox Feedback Loop     300,000 ms (5 minutes)        {:.2} ms (compile and run)", el4);
+            println!(
+                " Workspace Sync            git clone (500 MB / ~12s)     MCP Graph Query (2 KB / {:.2} ms)",
+                el1
+            );
+            println!(
+                " Test Scope Selected       5,000 tests (Full suite)      1 test (Blast-Radius 99.98% pruned)",
+            );
+            println!(
+                " Sandbox Feedback Loop     300,000 ms (5 minutes)        {:.2} ms (compile and run)",
+                el4
+            );
             println!(
                 " Self-Correction Total     600,000 ms (10 minutes)       {:.2} ms (End-to-End)",
                 total_loop_ms
             );
-            println!(" Provenance Security       Unsigned text commit          Prompt, symbol and check recorded together");
+            println!(
+                " Provenance Security       Unsigned text commit          Prompt, symbol and check recorded together"
+            );
             println!(
                 " Speedup Multiplier        1.0x (Baseline)               {:.0}x FASTER",
                 600000.0 / total_loop_ms.max(0.1)
             );
-            println!("================================================================================\n");
-            println!("🎯 VERDICT: Autonomous AI Coding Agents iterate at MACHINE SPEED with ZERO merge conflicts.");
+            println!(
+                "================================================================================\n"
+            );
+            println!(
+                "🎯 VERDICT: Autonomous AI Coding Agents iterate at MACHINE SPEED with ZERO merge conflicts."
+            );
         }
 
         Commands::Swarm { agents, ops } => {
@@ -720,7 +748,9 @@ async fn main() -> Result<()> {
                 "================================================================================"
             );
             println!("   🤖 AXIOM TREE-CRDT AUTONOMOUS AGENT SWARM CONCURRENCY SIMULATION 🤖");
-            println!("================================================================================\n");
+            println!(
+                "================================================================================\n"
+            );
 
             println!(
                 "🚀 Initializing swarm cluster with {} autonomous agents...",
@@ -759,8 +789,12 @@ async fn main() -> Result<()> {
                 report.duration_ms,
                 (report.duration_ms * 1000.0) / report.total_operations as f64
             );
-            println!("================================================================================\n");
-            println!("🏆 50+ Autonomous Agents can mutate and refactor the same codebase in parallel without human-style Git locks or merge conflicts!");
+            println!(
+                "================================================================================\n"
+            );
+            println!(
+                "🏆 50+ Autonomous Agents can mutate and refactor the same codebase in parallel without human-style Git locks or merge conflicts!"
+            );
         }
 
         Commands::McpConfig => {
@@ -968,7 +1002,9 @@ async fn main() -> Result<()> {
                             }
                             if other_signers == 0 && unsigned > 0 {
                                 println!();
-                                println!("   An unsigned record proves nothing about who wrote it, so it cannot");
+                                println!(
+                                    "   An unsigned record proves nothing about who wrote it, so it cannot"
+                                );
                                 println!("   satisfy a check that named the signer it expects.");
                             }
                             std::process::exit(1);

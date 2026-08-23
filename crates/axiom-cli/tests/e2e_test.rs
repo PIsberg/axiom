@@ -1,6 +1,6 @@
 use anyhow::Result;
-use axiom_core::{mcp::JsonRpcRequest, mcp::JsonRpcResponse, AxiomMcpServer};
-use serde_json::{json, Value};
+use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest, mcp::JsonRpcResponse};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 fn extract_tool_result(resp: &JsonRpcResponse) -> Value {
@@ -344,7 +344,10 @@ async fn test_e2e_disk_persistence_cross_instance() -> Result<()> {
     std::fs::create_dir_all(&src_dir)?;
 
     let rust_file = src_dir.join("calc.rs");
-    std::fs::write(&rust_file, "pub fn add_numbers(a: i32, b: i32) -> i32 { a + b }\n#[test]\nfn test_add() { assert_eq!(add_numbers(2, 3), 5); }")?;
+    std::fs::write(
+        &rust_file,
+        "pub fn add_numbers(a: i32, b: i32) -> i32 { a + b }\n#[test]\nfn test_add() { assert_eq!(add_numbers(2, 3), 5); }",
+    )?;
 
     // Instance 1: Scan and save to disk
     let server_1 = AxiomMcpServer::new()?;
@@ -587,23 +590,29 @@ public class ConcurrencyRunnerTest {
     ast_index.scan_directory(&temp_dir)?;
 
     // 1. Verify multiline method execute is indexed under ConcurrencyRunner
-    assert!(ast_index
-        .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner")
-        .is_some());
+    assert!(
+        ast_index
+            .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner")
+            .is_some()
+    );
     assert!(
         ast_index
             .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::execute")
             .is_some(),
         "Multiline execute method must be indexed"
     );
-    assert!(ast_index
-        .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::resolveTimeoutMultiplier")
-        .is_some());
+    assert!(
+        ast_index
+            .get_symbol("se.deversity.asynctest.runner.ConcurrencyRunner::resolveTimeoutMultiplier")
+            .is_some()
+    );
 
     // 2. Verify nested interface unwrap is indexed under ContentionBarrier
-    assert!(ast_index
-        .get_symbol("se.deversity.asynctest.runner.ContentionBarrier::unwrap")
-        .is_some());
+    assert!(
+        ast_index
+            .get_symbol("se.deversity.asynctest.runner.ContentionBarrier::unwrap")
+            .is_some()
+    );
 
     // 3. Verify brace-depth restores ConcurrencyRunner for buildMultiFailureError (NOT ContentionBarrier::buildMultiFailureError)
     assert!(
@@ -612,12 +621,16 @@ public class ConcurrencyRunnerTest {
             .is_some(),
         "buildMultiFailureError must be under ConcurrencyRunner"
     );
-    assert!(ast_index
-        .get_symbol("se.deversity.asynctest.runner.ContentionBarrier::buildMultiFailureError")
-        .is_none());
-    assert!(ast_index
-        .get_symbol("se.deversity.asynctest.runner.Javadoc),")
-        .is_none());
+    assert!(
+        ast_index
+            .get_symbol("se.deversity.asynctest.runner.ContentionBarrier::buildMultiFailureError")
+            .is_none()
+    );
+    assert!(
+        ast_index
+            .get_symbol("se.deversity.asynctest.runner.Javadoc),")
+            .is_none()
+    );
 
     // 4. Verify Dedicated Test Reachability (even without import)
     let br = ast_index
@@ -1381,19 +1394,29 @@ async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
 
     let alpha = pkg.join("Alpha.java");
     let beta = pkg.join("Beta.java");
-    std::fs::write(&alpha, "package se.deversity.asynctest;\npublic class Alpha {\n    public void alphaMethod() {}\n}\n")?;
-    std::fs::write(&beta, "package se.deversity.asynctest;\npublic class Beta {\n    public void betaMethod() {}\n}\n")?;
+    std::fs::write(
+        &alpha,
+        "package se.deversity.asynctest;\npublic class Alpha {\n    public void alphaMethod() {}\n}\n",
+    )?;
+    std::fs::write(
+        &beta,
+        "package se.deversity.asynctest;\npublic class Beta {\n    public void betaMethod() {}\n}\n",
+    )?;
 
     let idx = axiom_ast::AstIndex::new();
     idx.scan_directory(&temp_dir)?;
     assert!(idx.get_symbol("se.deversity.asynctest.Beta").is_some());
-    assert!(idx
-        .get_symbol("se.deversity.asynctest.Alpha::alphaMethod")
-        .is_some());
+    assert!(
+        idx.get_symbol("se.deversity.asynctest.Alpha::alphaMethod")
+            .is_some()
+    );
 
     // Beta is deleted outright; Alpha's method is renamed in place.
     std::fs::remove_file(&beta)?;
-    std::fs::write(&alpha, "package se.deversity.asynctest;\npublic class Alpha {\n    public void renamedMethod() {}\n}\n")?;
+    std::fs::write(
+        &alpha,
+        "package se.deversity.asynctest;\npublic class Alpha {\n    public void renamedMethod() {}\n}\n",
+    )?;
     idx.scan_directory(&temp_dir)?;
 
     assert!(
@@ -2263,10 +2286,12 @@ async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> 
     );
 
     // Rubbish keys are refused rather than panicking.
-    assert!(record
-        .clone()
-        .sign_with("s", "p", "not-hex-at-all")
-        .is_err());
+    assert!(
+        record
+            .clone()
+            .sign_with("s", "p", "not-hex-at-all")
+            .is_err()
+    );
     assert!(record.clone().sign_with("s", "p", "abcd").is_err());
 
     Ok(())

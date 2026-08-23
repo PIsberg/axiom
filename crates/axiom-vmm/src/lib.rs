@@ -4,8 +4,8 @@ use axiom_proto::{CtopReport, CtopStatus, FailedCheck};
 use std::process::Command;
 use std::time::Instant;
 use wasmtime::*;
-use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 
 pub mod native;
 
@@ -125,8 +125,12 @@ impl SandboxEngine for WasiEngine {
 
         let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, entrypoint) {
-            match func.call(&mut store, ()) {
+        // Written as a match rather than `if let ... else` because edition 2024
+        // drops the scrutinee's temporaries before the else block runs. Nothing
+        // here depends on that, but the explicit form has one reading under both
+        // editions rather than two.
+        match instance.get_typed_func::<(), ()>(&mut store, entrypoint) {
+            Ok(func) => match func.call(&mut store, ()) {
                 Ok(_) => {
                     let total_ms = start.elapsed().as_secs_f64() * 1000.0;
                     Ok(CtopReport::pass(
@@ -155,9 +159,8 @@ impl SandboxEngine for WasiEngine {
                         e.to_string(),
                     ))
                 }
-            }
-        } else {
-            Ok(CtopReport::fail(
+            },
+            Err(_) => Ok(CtopReport::fail(
                 task_id,
                 "tier1_wasi_cranelift".to_string(),
                 duration_ms,
@@ -174,7 +177,7 @@ impl SandboxEngine for WasiEngine {
                 }],
                 String::new(),
                 format!("Symbol '{}' not found in WASI module", entrypoint),
-            ))
+            )),
         }
     }
 

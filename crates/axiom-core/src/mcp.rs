@@ -5,7 +5,7 @@ use axiom_crdt::TreeCrdt;
 use axiom_proto::{CtopStatus, NewAttestation, ProvenanceAttestation};
 use axiom_vmm::{SandboxEngine, WasiEngine};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -61,7 +61,7 @@ fn agent_identity_of(args: &Value) -> Result<String, String> {
         Some(other) => {
             return Err(format!(
                 "agent_identity must be a string, got {other}. Omit it to record the change as {UNATTRIBUTED}."
-            ))
+            ));
         }
     };
 
@@ -704,7 +704,7 @@ impl AxiomMcpServer {
                     _ => {
                         return Ok(json!({
                             "error": "ctop_task_id is required: an attestation must name the sandbox run it rests on"
-                        }))
+                        }));
                     }
                 };
 
@@ -717,7 +717,7 @@ impl AxiomMcpServer {
                             "error": format!(
                                 "no verification recorded for task {task_id:?}. Either run axiom_eval_patch and attest against the task_id it returns, or report an external check with axiom_record_verification"
                             )
-                        }))
+                        }));
                     }
                     Some(v) if !v.passed => {
                         return Ok(json!({
@@ -725,7 +725,7 @@ impl AxiomMcpServer {
                                 "verification {task_id:?} did not pass ({}); a record may only be issued for a check that succeeded",
                                 v.detail
                             )
-                        }))
+                        }));
                     }
                     Some(v) => v.clone(),
                 };
@@ -740,7 +740,7 @@ impl AxiomMcpServer {
                 let _ledger_lock = match axiom_ast::IndexLock::acquire(&ledger_path) {
                     Ok(l) => l,
                     Err(e) => {
-                        return Ok(json!({ "error": format!("could not lock the ledger: {e}") }))
+                        return Ok(json!({ "error": format!("could not lock the ledger: {e}") }));
                     }
                 };
                 let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
@@ -775,7 +775,7 @@ impl AxiomMcpServer {
                 let encoded = match serde_json::to_string_pretty(&existing) {
                     Ok(j) => j,
                     Err(e) => {
-                        return Ok(json!({ "error": format!("could not encode the ledger: {e}") }))
+                        return Ok(json!({ "error": format!("could not encode the ledger: {e}") }));
                     }
                 };
                 if let Some(parent) = ledger_path.parent() {
@@ -842,7 +842,7 @@ impl AxiomMcpServer {
                     None => {
                         return Ok(json!({
                             "error": "passed is required and must be true or false: a verification with no outcome is not one"
-                        }))
+                        }));
                     }
                 };
                 if task_id.is_empty() || command.is_empty() {

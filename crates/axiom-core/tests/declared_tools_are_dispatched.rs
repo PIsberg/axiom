@@ -10,7 +10,7 @@
 //! seven, and CLAUDE.md is loaded into every session, so a wrong number there
 //! misleads the next piece of work rather than merely being untidy.
 
-use axiom_core::{mcp::JsonRpcRequest, AxiomMcpServer};
+use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest};
 use serde_json::json;
 
 async fn declared_tool_names(server: &AxiomMcpServer) -> Vec<String> {

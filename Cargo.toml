@@ -10,7 +10,10 @@ members = [
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
+# Edition 2024 was stabilised in 1.85. Stated so a build on an older
+# toolchain fails naming the version rather than the syntax.
+rust-version = "1.85"
 license-file = "LICENSE"
 publish = false
 

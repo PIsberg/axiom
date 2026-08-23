@@ -855,7 +855,7 @@ pub fn evaluate(
                 ms(&start),
                 format!("could not create a work directory: {e}"),
                 "Check that the temp directory is writable.".to_string(),
-            )
+            );
         }
     };
     let src_file = work_dir.join(recipe.file_name);
