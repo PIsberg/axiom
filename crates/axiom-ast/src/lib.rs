@@ -1965,10 +1965,11 @@ impl AstIndex {
                         .to_string();
 
                     if Self::is_valid_identifier(&name) {
-                        let symbol = match owner_stack.last() {
-                            Some((owner, _)) => format!("{}::{}::{}", file_path, owner, name),
-                            None => format!("{}::{}", file_path, name),
-                        };
+                        // The whole stack, not its top. `mod alpha { impl X { fn y } }`
+                        // is `file.rs::alpha::X::y`, and two modules declaring
+                        // the same function are two keys rather than one node
+                        // overwriting the other.
+                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &name);
                         let is_test = name.starts_with("test_") || decl.contains("#[test]");
                         let kind = if is_test { "test" } else { "function" };
 
@@ -1996,7 +1997,7 @@ impl AstIndex {
                         .to_string();
 
                     if Self::is_valid_identifier(&name) {
-                        let symbol = format!("{}::{}", file_path, name);
+                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &name);
                         self.index_node_at(
                             &symbol,
                             "struct",
@@ -2027,14 +2028,52 @@ impl AstIndex {
     /// name the owner of the methods below them. The generic list is skipped
     /// with a depth counter rather than split on the closing angle, because
     /// `impl<T: Into<String>> Foo` closes two of them before the type starts.
+    /// A Rust symbol key, scoped by every block it sits inside.
+    ///
+    /// Joining the whole stack rather than taking its top is what makes two
+    /// modules declaring the same function two symbols. Before this, both were
+    /// `file.rs::helper`, the second `index_node_at` overwrote the first, and
+    /// the surviving node carried the second declaration's hash under a name
+    /// that reads as either. A verdict cache keys on that hash, so a change to
+    /// the first would not have moved it: a pass reported for code that changed,
+    /// which is exactly what `closure_hash` returning `Option` exists to
+    /// prevent, arriving by a route where the closure still looks complete.
+    ///
+    /// `#[cfg]`-guarded twins remain one key on purpose. `#[cfg(windows)] fn
+    /// worth_retrying` and its `#[cfg(unix)] `sibling are one name in one scope,
+    /// and only one of them is ever compiled, so a single node with both
+    /// declaration lines recorded is the honest answer rather than a gap.
+    fn rust_symbol_in(file_path: &str, owners: &[(String, usize)], name: &str) -> String {
+        if owners.is_empty() {
+            return format!("{file_path}::{name}");
+        }
+        let scope: Vec<&str> = owners.iter().map(|(o, _)| o.as_str()).collect();
+        format!("{}::{}::{}", file_path, scope.join("::"), name)
+    }
+
     fn rust_owner_opened_by(trimmed: &str) -> Option<String> {
-        let after_keyword = ["impl", "trait", "pub trait", "pub(crate) trait"]
-            .iter()
-            // `implements_something()` also starts with `impl`. A declaration
-            // is followed by a space or by its generic list, never by more
-            // identifier.
-            .filter_map(|kw| trimmed.strip_prefix(*kw))
-            .find(|rest| rest.starts_with(' ') || rest.starts_with('<'))?;
+        // `mod foo;` declares a module in another file and opens no scope here,
+        // so it must not become an owner: doing so would file every symbol
+        // below it under a module whose body is somewhere else.
+        if trimmed.ends_with(';') {
+            return None;
+        }
+
+        let after_keyword = [
+            "impl",
+            "trait",
+            "pub trait",
+            "pub(crate) trait",
+            "mod",
+            "pub mod",
+            "pub(crate) mod",
+        ]
+        .iter()
+        // `implements_something()` also starts with `impl`. A declaration
+        // is followed by a space or by its generic list, never by more
+        // identifier.
+        .filter_map(|kw| trimmed.strip_prefix(*kw))
+        .find(|rest| rest.starts_with(' ') || rest.starts_with('<'))?;
 
         let rest = Self::skip_angle_group(after_keyword.trim_start()).trim_start();
         // `impl Trait for Type`: the methods belong to the type, which is what

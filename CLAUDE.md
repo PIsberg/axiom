@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 129 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 131 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -93,6 +93,27 @@ exists, in this or any earlier version reachable from here; `axiom_query_symbol`
 `dependencies`, `docstring`, `hash`, `id`, `kind`, `signature`, `source_range` and `symbol_path`.
 To tell a real index from an empty one, run `axiom scan` and read the symbol count it prints, or
 look for `.axiom/index.json` above the working directory.
+
+**A Rust symbol is keyed by every block it sits inside, and `mod` is one of them.**
+`impl` and `trait` were tracked and `mod` was not, so two modules declaring the same
+function were one key: the second `index_node_at` overwrote the first and the surviving
+node carried the second declaration under a name that reads as either.
+`rust_symbol_in` joins the whole owner stack, so `mod alpha { impl X { fn y } }` is
+`file.rs::alpha::X::y`. `mod foo;` opens no scope and must not become an owner, or every
+symbol below it is filed under a module whose body is in another file.
+`#[cfg]`-guarded twins stay one key on purpose: they are one name in one scope and only
+one is ever compiled, so a single node with both declaration lines recorded is honest
+rather than a gap.
+
+**A node's hash covers the declaration line, not the body (#40).** Editing what a
+multi-line function does leaves its hash unchanged, which defeats the verdict cache at
+its foundation: `closure_hash` is a digest over node hashes, so a changed body does not
+move the key and a cache would report a pass for code that changed, walking past every
+guard because the closure looks complete. It also means
+`editing_a_dependency_changes_the_hash_of_the_test_that_uses_it` passes for the wrong
+reason, its fixture being a one-line function whose body sits on the declaration line.
+Treat any cache-audit or cache-validate number taken before that is fixed as resting on
+hashes that do not cover the code.
 
 **A declaration is decided from the stripped text; only what is stored comes from the
 raw line.** A repository whose subject is parsing writes source inside string literals
