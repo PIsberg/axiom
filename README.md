@@ -278,25 +278,31 @@ cargo test
 
 ![The three concentric containment layers around an agent's workspace](docs/images/axiom_security_architecture.png)
 
-The figure shows the containment model: an agent never touches the host or the
-codebase directly, but works from inside three nested boundaries. Tool calls
-first pass an intercepting proxy that sanitises paths and strips command
-chaining before anything reaches the workspace. Whatever survives executes in an
-ephemeral sandbox with no network egress and bounded CPU and memory, so a
-runaway or prompt-injected instruction has nowhere to escape to. At the centre
-sits the Merkle AST store, which is content-addressed and immutable, so a
-mutation produces a new root rather than overwriting the old one and every state
-the repository has held stays reachable.
+The figure shows the containment model the design aims at: an agent works from
+inside three nested boundaries, a proxy, an ephemeral sandbox and a
+content-addressed store, so a runaway or prompt-injected instruction has nowhere
+to escape to.
 
-The reasoning behind each layer, and the threats each one is meant to stop, are
-in [docs/axiom_security_framework.md](docs/axiom_security_framework.md).
+What is actually built today is narrower, and
+[docs/axiom_security_framework.md](docs/axiom_security_framework.md) says so
+line by line. A WAT snippet runs in wasmtime with a fuel limit and no host
+access. Every other language runs in tier 2, which is the real compiler or
+interpreter with the axiom process's own privileges: there is no intercepting
+proxy, no network-egress restriction and no CPU or memory bound. Two things it
+does enforce: every evaluation is confined to an allowlisted environment, so a
+snippet cannot read the signing key or the operator's other secrets, and it is
+bounded by a wall-clock deadline that ends the whole process tree. Set
+`AXIOM_EVAL_NATIVE=off` to refuse tier 2 entirely. The Merkle AST store at the
+centre is real: it is content-addressed, so a mutation produces a new root
+rather than overwriting the old one.
 
 ### The provenance record
 
 `axiom_attest_commit` writes a record to `.axiom/attestations.json` tying five
 things together: the prompt that asked for the change, the symbol it touched, the
-sandbox task that checked it, the Merkle root before and after, and when it
-happened.
+check that verified it, two real Merkle roots (the CRDT tree and the AST index of
+the code being attested), and when it happened. Every one of those is covered by
+the record's seal, so editing any of them after the fact breaks verification.
 
 A record is only issued against a check that happened and passed. Naming a check
 the server has no record of, or one that failed, is refused.

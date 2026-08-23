@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 142 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit, key format
+cargo test                            # 189 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit, key format, seal coverage, env confinement, protocol
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -82,17 +82,27 @@ directories looking for `.axiom/index.json`. The MCP server inherits its client'
 which is the agent's project, not this repo. A server that appears to know nothing about the
 codebase is usually one started somewhere with no index above it.
 
+**Writes go to the same `.axiom` the read came from.** The server records the discovered directory in
+`axiom_dir` and derives the ledger, the op log and the mutation index from it, through `ledger_path`,
+`op_log_path` and `index_path`. Before that, reads walked up to find the index while every write used
+`<cwd>/.axiom`, so an agent working from a subdirectory wrote where the next read would not look.
+`axiom verify` walks up the same way, through `find_axiom_dir`. `axiom scan` and `axiom watch` are the
+exception on purpose: they anchor to the local `.axiom/index.json` and nothing above it, because a
+scan states what one tree contains and must not fold an ancestor index into it.
+`server_writes_where_it_reads.rs` and `scan_is_anchored.rs` pin both halves.
+
 **Seeding is asked for, not automatic, and the check this section used to name is gone.**
 `AxiomMcpServer::new` once inserted `auth::service::validate_token` and `test_auth_validation`
 whenever the index was empty, which made a workspace nobody had scanned answer confidently about a
 symbol in no real codebase. That is now `seed_demo_workspace`, called only by `axiom demo`, so a
 server with no index above it answers nothing rather than answering a fixture.
 
-The advice that replaced it was to read `total_symbols_in_index` in the response. No such field
-exists, in this or any earlier version reachable from here; `axiom_query_symbol` returns
-`dependencies`, `docstring`, `hash`, `id`, `kind`, `signature`, `source_range` and `symbol_path`.
-To tell a real index from an empty one, run `axiom scan` and read the symbol count it prints, or
-look for `.axiom/index.json` above the working directory.
+`axiom_query_symbol` returns `total_symbols_in_index` only on its not-found branch, beside the
+error; a successful lookup returns `dependencies`, `docstring`, `hash`, `id`, `kind`, `signature`,
+`source_range` and `symbol_path` and no count. So the count is there to read when a symbol misses,
+which is exactly when telling a real index from an empty one matters, but do not expect it on a hit.
+To check the index directly, run `axiom scan` and read the symbol count it prints, or look for
+`.axiom/index.json` above the working directory.
 
 **A Rust symbol is keyed by every block it sits inside, and `mod` is one of them.**
 `impl` and `trait` were tracked and `mod` was not, so two modules declaring the same
@@ -250,6 +260,23 @@ passing one.
 interpreter with the process's own privileges, as the `rustc` tier always did. `AXIOM_EVAL_NATIVE=off`
 refuses it, and `AXIOM_EVAL_TIMEOUT_SECS` (default 30) bounds every command, because before that a
 snippet that did not terminate held the stdio pipe an agent was blocked on.
+
+**But its environment is confined, and every tier's is.** `confine_environment` in `native.rs`
+clears the child's environment and passes only an allowlist of names and prefixes a toolchain reads,
+plus whatever `AXIOM_EVAL_ENV_PASS` adds; `AXIOM_SIGNING_KEY` and `AXIOM_SIGNING_KEY_FILE` are
+refused even there. Before this a snippet read the signing key straight out of `os.environ` and the
+value came back in the report, which handed the party the signature exists to check the key to sign
+anything. The usability probe and the version fingerprint run under the same confinement, so a
+toolchain that needs a dropped variable reads as missing rather than failing the snippet.
+`child_environment.rs` pins it, and a new variable a toolchain needs goes in `PASSED_NAMES` or
+`PASSED_PREFIXES`, never by widening the two refused names.
+
+**A timeout ends the whole process tree, not just the child.** `run_with_timeout` puts the child in
+its own process group on Unix and kills the group, and uses `taskkill /T` on Windows, because
+`go run`, the `kotlin` launcher and a `Popen` from a Python snippet all outlived a kill aimed at the
+child alone. The pipes are drained for a bounded grace after the child exits rather than to EOF,
+because a surviving grandchild holds them open and draining to EOF turned a two-second deadline into
+sixty. `Finished.drained` records when output may be short for that reason. `process_tree.rs` pins it.
 
 **Language is resolved through the symbol, not the caller's spelling.** `language_of_symbol`
 resolves the name first, because comparing the caller's spelling against the stored keys returned
@@ -422,6 +449,17 @@ no-match path names both causes rather than picking one: it used to report "none
 this prompt", which sent anyone holding an altered ledger looking for a typo. A broken
 chain is the one piece of evidence that does point at tampering, and it is reported
 here too.
+
+**The seal covers every stored field, and it did not always.** `seal_over` in `axiom-proto` hashes
+the two roots, the agent identity, the symbol, the task id, `verified_by`, `verification_detail`,
+the timestamp and the previous seal, each length-prefixed, plus the prompt. It once covered the
+roots, the identity, the prompt, the symbol and the task id only, so editing `verified_by` from
+`reported` to `sandbox` in an unsigned ledger left a record that still printed VALID, which forges
+the whole distinction the record exists to carry. `generate` and `verify` both go through
+`seal_over` so they cannot drift, and `seal_covers_the_record.rs` pins one edited-field-fails case
+per field. Any new stored field on `ProvenanceAttestation` has to be added to `seal_over`, or it is
+forgeable. `prompt_digest` and `sandbox_trace_hash` are now real digests of the prompt and of the
+verification, not slices of the combined digest.
 
 **A caller-supplied field that is printed is an injection surface.**
 `agent_identity` reaches `axiom_attest_commit` from the caller and is rendered by
