@@ -350,3 +350,38 @@ In order, each gated on the one before:
 The measurement stays in the repository either way, because the number moves when
 the graph changes, and a cache is exactly the feature that must not be built on a
 number nobody re-checked.
+
+## After the parsers stopped dropping calls (2026-08-23)
+
+Three defects were losing edges: a Rust symbol keyed by file and short name
+alone, so two impls in one file collided; one declaration line kept per key; and
+a stripper that swallowed a newline on a lifetime and on a backslash line
+continuation. All three are fixed in #36. The numbers above were taken before
+that, and every one of them moves with the graph, so here they are again on the
+same tree.
+
+```
+                              before      after
+ Symbols indexed              354         389
+ Tests with a usable key      54 of 54    54 of 54
+ Keyed without guessing       1 of 54     1 of 54
+ Both mechanisms agree        847         900
+ Cache would wrongly skip     0           0
+ Cache would run unselected   4484        3609
+ Agreement                    15.89%      19.96%
+ Unknown-extent run           15.1 of 54  11.6 of 54
+```
+
+Read the improvement carefully: agreement rose because the closure and the blast
+radius now read the same, more complete edges, and the audit measures agreement
+between two readings of one graph. It is not evidence that either is right about
+the code. The evidence for that is `cache-validate`, which broke ten symbols and
+ran the suite ten times: six produced a real failure, the blast radius selected
+every failing test, and every key moved. The other four broke nothing, which
+establishes nothing about those four. Before the fix the same tool found a hole
+on its second mutation.
+
+`Keyed without guessing` did not move, and that is the honest reading of what
+this change was: it recorded calls that were being dropped, it did not give the
+parsers type information. Resolving a bare `new` still needs the receiver's type.
+Item 4 above is still the next thing worth doing.

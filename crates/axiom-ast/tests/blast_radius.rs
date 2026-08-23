@@ -240,3 +240,213 @@ fn a_java_symbol_still_resolves_through_its_class_name() {
         "the Java path resolves through the class name; got {names:?}"
     );
 }
+
+#[test]
+fn two_methods_of_the_same_name_in_one_file_are_two_symbols() {
+    let dir = TempDir::new("same-name-methods");
+    // Both impls declare `search`. Keyed by file and short name alone the two
+    // collide: the later declaration overwrites the earlier node, and the line
+    // recorded for the key moves with it, so every call the first method makes
+    // is charged to whatever symbol happens to precede it.
+    dir.write(
+        "engine.rs",
+        "pub struct Alpha;\n\
+         \n\
+         impl Alpha {\n\
+         \x20   pub fn search(&self, q: &str) -> bool {\n\
+         \x20       looks_like_a_pattern(q)\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         pub struct Beta;\n\
+         \n\
+         impl Beta {\n\
+         \x20   pub fn search(&self, q: &str) -> bool {\n\
+         \x20       q.is_empty()\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         fn looks_like_a_pattern(query: &str) -> bool {\n\
+         \x20   query.contains('*')\n\
+         }\n",
+    );
+    dir.write(
+        "engine_test.rs",
+        "#[test]\nfn test_alpha_search_sees_a_pattern() {\n    assert!(Alpha.search(\"a*b\"));\n}\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let paths = index.symbol_paths();
+    let searches: Vec<&String> = paths.iter().filter(|p| p.ends_with("::search")).collect();
+    assert_eq!(
+        searches.len(),
+        2,
+        "each impl declares its own search; got {paths:?}"
+    );
+
+    let alpha = index
+        .get_symbol("Alpha::search")
+        .expect("Alpha::search should be indexed under its impl");
+    assert!(
+        alpha
+            .dependencies
+            .iter()
+            .any(|d| d == "looks_like_a_pattern"),
+        "Alpha::search calls looks_like_a_pattern, so the call must be recorded; got {:?}",
+        alpha.dependencies
+    );
+
+    let beta = index
+        .get_symbol("Beta::search")
+        .expect("Beta::search should be indexed under its impl");
+    assert!(
+        !beta
+            .dependencies
+            .iter()
+            .any(|d| d == "looks_like_a_pattern"),
+        "Beta::search does not call it; got {:?}",
+        beta.dependencies
+    );
+
+    // The consequence the graph exists for: an agent asking what to run after
+    // changing the free function has to be told about the test.
+    assert_eq!(
+        impacted(&index, "looks_like_a_pattern", 2),
+        vec!["test_alpha_search_sees_a_pattern".to_string()],
+        "the test reaches the free function through Alpha::search"
+    );
+}
+
+#[test]
+fn a_reference_is_charged_to_the_declaration_it_sits_under() {
+    let dir = TempDir::new("cfg-twins");
+    // Two declarations really do share one key here: the parser sees no `cfg`,
+    // and a file-keyed symbol has nowhere to put the difference. What must not
+    // happen is the first one's calls being charged to the symbol above it.
+    dir.write(
+        "retry.rs",
+        "pub fn unrelated() -> bool { true }\n\
+         \n\
+         #[cfg(windows)]\n\
+         pub fn worth_retrying() -> bool {\n\
+         \x20   sharing_violation()\n\
+         }\n\
+         \n\
+         #[cfg(unix)]\n\
+         pub fn worth_retrying() -> bool {\n\
+         \x20   permission_denied()\n\
+         }\n\
+         \n\
+         pub fn sharing_violation() -> bool { true }\n\
+         pub fn permission_denied() -> bool { false }\n",
+    );
+    dir.write(
+        "retry_test.rs",
+        "#[test]\nfn test_retry_decides() {\n    assert!(worth_retrying());\n}\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let unrelated = index.get_symbol("unrelated").expect("unrelated is indexed");
+    assert!(
+        !unrelated
+            .dependencies
+            .iter()
+            .any(|d| d == "sharing_violation"),
+        "the call sits inside worth_retrying, not inside unrelated; got {:?}",
+        unrelated.dependencies
+    );
+
+    assert_eq!(
+        impacted(&index, "sharing_violation", 2),
+        vec!["test_retry_decides".to_string()],
+        "the call in the first of the two declarations still reaches the test"
+    );
+}
+
+#[test]
+fn a_lifetime_does_not_shift_every_line_below_it() {
+    let dir = TempDir::new("lifetimes");
+    // A lifetime opens with an apostrophe and never closes one. Skipping to the
+    // next apostrophe in the file swallowed the newlines in between, so every
+    // call below `Holder<'a>` was charged to the function above the one it sits
+    // in: `first_caller` depended on `second_caller`, and the test that only
+    // exercises the second was told to run for the first.
+    dir.write(
+        "holder.rs",
+        "pub struct Holder<'a> {\n\
+         \x20   pub inner: &'a str,\n\
+         }\n\
+         \n\
+         pub fn first_caller(h: &Holder) -> bool {\n\
+         \x20   only_alpha(h.inner)\n\
+         }\n\
+         \n\
+         pub fn second_caller(h: &Holder) -> bool {\n\
+         \x20   only_beta(h.inner)\n\
+         }\n\
+         \n\
+         pub fn only_alpha(s: &str) -> bool {\n\
+         \x20   s.starts_with(\"a\")\n\
+         }\n\
+         \n\
+         pub fn only_beta(s: &str) -> bool {\n\
+         \x20   s.starts_with(\"b\")\n\
+         }\n",
+    );
+    dir.write(
+        "holder_test.rs",
+        "#[test]\nfn test_only_the_second() {\n    assert!(second_caller(&h));\n}\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let first = index.get_symbol("first_caller").expect("first_caller");
+    assert_eq!(
+        first.dependencies,
+        vec!["only_alpha".to_string()],
+        "first_caller calls only_alpha and nothing else"
+    );
+
+    let second = index.get_symbol("second_caller").expect("second_caller");
+    assert_eq!(
+        second.dependencies,
+        vec!["only_beta".to_string()],
+        "second_caller calls only_beta and nothing else"
+    );
+
+    assert!(
+        impacted(&index, "only_alpha", 3).is_empty(),
+        "no test reaches only_alpha"
+    );
+    assert_eq!(
+        impacted(&index, "only_beta", 2),
+        vec!["test_only_the_second".to_string()]
+    );
+}
+
+#[test]
+fn a_python_string_is_not_a_call() {
+    let dir = TempDir::new("py-quotes");
+    // The same apostrophe means a string in Python, and one that is not
+    // stripped puts every name inside it into the graph.
+    dir.write("target.py", "def sensitive_thing():\n    return 1\n");
+    dir.write(
+        "caller.py",
+        "def prints_a_name():\n    return 'sensitive_thing() is not called here'\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let caller = index.get_symbol("prints_a_name").expect("prints_a_name");
+    assert!(
+        !caller.dependencies.iter().any(|d| d == "sensitive_thing"),
+        "the name is inside a string literal; got {:?}",
+        caller.dependencies
+    );
+}
