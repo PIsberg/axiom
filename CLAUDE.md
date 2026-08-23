@@ -298,7 +298,11 @@ symbol, runs the project's own suite, and checks that every test that really fai
 selected by the blast radius and had its key move. It edits files in place and restores
 them from `Drop`. Two rules keep it honest: a mutation that does not compile is thrown
 away, since it fails every test for one reason and says nothing about dependencies, and a
-run where nothing failed is reported as establishing nothing rather than as a pass.
+run where nothing failed is reported as establishing nothing rather than as a pass. Its
+first run here found a real hole on its second mutation (#32); after that fix,
+`cache-validate --samples 10 --depth 2` produced six real failures and no test that the
+blast radius missed or whose key stayed still. Four of the ten mutations broke nothing,
+which establishes nothing about those four rather than passing them.
 
 **Behind the selector, the cache's saving and its unsafety are one number.** A test
 runs when the blast radius picks it and its key moved, so the work a cache removes is
