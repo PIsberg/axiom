@@ -84,3 +84,50 @@ fn a_language_with_no_recipe_is_not_silently_borrowed_from_another() {
         );
     }
 }
+
+/// A toolchain that never reached the snippet must not produce a verdict about
+/// it.
+///
+/// Observed on CI: `scala` spent 134 seconds failing to fetch its own compiler
+/// dependencies, exited non-zero, and `axiom_eval_patch` reported `FAILED`. No
+/// user code ran. That tells an agent its change is wrong on the strength of a
+/// download, which is the same class as the assertion-substring fallback removed
+/// earlier: a verdict produced by something that is not a run of the code.
+///
+/// `AXIOM_EVAL_TIMEOUT_SECS` does not cover it. CI raises that to 300 for the
+/// cold-cache case and this run was well inside it.
+#[test]
+fn a_resolver_failure_is_not_a_verdict_about_the_snippet() {
+    // The real stderr from the CI run that prompted this, trimmed.
+    let stderr = "\
+Downloading https://central.sonatype.com/repository/maven-snapshots/ch/epfl/scala/bloop-frontend_2.12/2.0.19/bloop-frontend_2.12-2.0.19.pom
+Failed to download https://central.sonatype.com/repository/maven-snapshots/ch/epfl/scala/bloop-frontend_2.12/2.0.19/bloop-frontend_2.12-2.0.19.pom
+";
+    let reason = native::toolchain_failure_reason("", stderr)
+        .expect("a download failure is the toolchain not getting going");
+    assert!(
+        reason.contains("did not get as far as running"),
+        "the reason must say what did not happen: {reason}"
+    );
+}
+
+/// The other direction, which matters more: a real failure must stay a real
+/// failure. Widening the markers until they swallow genuine verdicts would trade
+/// one wrong answer for another.
+#[test]
+fn a_real_assertion_failure_is_still_a_verdict() {
+    let stderr = "\
+Exception in thread \"main\" java.lang.AssertionError: assertion failed
+	at scala.runtime.Scala3RunTime$.assertFailed(Scala3RunTime.scala:13)
+	at AxiomEval$.main(AxiomEval.scala:3)
+";
+    assert!(
+        native::toolchain_failure_reason("", stderr).is_none(),
+        "an AssertionError is the snippet failing, and must keep its verdict"
+    );
+    assert!(native::toolchain_failure_reason("", "").is_none());
+    assert!(
+        native::toolchain_failure_reason("", "error[E0425]: cannot find value `x`").is_none(),
+        "a compiler diagnostic is the toolchain having read the snippet"
+    );
+}

@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 123 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 125 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -166,6 +166,20 @@ declaration mentions it into the answer, which is the same loosening wearing a d
 **`reverse_deps` is keyed by the name a caller writes, and its values are full symbol paths.** The
 traversal therefore has to look up both on each hop. Looking up only the path found nothing after
 the first step, so every transitive layer was silently empty for the file-keyed languages.
+
+**A non-zero exit is not a verdict.** `scala` and the JVM launchers fetch their compiler
+on first use, and when that fetch fails they exit non-zero having executed nothing the
+caller wrote. That reached CI as `FAILED` after 134 seconds of failed downloads, which
+tells an agent its code is wrong on the strength of a network error, and it is the same
+class as the assertion-substring fallback removed earlier: a verdict produced by
+something that is not a run of the code. `toolchain_failure_reason` in
+`axiom-vmm/src/native.rs` matches resolver and downloader failures only, and both the
+build and run steps turn those into `EvaluatorUnavailable`. The markers stay narrow on
+purpose: mistaking a snippet's own output for a broken toolchain costs a refusal, which
+says nothing was established and is true either way, while widening them until they
+swallow real failures trades one wrong answer for another.
+`AXIOM_EVAL_TIMEOUT_SECS` does not cover this; CI raises it to 300 and the run was well
+inside that.
 
 **`axiom_eval_patch` must never return a verdict it did not earn.** `execute_eval_in` in
 `axiom-vmm` picks a tier from the extension of the file the symbol was indexed from: a WAT or wasm
