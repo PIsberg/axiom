@@ -1,8 +1,22 @@
 use axiom_proto::AstNode;
+use rayon::prelude::*;
 use regex::Regex;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+
+thread_local! {
+    /// The file the calling thread is currently parsing, so `index_node_at`
+    /// attributes a symbol to it whichever parser produced the symbol.
+    ///
+    /// A thread-local rather than a field, because the walk parses files in
+    /// parallel: a single shared "current file" would be whatever file some
+    /// other worker happened to set last, so a symbol from one file would be
+    /// filed under another. Each worker sets its own for the duration of one
+    /// file.
+    static PARSING_FILE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// Hold an exclusive lock beside the index while it is read and rewritten.
 ///
@@ -328,14 +342,6 @@ pub struct AstIndex {
     /// removals are recorded and subtracted from the merge.
     forgotten_symbols: RwLock<HashSet<String>>,
     forgotten_files: RwLock<HashSet<String>>,
-    /// The file currently being parsed, so every symbol it produces is attributed
-    /// to it whichever language parser produced it.
-    ///
-    /// Recording this inside each parser meant only the Java one did, so a
-    /// deleted .rs or .py file left its symbols behind for ever: the purge works
-    /// by looking up what a file owned, and for those languages the answer was
-    /// always nothing.
-    parsing_file: RwLock<Option<String>>,
     /// The file each symbol was indexed from, the inverse of `file_to_symbols`.
     ///
     /// `file_of_symbol` and `language_of_symbol` are asked on every eval, and
@@ -384,7 +390,6 @@ impl AstIndex {
             file_to_symbols: RwLock::new(HashMap::new()),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
-            parsing_file: RwLock::new(None),
             symbol_to_file: RwLock::new(HashMap::new()),
             symbol_lines: RwLock::new(HashMap::new()),
             pending_refs: RwLock::new(HashMap::new()),
@@ -530,7 +535,7 @@ impl AstIndex {
 
         // Attribution happens here rather than in each parser, so a language
         // added later cannot forget to do it.
-        if let Some(file) = self.parsing_file.read().unwrap().as_ref() {
+        if let Some(file) = PARSING_FILE.with(|f| f.borrow().clone()).as_ref() {
             let mut owned = self.file_to_symbols.write().unwrap();
             let entry = owned.entry(file.clone()).or_default();
             if !entry.iter().any(|s| s == symbol) {
@@ -1065,22 +1070,36 @@ impl AstIndex {
 
     /// Recursively scan and parse a real repository directory into the Merkle AST CAS
     pub fn scan_directory(&self, root: &Path) -> std::io::Result<ScanSummary> {
-        let mut files_scanned = 0;
-        let mut nodes_extracted = 0;
+        let files_scanned;
+        let nodes_extracted;
         let mut visited: HashSet<String> = HashSet::new();
 
         // Resolve the root once. Canonicalising every file instead costs a
         // filesystem round trip per entry, measured at 24ms/file against
         // 3.2ms/file over a 459-file tree.
         let root_key = Self::canonical_key(root);
-        self.walk_dir(
-            root,
-            root,
-            &root_key,
-            &mut files_scanned,
-            &mut nodes_extracted,
-            &mut visited,
-        )?;
+
+        // Collect the files first, sequentially: reading the tree, dropping what
+        // each file contributed last time, and adding it to the trigram store.
+        // These touch shared state and are cheap; the parse that follows is the
+        // expensive part and is done in parallel.
+        let mut files: Vec<(String, String, String)> = Vec::new();
+        self.walk_dir(root, root, &root_key, &mut files, &mut visited)?;
+        files_scanned = files.len();
+
+        // Parse in parallel. Every symbol carries its file in its key, and the
+        // current-file attribution is a thread-local, so two files parsed at
+        // once do not cross. Each file counts its own nodes; the counts are
+        // summed. Everything a parser writes goes through an RwLock, and the
+        // reference resolution that needs the whole tree runs afterwards.
+        nodes_extracted = files
+            .par_iter()
+            .map(|(rel, ext, content)| {
+                let mut n = 0;
+                self.parse_file_content(rel, ext, content, &mut n);
+                n
+            })
+            .sum();
 
         // A scan is a statement about what the tree contains now, so anything
         // recorded from a file that has since disappeared has to go. Without
@@ -1330,13 +1349,18 @@ impl AstIndex {
         *self.reverse_deps.write().unwrap() = rebuilt;
     }
 
+    /// Walk the tree, collecting each indexable file as `(key, ext, content)`.
+    ///
+    /// The read, the purge of what a file held last time, and the trigram index
+    /// happen here, sequentially, because they touch shared state and are cheap.
+    /// The caller parses the collected files in parallel, which is the part
+    /// worth spreading across cores.
     fn walk_dir(
         &self,
         dir: &Path,
         root: &Path,
         root_key: &str,
-        files_count: &mut usize,
-        nodes_count: &mut usize,
+        files: &mut Vec<(String, String, String)>,
         visited: &mut HashSet<String>,
     ) -> std::io::Result<()> {
         if !dir.exists() || !dir.is_dir() {
@@ -1368,7 +1392,7 @@ impl AstIndex {
                     ".gradle",
                 ];
                 if !dir_name.starts_with('.') && !SKIP.contains(&dir_name) {
-                    self.walk_dir(&path, root, root_key, files_count, nodes_count, visited)?;
+                    self.walk_dir(&path, root, root_key, files, visited)?;
                 }
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -1376,7 +1400,6 @@ impl AstIndex {
                         "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c"
                         | "cpp" | "h" | "json" | "toml" => {
                             if let Ok(content) = std::fs::read_to_string(&path) {
-                                *files_count += 1;
                                 let rel = Self::key_under_root(root, root_key, &path);
                                 visited.insert(rel.clone());
 
@@ -1391,8 +1414,7 @@ impl AstIndex {
                                     .unwrap()
                                     .add_document(&rel, &content);
 
-                                // Index into AST CAS
-                                self.parse_file_content(&rel, ext, &content, nodes_count);
+                                files.push((rel, ext.to_string(), content));
                             }
                         }
                         _ => {}
@@ -1411,9 +1433,12 @@ impl AstIndex {
         content: &str,
         nodes_count: &mut usize,
     ) {
-        *self.parsing_file.write().unwrap() = Some(file_path.to_string());
+        // Set the calling thread's current file, so attribution in
+        // `index_node_at` is correct even when other threads are parsing other
+        // files at the same time. Cleared at the end whatever happens.
+        PARSING_FILE.with(|f| *f.borrow_mut() = Some(file_path.to_string()));
         self.parse_by_language(file_path, ext, content, nodes_count);
-        *self.parsing_file.write().unwrap() = None;
+        PARSING_FILE.with(|f| *f.borrow_mut() = None);
         self.record_references(file_path, ext, content);
     }
 
@@ -2771,7 +2796,6 @@ impl AstIndex {
             file_to_symbols: RwLock::new(payload.file_to_symbols),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
-            parsing_file: RwLock::new(None),
             symbol_to_file: RwLock::new(symbol_to_file),
             // Both are scan-scoped. A loaded index already carries the edges
             // they were used to produce, in the nodes' own dependencies.
