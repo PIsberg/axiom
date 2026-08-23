@@ -5,7 +5,9 @@ use std::process::Command;
 use std::time::Instant;
 use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
-use wasmtime_wasi::preview1::{self, WasiP1Ctx};
+// wasmtime-wasi renamed `preview1` to `p1` between 20 and 48. Same functions,
+// same signatures; the alias keeps the call sites below reading as they did.
+use wasmtime_wasi::p1::{self as preview1, WasiP1Ctx};
 
 pub mod native;
 
@@ -41,7 +43,10 @@ pub struct WasiEngine {
 impl WasiEngine {
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
-        config.async_support(false);
+        // config.async_support(false) used to sit here. wasmtime 48 deprecates it
+        // as having no effect: whether a call is sync or async is decided by which
+        // API is used, and this engine uses add_to_linker_sync and TypedFunc::call
+        // throughout.
         config.cranelift_opt_level(OptLevel::Speed);
         config.consume_fuel(true);
         let engine = Engine::new(&config)?;
@@ -50,7 +55,9 @@ impl WasiEngine {
 
     /// Fast pre-compilation check
     pub fn compile(&self, wasm_bytes: &[u8]) -> Result<Module> {
-        Module::from_binary(&self.engine, wasm_bytes)
+        // wasmtime 48 returns its own Error type rather than re-exporting
+        // anyhow's, so this no longer coerces on the way out.
+        Module::from_binary(&self.engine, wasm_bytes).map_err(|e| anyhow::anyhow!(e))
     }
 }
 

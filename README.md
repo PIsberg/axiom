@@ -3,7 +3,7 @@
 [![CI](https://github.com/PIsberg/axiom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PIsberg/axiom/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
 [![Commercial use: separate licence](https://img.shields.io/badge/commercial%20use-separate%20licence-orange)](https://deversity.se/pricing.html)
-[![Rust 2021 edition](https://img.shields.io/badge/rust-2021%20edition-b7410e)](Cargo.toml)
+[![Rust 2024 edition, MSRV 1.85](https://img.shields.io/badge/rust-2024%20edition%20%7C%20MSRV%201.85-b7410e)](Cargo.toml)
 [![Tested on Linux and Windows](https://img.shields.io/badge/tested-linux%20%7C%20windows-lightgrey)](.github/workflows/ci.yml)
 
 **Source-available, not open source.** Any noncommercial use is permitted;

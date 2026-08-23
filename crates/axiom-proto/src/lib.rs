@@ -314,9 +314,22 @@ pub mod signing {
     }
 
     /// Generate a keypair. Returns (private key hex, public key hex).
+    ///
+    /// The private key is the 32-byte seed, which is what `to_bytes` returns and
+    /// what `load_signing_key` reads back, so a key written by an earlier version
+    /// still loads. The seed is filled here rather than through
+    /// `SigningKey::generate` because ed25519-dalek 3 wants an infallible
+    /// `CryptoRng` and the OS generator is fallible; the two are the same
+    /// operation, since `generate` fills 32 bytes and calls `from_bytes` on them.
+    ///
+    /// A failure to read entropy panics, which is what the previous rand_core
+    /// OsRng did on the same condition. It is not a case a caller can do
+    /// anything useful with: there is no weaker key worth returning.
     pub fn generate_keypair() -> (String, String) {
-        let mut csprng = rand_core::OsRng;
-        let signing = SigningKey::generate(&mut csprng);
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed)
+            .expect("the operating system refused to supply entropy for a signing key");
+        let signing = SigningKey::from_bytes(&seed);
         (
             hex::encode(signing.to_bytes()),
             hex::encode(signing.verifying_key().to_bytes()),
