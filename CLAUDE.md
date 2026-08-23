@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 107 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 112 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -243,6 +243,27 @@ so the same snippet passes on one machine and returns a compilation error on ano
 The portable form is a bare `throw`, which is why `throw ` is in the language's
 `assertion_tokens`: without it a snippet written the documented way reports
 `passed_checks_count: 0` beside `PASSED`.
+
+**`AstNode::source_range` and `AstNode::signature` do not hold what their names say.**
+`index_node` sets `source_range: (0, content.len())`, so it is the length of a declaration
+rather than a position in a file, and `signature: Some(symbol.to_string())`, so it is the
+symbol path again rather than the declaration. The declaration text is used for the hash
+and then discarded. Both fields are returned to agents by `axiom_query_symbol`. This is
+not hypothetical: `cache-validate` first located symbols by `source_range`, edited from
+line 0 to line `len`, which on a short file is all of it, and reported that mutating
+`unrelated` broke a test only `is_open` reaches. Anything needing to find a symbol in its
+file has to look for the declaration itself, as `mutate::symbol_lines` does. Fixing the
+fields is not a drive-by: the blast-radius fallback matches `sig.contains(canonical_symbol)`
+and depends on the current meaning.
+
+**Ground truth comes from `cache-validate`, not from the audit.** The audit compares two
+readings of one graph, so agreement between them says nothing about a call the parsers
+never recorded: both walks are blind to it together. `axiom cache-validate` breaks a
+symbol, runs the project's own suite, and checks that every test that really failed was
+selected by the blast radius and had its key move. It edits files in place and restores
+them from `Drop`. Two rules keep it honest: a mutation that does not compile is thrown
+away, since it fails every test for one reason and says nothing about dependencies, and a
+run where nothing failed is reported as establishing nothing rather than as a pass.
 
 **Behind the selector, the cache's saving and its unsafety are one number.** A test
 runs when the blast radius picks it and its key moved, so the work a cache removes is

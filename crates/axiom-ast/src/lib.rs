@@ -577,6 +577,34 @@ impl AstIndex {
     /// spelling directly against the stored keys returned `None` for every
     /// short name, and a `None` here reads as "no language known", which sends
     /// a Python symbol to the Rust compiler.
+    /// The file a symbol was indexed from.
+    ///
+    /// Needed by anything that has to reach the source behind a symbol rather
+    /// than the symbol's own record: mutating it, for instance, to find out what
+    /// really breaks when it changes.
+    pub fn file_of_symbol(&self, symbol_path: &str) -> Option<String> {
+        let canonical = self.get_symbol(symbol_path)?.symbol_path;
+        let file_syms = self.file_to_symbols.read().unwrap();
+        for (file, symbols) in file_syms.iter() {
+            if symbols.iter().any(|s| s == &canonical) {
+                return Some(file.clone());
+            }
+        }
+        None
+    }
+
+    /// Every test symbol in the index, sorted.
+    pub fn test_symbol_paths(&self) -> Vec<String> {
+        let nodes = self.nodes.read().unwrap();
+        let mut out: Vec<String> = nodes
+            .values()
+            .filter(|n| n.kind == "test")
+            .map(|n| n.symbol_path.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn language_of_symbol(&self, symbol_path: &str) -> Option<String> {
         let canonical = self.get_symbol(symbol_path)?.symbol_path;
         let file_syms = self.file_to_symbols.read().unwrap();
