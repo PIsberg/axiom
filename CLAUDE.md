@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 105 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 107 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -243,6 +243,18 @@ so the same snippet passes on one machine and returns a compilation error on ano
 The portable form is a bare `throw`, which is why `throw ` is in the language's
 `assertion_tokens`: without it a snippet written the documented way reports
 `passed_checks_count: 0` beside `PASSED`.
+
+**Behind the selector, the cache's saving and its unsafety are one number.** A test
+runs when the blast radius picks it and its key moved, so the work a cache removes is
+exactly the pairs where the selector picks a test and the key did not: `would wrongly
+skip`. Driving that to zero, which is what makes it safe, drives the saving to zero with
+it. This is arithmetic rather than an artefact of the parsers, so no amount of precision
+in the graph escapes it, and `behind_the_selector_saving_and_unsafety_are_the_same_number`
+pins it. Measured here: for a change to one known symbol the selector runs 2.4 of 53
+tests and adding the cache skips 0 more. The case a cache can serve and selection cannot
+is a change of unknown extent, a merge or a pull, where nothing names the change as a
+symbol: there it runs 15.0 of 53, leaving 72% of verdicts standing. Decide which of
+those the feature is for before making the graph more precise.
 
 **The verdict cache is measured, not built, and the measurement says do not build it.**
 `axiom cache-audit` reads the same graph in the forward direction, from a test to what

@@ -306,6 +306,50 @@ async fn main() -> Result<()> {
                 " Cache would run unselected: {}   (wasteful, not unsound)",
                 audit.would_run_unselected
             );
+            println!();
+            println!(" Is it worth having?");
+            match (
+                audit.mean_tests_per_selected_run(),
+                audit.mean_tests_per_cache_run(),
+            ) {
+                (Some(selected), Some(cached)) => {
+                    println!(
+                        "   Change one known symbol: the blast radius runs {selected:.1} of {} tests.",
+                        audit.tests_in_index
+                    );
+                    println!(
+                        "   Adding the cache behind it skips {} more.",
+                        audit.tests_saved_behind_the_selector()
+                    );
+                    if audit.tests_saved_behind_the_selector() == 0 {
+                        println!("   That is zero, and it is zero for the same reason the line");
+                        println!("   above says nothing is wrongly skipped: behind the selector a");
+                        println!("   cache only removes work by disagreeing with it. Safe and");
+                        println!("   pointless are one number here, read two ways.");
+                    }
+                    println!();
+                    println!(
+                        "   Change something of unknown extent: the cache alone runs {cached:.1} of",
+                    );
+                    println!(
+                        "   {} tests, where today you would run all {}.",
+                        audit.tests_in_index, audit.tests_in_index
+                    );
+                    if audit.tests_in_index > 0 {
+                        let share = cached / audit.tests_in_index as f64;
+                        println!(
+                            "   That is {:.0}% of the suite, so {:.0}% of verdicts still hold.",
+                            share * 100.0,
+                            (1.0 - share) * 100.0
+                        );
+                        println!("   This is the case a cache can serve and selection cannot:");
+                        println!("   a merge or a pull, where no single symbol names the change.");
+                    }
+                }
+                _ => println!("   Nothing was audited, so there is nothing to say about this."),
+            }
+            println!();
+
             match audit.agreement_rate() {
                 Some(rate) => println!(" Agreement:                  {:.2}%", rate * 100.0),
                 None => println!(" Agreement:                  no decisions to make"),
