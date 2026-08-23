@@ -27,7 +27,10 @@ fn a_grandchild_does_not_outlive_the_deadline() {
         line!()
     ));
     let _ = std::fs::remove_file(&heartbeat);
-    let path_literal = heartbeat.display().to_string().replace(char::from(92u8), "/");
+    let path_literal = heartbeat
+        .display()
+        .to_string()
+        .replace(char::from(92u8), "/");
 
     // The grandchild appends to the heartbeat file ten times a second for a
     // minute. The child itself then sleeps past the deadline so the evaluator

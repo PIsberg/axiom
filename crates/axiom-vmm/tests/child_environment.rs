@@ -106,7 +106,10 @@ fn a_variable_named_in_the_pass_list_reaches_the_snippet() {
 #[test]
 fn the_signing_key_is_refused_even_when_the_pass_list_names_it() {
     let _turn = take_turn();
-    let _pass = Var::set("AXIOM_EVAL_ENV_PASS", "AXIOM_SIGNING_KEY,AXIOM_SIGNING_KEY_FILE");
+    let _pass = Var::set(
+        "AXIOM_EVAL_ENV_PASS",
+        "AXIOM_SIGNING_KEY,AXIOM_SIGNING_KEY_FILE",
+    );
     let _key = Var::set("AXIOM_SIGNING_KEY", "marker-private-key-bytes");
     let _file = Var::set("AXIOM_SIGNING_KEY_FILE", "/keys/agent.key");
 

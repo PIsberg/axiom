@@ -525,8 +525,18 @@ const PASSED_NAMES: &[&str] = &[
 /// Kotlin, Scala and the coursier resolver behind it, the JVM build tools, and
 /// the locale and XDG directory conventions.
 const PASSED_PREFIXES: &[&str] = &[
-    "JAVA_", "JDK_", "JRE_", "KOTLIN_", "SCALA_", "COURSIER_", "GRADLE_", "SBT_", "MAVEN_", "M2_",
-    "LC_", "XDG_",
+    "JAVA_",
+    "JDK_",
+    "JRE_",
+    "KOTLIN_",
+    "SCALA_",
+    "COURSIER_",
+    "GRADLE_",
+    "SBT_",
+    "MAVEN_",
+    "M2_",
+    "LC_",
+    "XDG_",
 ];
 
 /// Never passed, whatever `AXIOM_EVAL_ENV_PASS` says.

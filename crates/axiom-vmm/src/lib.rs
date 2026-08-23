@@ -496,7 +496,14 @@ fn main() {{
         };
         if c_out.timed_out {
             let dur = start.elapsed().as_secs_f64() * 1000.0;
-            return Ok(rustc_timeout(task_id, symbol_path, dur, timeout, "rustc", c_out));
+            return Ok(rustc_timeout(
+                task_id,
+                symbol_path,
+                dur,
+                timeout,
+                "rustc",
+                c_out,
+            ));
         }
         if !c_out.succeeded() {
             let stderr = c_out.stderr.clone();

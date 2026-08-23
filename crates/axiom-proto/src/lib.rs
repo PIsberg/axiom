@@ -227,10 +227,7 @@ impl ProvenanceAttestation {
         // records for one prompt share it; two for different prompts do not,
         // which is what lets a reader group records by prompt without holding
         // the prompt text.
-        let prompt_digest = format!(
-            "blake3:{}",
-            &blake3::hash(prompt.as_bytes()).to_hex()[..32]
-        );
+        let prompt_digest = format!("blake3:{}", &blake3::hash(prompt.as_bytes()).to_hex()[..32]);
 
         // A digest of what was checked and how: the kind, the detail, and the
         // task id it rests on. It used to be a slice of the same combined

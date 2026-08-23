@@ -81,7 +81,11 @@ async fn a_string_that_looks_like_a_syntax_error_is_compiled_not_pattern_matched
     let report = eval("println!(\"??? @@@ this is not valid\");").await;
 
     if !rustc_is_installed() {
-        assert_eq!(report.status, CtopStatus::EvaluatorUnavailable, "{report:?}");
+        assert_eq!(
+            report.status,
+            CtopStatus::EvaluatorUnavailable,
+            "{report:?}"
+        );
         return;
     }
     assert_eq!(

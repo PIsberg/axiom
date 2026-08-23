@@ -35,7 +35,11 @@ fn a_scan_does_not_inherit_an_ancestor_index() {
     // A subdirectory with one real source file.
     let sub = root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    std::fs::write(sub.join("gate.py"), "def is_open(depth):\n    return depth > 0\n").unwrap();
+    std::fs::write(
+        sub.join("gate.py"),
+        "def is_open(depth):\n    return depth > 0\n",
+    )
+    .unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
         .args(["scan", "--path", "."])
@@ -45,7 +49,10 @@ fn a_scan_does_not_inherit_an_ancestor_index() {
     assert!(out.status.success(), "scan failed: {out:?}");
 
     let index = sub.join(".axiom").join("index.json");
-    assert!(index.exists(), "scan wrote no index under the scanned directory");
+    assert!(
+        index.exists(),
+        "scan wrote no index under the scanned directory"
+    );
     let text = std::fs::read_to_string(&index).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
     let nodes = parsed["nodes"].as_object().unwrap();

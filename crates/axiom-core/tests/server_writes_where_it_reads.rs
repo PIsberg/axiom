@@ -78,7 +78,10 @@ fn writes_land_in_the_discovered_axiom_directory() {
         "axiom_attest_commit",
         json!({ "prompt": "add a widget", "symbol_path": "demo::widget", "ctop_task_id": "t1" }),
     );
-    assert!(attestation.get("seal").is_some(), "attest failed: {attestation}");
+    assert!(
+        attestation.get("seal").is_some(),
+        "attest failed: {attestation}"
+    );
     assert!(
         axiom.join("attestations.json").exists(),
         "the ledger must be written under the discovered .axiom, not the working directory"
