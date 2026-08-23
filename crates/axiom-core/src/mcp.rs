@@ -462,14 +462,14 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_eval_patch",
-                            "description": "Run a snippet and report what happened. The snippet is written in the language of the file the symbol came from, and is run by that language's toolchain: rustc for Rust, wasmtime for a WAT or wasm snippet, and python, node, deno or tsc, go and javac for the rest. Takes a few hundred milliseconds, since it invokes a real compiler. engine says which one answered. A language with no evaluator, a toolchain that is not installed, and a name matching several symbols are all refused rather than guessed at, and a snippet that does not terminate is killed and reported as TIMEOUT. Never returns PASSED for something that did not run.",
+                            "description": "Run a snippet and report what happened. The snippet is written in the language of the file the symbol came from, and is run by that language's toolchain: rustc for Rust, wasmtime for a WAT or wasm snippet, and python, node, deno or tsc, go and javac for the rest. A symbol the index does not recognise is treated as Rust, and 'anonymous' forces it; pass a symbol that is indexed to have its own language chosen. Takes a few hundred milliseconds, since it invokes a real compiler. engine says which one answered. The snippet runs with a confined environment, so it cannot read the signing key or the operator's other secrets. A language with no evaluator, a toolchain that is not installed, and a name matching several symbols are all refused rather than guessed at, and a snippet that does not terminate is killed, along with anything it started, and reported as TIMEOUT. Never returns PASSED for something that did not run.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "symbol_path": { "type": "string" },
-                                    "code_snippet": { "type": "string" },
-                                    "test_target": { "type": "string" }
-                                }
+                                    "symbol_path": { "type": "string", "description": "The symbol whose language to evaluate in; an unrecognised name is treated as Rust, 'anonymous' forces Rust" },
+                                    "code_snippet": { "type": "string", "description": "The code to run. Rust and WAT run in tier 1; other languages in their own toolchain" }
+                                },
+                                "required": ["code_snippet"]
                             }
                         },
                         {
@@ -542,19 +542,29 @@ impl AxiomMcpServer {
 
                 let result = self.execute_tool(tool_name, args).await;
                 match result {
-                    Ok(val) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id,
-                        result: Some(json!({
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": serde_json::to_string_pretty(&val).unwrap_or_default()
-                                }
-                            ]
-                        })),
-                        error: None,
-                    },
+                    Ok(val) => {
+                        // A tool that ran and reported a problem carries an
+                        // `error` field in its payload. MCP surfaces such a
+                        // result to the model only when `isError` is set, so a
+                        // not-found or refusal reaches the agent as something to
+                        // react to rather than as an ordinary answer. It stays a
+                        // result, not a JSON-RPC error, because the tool did run.
+                        let is_error = val.get("error").is_some();
+                        JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: Some(json!({
+                                "isError": is_error,
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": serde_json::to_string_pretty(&val).unwrap_or_default()
+                                    }
+                                ]
+                            })),
+                            error: None,
+                        }
+                    }
                     Err(e) => JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id,
@@ -746,10 +756,19 @@ impl AxiomMcpServer {
                 let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
                 let previous_seal = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
 
-                let commit_root = format!("merkle_root_{}", &root[..8]);
+                // Two real Merkle roots the engine maintains, not a constant and
+                // a slice of one. `parent_merkle_root` used to be the literal
+                // `merkle_root_prev_77a1` on every record ever issued, and
+                // `commit_merkle_root` the first eight hex of the CRDT root, so
+                // a reader could not tell one attested state from another. The
+                // AST index root is a digest over every indexed symbol and its
+                // body hash, so it moves when the code the record is about
+                // moves; the CRDT tree root is the multi-agent mutation state.
+                // Both are covered by the seal.
+                let code_root = self.ast_index.compute_merkle_root();
                 let attestation = ProvenanceAttestation::generate(NewAttestation {
-                    parent_merkle_root: "merkle_root_prev_77a1",
-                    commit_merkle_root: &commit_root,
+                    parent_merkle_root: &root,
+                    commit_merkle_root: &code_root,
                     agent_identity: &agent_identity,
                     prompt,
                     symbol_path: symbol,
@@ -791,15 +810,22 @@ impl AxiomMcpServer {
             }
 
             "axiom_apply_mutation" => {
-                let node_id = args
-                    .get("node_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("node_01");
-                let symbol = args
-                    .get("symbol_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("module::fn");
-                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                // Required, not defaulted. A missing symbol_path used to become
+                // the literal `module::fn`, so a malformed call wrote a node
+                // under a name no source declares and persisted it to the
+                // index. The same for node_id, which keyed the CRDT op.
+                let symbol = match required_str(&args, "symbol_path") {
+                    Ok(s) => s,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+                let node_id = match required_str(&args, "node_id") {
+                    Ok(s) => s,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+                let content = match required_str(&args, "content") {
+                    Ok(s) => s,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
 
                 let op = self
                     .tree_crdt

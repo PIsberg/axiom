@@ -185,11 +185,33 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&line) {
-                    let resp = server.handle_request(req).await;
-                    let out = serde_json::to_string(&resp)?;
-                    writeln!(stdout, "{}", out)?;
-                    stdout.flush()?;
+                match serde_json::from_str::<JsonRpcRequest>(&line) {
+                    Ok(req) => {
+                        // A JSON-RPC message with no id is a notification, and a
+                        // notification draws no reply. Answering
+                        // `notifications/initialized` with an id:null error is a
+                        // protocol violation a strict client will reject.
+                        let is_notification = req.id.is_none();
+                        let resp = server.handle_request(req).await;
+                        if is_notification {
+                            continue;
+                        }
+                        let out = serde_json::to_string(&resp)?;
+                        writeln!(stdout, "{}", out)?;
+                        stdout.flush()?;
+                    }
+                    // A line that does not parse is a parse error, reported with
+                    // a null id, rather than dropped in silence: a client that
+                    // sent it and is waiting would otherwise wait for ever.
+                    Err(e) => {
+                        let out = serde_json::to_string(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": serde_json::Value::Null,
+                            "error": { "code": -32700, "message": format!("parse error: {e}") }
+                        }))?;
+                        writeln!(stdout, "{}", out)?;
+                        stdout.flush()?;
+                    }
                 }
             }
         }
