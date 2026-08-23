@@ -83,7 +83,8 @@ impl IndexLock {
                             std::io::ErrorKind::TimedOut,
                             format!(
                                 "gave up after {:?} waiting for {:?}, which another agent is holding",
-                                Self::GIVE_UP_AFTER, path
+                                Self::GIVE_UP_AFTER,
+                                path
                             ),
                         ));
                     }

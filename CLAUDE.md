@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 138 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 142 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit, key format
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -27,8 +27,8 @@ The binary is at `target/release/axiom`, for whatever the host target is. A pin 
 `x86_64-pc-windows-msvc` used to live in `.cargo/config.toml`; it put the binary somewhere else and
 made `cargo build` fail on any machine that is not Windows, which CI caught on its first run.
 
-On Windows the C toolchain must be on the path before cargo runs, or `zstd-sys`, `wasmtime-fiber`
-and `ittapi-sys` fail inside their build scripts:
+On Windows the C toolchain must be on the path before cargo runs, or `zstd-sys`,
+`wasmtime-internal-fiber` and `ittapi-sys` fail inside their build scripts:
 
 ```powershell
 cmd.exe /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat`" && cargo build --release --bin axiom"
@@ -472,7 +472,7 @@ this repository and say so; treat anything quoting a figure for other repositori
 ## Building in a sandboxed session
 
 Some sandboxed environments deny file creation to processes cargo spawns, which breaks build scripts
-(`target-lexicon`, `zstd-sys`, `wasmtime-fiber`, `ittapi-sys`) with `Os { code: 5, PermissionDenied }`
+(`target-lexicon`, `zstd-sys`, `wasmtime-internal-fiber`, `ittapi-sys`) with `Os { code: 5, PermissionDenied }`
 before any of this crate's own code compiles. It is not a toolchain problem and switching to the
 `x86_64-pc-windows-gnu` target does not help. Point cargo at a writable directory instead:
 

@@ -1,5 +1,5 @@
-use axiom_core::{mcp::JsonRpcRequest, mcp::JsonRpcResponse, AxiomMcpServer};
-use serde_json::{json, Value};
+use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest, mcp::JsonRpcResponse};
+use serde_json::{Value, json};
 
 fn extract_tool_result(resp: &JsonRpcResponse) -> Value {
     let res = resp

@@ -34,10 +34,12 @@ fn a_snippet_that_never_finishes_is_killed_and_reported() {
                 elapsed < deadline * 8,
                 "the deadline should end the run, not the snippet: waited {elapsed:?}"
             );
-            assert!(report
-                .failed_checks
-                .iter()
-                .any(|c| c.error_type == "EvaluationTimeout"));
+            assert!(
+                report
+                    .failed_checks
+                    .iter()
+                    .any(|c| c.error_type == "EvaluationTimeout")
+            );
         }
         None => {
             assert_eq!(

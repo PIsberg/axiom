@@ -9,7 +9,7 @@
 //! that changed the working directory would race every other test in this
 //! binary.
 
-use axiom_ast::{write_atomically, AstIndex, IndexLock};
+use axiom_ast::{AstIndex, IndexLock, write_atomically};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
