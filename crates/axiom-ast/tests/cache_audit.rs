@@ -455,3 +455,81 @@ fn an_external_path_is_still_charged_to_the_environment() {
          shares its last segment: {closure:?}"
     );
 }
+
+/// Behind the selector, a cache saves exactly what it unsafely skips.
+///
+/// Layered on blast-radius selection, a test runs when the selector picks it and
+/// its key moved. So the work the cache removes is the pairs where the selector
+/// picks it and the key did not: `would_wrongly_skip`, the same number the
+/// safety argument turns on.
+///
+/// The consequence is worth stating as a test rather than as a comment, because
+/// it decides whether the feature is worth building. On this design a cache
+/// behind the selector cannot save anything without disagreeing with it, and
+/// every disagreement is a test the selector says must run. A zero is both
+/// "provably safe" and "provably pointless", and the two cannot be separated by
+/// making the graph more precise.
+#[test]
+fn behind_the_selector_saving_and_unsafety_are_the_same_number() {
+    let dir = TempDir::new("utility");
+    dir.write(
+        "gate.rs",
+        "pub fn is_open(depth: i32) -> bool { depth > 0 }\n",
+    );
+    dir.write(
+        "gate_test.rs",
+        "#[test]\nfn test_gate_opens() { assert!(is_open(1)); }\n",
+    );
+    dir.write(
+        "other_test.rs",
+        "#[test]\nfn test_unrelated() { assert!(true); }\n",
+    );
+
+    let index = scan(&dir);
+    let audit = index.audit_cache(&EnvironmentKey::uncovered(), 1, 5);
+
+    assert_eq!(
+        audit.tests_saved_behind_the_selector(),
+        audit.would_wrongly_skip,
+        "these are one quantity; if they ever differ, the reasoning in the doc \
+         about why the cache cannot pay for itself behind the selector is wrong \
+         and must be redone: {audit:?}"
+    );
+}
+
+/// The cache's own answer has to be reported, or only its safety is visible.
+///
+/// A run driven by the cache alone is the case selection cannot serve: a merge
+/// or a pull, where nothing names the change as a symbol. That number is the
+/// only argument for building the thing, so it must not be inferable-in-theory
+/// and absent-in-practice.
+#[test]
+fn the_audit_reports_what_a_cache_driven_run_would_cost() {
+    let dir = TempDir::new("cost");
+    dir.write(
+        "gate.rs",
+        "pub fn is_open(depth: i32) -> bool { depth > 0 }\n",
+    );
+    dir.write(
+        "gate_test.rs",
+        "#[test]\nfn test_gate_opens() { assert!(is_open(1)); }\n",
+    );
+
+    let index = scan(&dir);
+    let audit = index.audit_cache(&EnvironmentKey::uncovered(), 1, 5);
+
+    let cached = audit
+        .mean_tests_per_cache_run()
+        .expect("symbols were audited, so there is an answer");
+    let selected = audit.mean_tests_per_selected_run().expect("same");
+
+    assert!(
+        cached >= selected,
+        "a cache that ran fewer tests than the selector would be skipping some \
+         the selector demands, which is the unsound direction: {audit:?}"
+    );
+    assert!(
+        cached <= audit.tests_in_index as f64,
+        "a run cannot contain more tests than exist: {audit:?}"
+    );
+}

@@ -236,6 +236,47 @@ so making one match the other raises agreement without establishing that either
 is right about the code. The structural caveat below still applies, and it is now
 the main thing standing between this and a cache.
 
+## Would it be worth having?
+
+Everything above measures whether a cache would be *safe*. None of it measures
+whether it would be *useful*, and on this design those turn out to be the same
+number read two ways.
+
+Behind blast-radius selection, a test runs when the selector picks it and its key
+moved. So the work a cache removes is exactly the pairs where the selector picks
+a test and the key did not move, which is `would wrongly skip`: the number the
+whole safety argument turns on.
+
+That leaves no room to be both safe and useful in that position. A cache behind
+the selector cannot remove work without disagreeing with it, and every
+disagreement is a test the selector says must run. Driving `would wrongly skip`
+to zero, which the two sections above spent their effort on, drives the saving to
+zero with it. More precision in the graph does not change this; it is arithmetic,
+not an artefact of the parsers.
+
+Measured on this repository:
+
+```
+   Change one known symbol: the blast radius runs 2.4 of 53 tests.
+   Adding the cache behind it skips 0 more.
+
+   Change something of unknown extent: the cache alone runs 15.0 of
+   53 tests, where today you would run all 53.
+   That is 28% of the suite, so 72% of verdicts still hold.
+```
+
+So the case for a cache is not "run fewer of the tests the selector chose". It is
+the case selection cannot serve at all: a merge, a pull, a rebase, anything where
+no single symbol names what changed. Selection needs a symbol to start from. A
+cache does not, and on this repository it would still stand behind 72% of the
+suite.
+
+That is the number to argue about, and it is the one this tool did not report
+until now. `tests_saved_behind_the_selector` returns `would_wrongly_skip` on
+purpose, and `behind_the_selector_saving_and_unsafety_are_the_same_number` pins
+it, so if the two ever come apart the reasoning here is wrong and has to be
+redone rather than quietly outlived.
+
 ## What would come next
 
 In order, each gated on the one before:
@@ -252,10 +293,14 @@ In order, each gated on the one before:
    found by running the audit on a second tree rather than by reasoning.
 4. Run the audit on more real trees still. Two is not many, and each of the two
    so far produced a finding the other did not.
-5. Find the references the parsers never recorded. This audit cannot: both
+5. Decide what the cache is *for* before making it more precise. Behind the
+   selector it cannot pay for itself at any precision. If it is worth building,
+   it is as the answer to a change of unknown extent, and that is what should be
+   measured and gated next.
+6. Find the references the parsers never recorded. This audit cannot: both
    directions read the same edges, so a missing edge is invisible to it. That
    needs a different check, comparing against a real test run.
-6. Only then let it skip anything.
+7. Only then let it skip anything.
 
 The measurement stays in the repository either way, because the number moves when
 the graph changes, and a cache is exactly the feature that must not be built on a

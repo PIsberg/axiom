@@ -2511,6 +2511,15 @@ pub struct CacheAudit {
     pub would_run_unselected: usize,
     /// Up to this many examples of the dangerous case, for a report to name.
     pub wrongly_skipped_examples: Vec<(String, String)>,
+    /// Summed over every symbol: how many tests have a key that moves when that
+    /// symbol changes.
+    ///
+    /// This is the cache's own answer to "what has to run", ignoring the
+    /// selector. Divided by `symbols_audited` it gives the mean size of a
+    /// cache-driven test run for a one-symbol change, and that is the number
+    /// that says whether a cache would be worth having at all. Nothing else
+    /// reported here measures usefulness; the rest measure safety.
+    pub tests_whose_key_moves: usize,
     /// The names that most often blocked a key, with counts. These are the gaps
     /// in the graph: something in this tree satisfies them and the graph cannot
     /// say what.
@@ -2522,6 +2531,44 @@ pub struct CacheAudit {
 }
 
 impl CacheAudit {
+    /// How many tests a cache-driven run would contain, for a change to one
+    /// symbol, on average. `None` when nothing was audited.
+    pub fn mean_tests_per_cache_run(&self) -> Option<f64> {
+        if self.symbols_audited == 0 {
+            return None;
+        }
+        Some(self.tests_whose_key_moves as f64 / self.symbols_audited as f64)
+    }
+
+    /// The same for the selector, so the two can be compared directly.
+    ///
+    /// A test the blast radius selects is one it believes the change can reach,
+    /// which is `agreements + would_wrongly_skip`: the pairs where both agree,
+    /// plus the pairs the selector claims and the closure does not.
+    pub fn mean_tests_per_selected_run(&self) -> Option<f64> {
+        if self.symbols_audited == 0 {
+            return None;
+        }
+        let selected = self.agreements + self.would_wrongly_skip;
+        Some(selected as f64 / self.symbols_audited as f64)
+    }
+
+    /// Tests a cache would skip that the selector would have run.
+    ///
+    /// Layered behind blast-radius selection, a test runs when the selector
+    /// picks it *and* its key moved, so the work the cache removes is exactly
+    /// the pairs where the selector picks it and the key did not move. That is
+    /// `would_wrongly_skip`, the same number the safety argument turns on.
+    ///
+    /// Which makes the two readings inseparable: on this design a cache saves
+    /// nothing behind the selector unless it disagrees with it, and every
+    /// disagreement is a test the selector says must run. A zero here is both
+    /// "provably safe" and "provably pointless", and reporting one without the
+    /// other is how a feature gets built on half a number.
+    pub fn tests_saved_behind_the_selector(&self) -> usize {
+        self.would_wrongly_skip
+    }
+
     /// Share of decisions the two mechanisms agreed on, or `None` when there
     /// were no decisions to make. Reported rather than inferred from the counts,
     /// so a zero-denominator run cannot read as 100%.
@@ -2823,7 +2870,11 @@ impl AstIndex {
                 let Some(reachable) = closures.get(test) else {
                     continue;
                 };
-                match (selected.contains(test), reachable.contains(symbol)) {
+                let key_moves = reachable.contains(symbol);
+                if key_moves {
+                    audit.tests_whose_key_moves += 1;
+                }
+                match (selected.contains(test), key_moves) {
                     (true, true) => audit.agreements += 1,
                     (true, false) => {
                         audit.would_wrongly_skip += 1;
