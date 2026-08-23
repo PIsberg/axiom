@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 112 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 123 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -123,14 +123,45 @@ only if some indexed symbol answers to that name. The pass runs at the end of `s
 because a file that references a symbol defined further down the walk cannot be resolved when it is
 read. `crates/axiom-ast/tests/blast_radius.rs` pins it.
 
+**Three ways that pass has silently dropped an edge, all found through one missing call.**
+`AstIndex::search` calls `looks_like_a_pattern` and the graph did not know it, so the blast
+radius said no test reaches that function while `cargo test --test e2e_test search_modes`
+really failed on a mutation of it (#32). None of the three is visible to `cache-audit`,
+because the forward closure and the reverse walk read the same edges.
+
+A Rust symbol used to be keyed by file and short name alone, so the two `search` methods in
+`lib.rs`, one on `AstIndex` and one on `ZoektIndex`, were one key: the second overwrote the
+first, and the declaration line recorded for the key moved with it, so every call inside the
+first was charged to whatever symbol preceded it. `parse_rust_content` now tracks the
+enclosing `impl` or `trait` by brace depth and keys methods as `lib.rs::AstIndex::search`.
+Modules are not tracked, so two same-named functions in two `mod` blocks of one file still
+collide.
+
+`symbol_lines` therefore keeps *every* declaration line for a key rather than the last one
+parsed. Two declarations can genuinely share a key, `#[cfg(windows)]` and `#[cfg(unix)]`
+spellings of one function being the honest case, and charging the earlier one's calls to
+the symbol above it is the failure that leaves.
+
+`strip_comments_and_strings` must not move a line, and twice it did. A Rust lifetime opens
+with an apostrophe and never closes one, so skipping to the next apostrophe in the file
+swallowed the newlines between them; one `struct Holder<'a>` put everything below it out by
+one. A backslash line continuation inside a string lost a newline the same way, five times
+in `lib.rs` alone. Both are pinned by `stripping_preserves_every_line`, which runs the
+stripper over this crate's own source, because that is where the continuation was found and
+not in any fixture. The apostrophe means a string rather than a character in Python,
+JavaScript and TypeScript, so the caller says which language is being read: a closing
+apostrophe is required for a char literal and optional for a string that ends its line.
+Without that, `'sensitive_thing() is not called here'` was a call.
+
 **A symbol's short name is not its last dot-separated segment.** `simple_name_of` distinguishes a
 package-keyed symbol, `pkg.Class::method` to `Class`, from a file-keyed one,
 `src/lib.rs::write_atomically` to `write_atomically`. Splitting on the last dot unconditionally took
-the file extension for a package separator: every Rust symbol reduced to `rs`, and since
-`index_node` stores the symbol path in `signature`, the fallback search matched `rs::` against every
-Rust symbol in the index. The blast radius for anything in this repository was all 49 tests. A
-Java-only fixture suite cannot catch this, which is why the new tests scan Rust and Python side by
-side.
+the file extension for a package separator: every Rust symbol reduced to `rs`, and the fallback
+search matched `rs::` against every Rust symbol in the index. The blast radius for anything in this
+repository was all 49 tests. A Java-only fixture suite cannot catch this, which is why the new tests
+scan Rust and Python side by side. The fallback reads the symbol path, and only the symbol path:
+`signature` now holds the declaration, and matching a name against that would put every test whose
+declaration mentions it into the answer, which is the same loosening wearing a different hat.
 
 **`reverse_deps` is keyed by the name a caller writes, and its values are full symbol paths.** The
 traversal therefore has to look up both on each hop. Looking up only the path found nothing after
@@ -244,17 +275,21 @@ The portable form is a bare `throw`, which is why `throw ` is in the language's
 `assertion_tokens`: without it a snippet written the documented way reports
 `passed_checks_count: 0` beside `PASSED`.
 
-**`AstNode::source_range` and `AstNode::signature` do not hold what their names say.**
-`index_node` sets `source_range: (0, content.len())`, so it is the length of a declaration
-rather than a position in a file, and `signature: Some(symbol.to_string())`, so it is the
-symbol path again rather than the declaration. The declaration text is used for the hash
-and then discarded. Both fields are returned to agents by `axiom_query_symbol`. This is
-not hypothetical: `cache-validate` first located symbols by `source_range`, edited from
-line 0 to line `len`, which on a short file is all of it, and reported that mutating
-`unrelated` broke a test only `is_open` reaches. Anything needing to find a symbol in its
-file has to look for the declaration itself, as `mutate::symbol_lines` does. Fixing the
-fields is not a drive-by: the blast-radius fallback matches `sig.contains(canonical_symbol)`
-and depends on the current meaning.
+**`AstNode::source_range` is a line range and `AstNode::signature` is the declaration.**
+`source_range` is one-based and inclusive over the file `symbol_path` names, so
+`sed -n 'start,endp'` on that file prints the declaration, and it spans several lines for a
+wrapped parameter list. `(0, 0)` means no position was recorded, which is what a node
+inserted by hand through `index_node` has. `crates/axiom-ast/tests/source_positions.rs`
+pins both against the fixture files it writes.
+
+They used to hold `(0, content.len())` and the symbol path, a length rather than a position
+and a copy of a field the response already carries. That was not a cosmetic problem:
+`cache-validate` located symbols by `source_range`, edited from line 0 to line `len`, which
+on a short file is all of it, and reported that mutating `unrelated` broke a test only
+`is_open` reaches. What still cannot be read off the node is where a symbol *ends*: the
+range brackets the declaration, not the body, and it describes the file as it was scanned.
+Anything mutating a symbol has to find it in the file as it is now, as `mutate::symbol_lines`
+does.
 
 **Ground truth comes from `cache-validate`, not from the audit.** The audit compares two
 readings of one graph, so agreement between them says nothing about a call the parsers
@@ -271,16 +306,16 @@ exactly the pairs where the selector picks a test and the key did not: `would wr
 skip`. Driving that to zero, which is what makes it safe, drives the saving to zero with
 it. This is arithmetic rather than an artefact of the parsers, so no amount of precision
 in the graph escapes it, and `behind_the_selector_saving_and_unsafety_are_the_same_number`
-pins it. Measured here: for a change to one known symbol the selector runs 2.4 of 53
+pins it. Measured here: for a change to one known symbol the selector runs 2.3 of 54
 tests and adding the cache skips 0 more. The case a cache can serve and selection cannot
 is a change of unknown extent, a merge or a pull, where nothing names the change as a
-symbol: there it runs 15.0 of 53, leaving 72% of verdicts standing. Decide which of
+symbol: there it runs 11.6 of 54, leaving 79% of verdicts standing. Decide which of
 those the feature is for before making the graph more precise.
 
 **The verdict cache is measured, not built, and the measurement says do not build it.**
 `axiom cache-audit` reads the same graph in the forward direction, from a test to what
 it depends on, and compares that against what the blast radius selects. Nothing is
-cached and no test is skipped. On this repository 51 of 51 tests produce a usable key
+cached and no test is skipped. On this repository 54 of 54 tests produce a usable key
 and nothing disagrees in the direction that would skip a test the selector says must run.
 A four-file polyglot fixture disagreed on one pair, which is
 how the two remaining closure gaps were found: a method did not depend on the type
@@ -303,7 +338,7 @@ mechanisms want opposite biases from one graph, which is the thing to keep hold 
 selection a wrong extra edge costs one test run; for a key a missing edge skips a test
 and reports a pass for code that never ran. Choosing the nearest candidate by file or
 directory would have been wrong 49 times out of 51 here, and each wrong pick produces a
-key that looks complete. That took usable keys to 51 of 51 and the dangerous count to
+key that looks complete. That took usable keys to 54 of 54 and the dangerous count to
 zero, but the zero is partly structural: both directions read the same edges, so a call
 the parsers never recorded is invisible to the audit as well as to the cache. `closure_hash` returns `Option` for this reason: an
 incomplete closure must produce no key at all, because a cache that keys on a partial

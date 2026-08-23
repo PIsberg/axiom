@@ -72,28 +72,29 @@ const SWAPS: &[(&str, &str)] = &[
     ("true", "false"),
 ];
 
-/// Where a symbol's own lines are, found by its declaration rather than by
+/// Where a symbol's own lines are, found in the file rather than taken from
 /// `AstNode::source_range`.
 ///
-/// `source_range` cannot be used for this. It is set to `(0, content.len())`
-/// where `content` is the declaration text, so it is the length of a signature
-/// and not a position in a file. Trusting it made the mutator edit from line 0
-/// to line `signature.len()`, which on a short file is the whole thing: a
-/// mutation attributed to `unrelated` actually broke `is_open`, and the run
-/// reported a dependency hole that did not exist. Attribution is the entire
-/// value of this tool, so it locates the symbol itself.
+/// `source_range` brackets the declaration, not the body, so it cannot say
+/// where a symbol ends; and it is a position in the file as it was when it was
+/// scanned, which is not necessarily the file being mutated now. Reading it as
+/// a body range is what produced the bug this module exists because of: it
+/// used to hold `(0, content.len())`, the length of a signature, so the mutator
+/// edited from line 0 to line `signature.len()`, which on a short file is the
+/// whole thing. A mutation attributed to `unrelated` actually broke `is_open`,
+/// and the run reported a dependency hole that did not exist. Attribution is
+/// the entire value of this tool, so it locates the symbol itself.
 ///
-/// The declaration line is matched against the stored signature, then the body
-/// is taken by brace balance, or by indentation where the declaration opens no
-/// brace, which is how Python and expression-bodied Kotlin and Scala look.
+/// The declaration line is matched by shape, then the body is taken by brace
+/// balance, or by indentation where the declaration opens no brace, which is
+/// how Python and expression-bodied Kotlin and Scala look.
 fn symbol_lines(lines: &[&str], short_name: &str) -> Option<(usize, usize)> {
     if short_name.is_empty() {
         return None;
     }
 
-    // Neither stored field can locate this. `source_range` is a length, and
-    // `signature` holds the symbol path rather than the declaration, so the
-    // declaration is found in the source by shape.
+    // Found by shape, so that a file edited since the scan is still handled
+    // by what it says now rather than by what the index remembers.
     let openers = [
         format!("fn {short_name}("),
         format!("def {short_name}("),
@@ -187,10 +188,10 @@ mod tests {
     /// The bug this module exists because of.
     ///
     /// `unrelated` has nothing to swap in its own body, so the honest answer is
-    /// that it cannot be mutated. Locating it by `source_range`, which is
-    /// `(0, signature length)`, edited from line 0 to line 27 instead, hit
-    /// `depth > 0` inside `is_open`, and produced a run blaming `unrelated` for
-    /// breaking a test it does not touch.
+    /// that it cannot be mutated. Locating it by `source_range` back when that
+    /// field held `(0, signature length)` edited from line 0 to line 27
+    /// instead, hit `depth > 0` inside `is_open`, and produced a run blaming
+    /// `unrelated` for breaking a test it does not touch.
     #[test]
     fn a_mutation_never_escapes_the_symbol_it_is_attributed_to() {
         let mutated = mutate_lines(SOURCE, "unrelated");

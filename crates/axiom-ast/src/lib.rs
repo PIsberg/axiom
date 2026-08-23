@@ -318,21 +318,25 @@ impl AstIndex {
         self.index_node_at(symbol, kind, content, deps, None)
     }
 
-    /// Insert a node, recording which line it was declared on.
+    /// Insert a node, recording the lines its declaration spans.
     ///
-    /// The line is what lets a reference found later be charged to the function
-    /// it sits in. Without it the only available owner is the file, and in a
-    /// language where one file holds forty unrelated tests, charging all of
-    /// them for one reference is the same as charging none of them.
+    /// `declared_on` is a zero-based inclusive line range, which is one line
+    /// for most declarations and several for a wrapped parameter list. It does
+    /// two jobs. It is what lets a reference found later be charged to the
+    /// function it sits in: without it the only available owner is the file,
+    /// and in a language where one file holds forty unrelated tests, charging
+    /// all of them for one reference is the same as charging none of them. And
+    /// it is what `source_range` reports, one-based, so a caller can open the
+    /// file and find the declaration where the node says it is.
     pub fn index_node_at(
         &self,
         symbol: &str,
         kind: &str,
         content: &str,
         deps: Vec<String>,
-        declared_on: Option<usize>,
+        declared_on: Option<(usize, usize)>,
     ) -> AstNode {
-        if let Some(line) = declared_on {
+        if let Some((line, _)) = declared_on {
             let mut lines = self.symbol_lines.write().unwrap();
             let seen = lines.entry(symbol.to_string()).or_default();
             if !seen.contains(&line) {
@@ -352,9 +356,16 @@ impl AstIndex {
             symbol_path: symbol.to_string(),
             kind: kind.to_string(),
             hash: hash.clone(),
-            source_range: (0, content.len()),
+            // One-based and inclusive, so `sed -n 'start,endp'` on the file
+            // this symbol was indexed from prints the declaration. `(0, 0)`
+            // means the parser recorded no position, which is what a node
+            // inserted by hand through `index_node` has.
+            source_range: declared_on.map_or((0, 0), |(a, b)| (a + 1, b + 1)),
             docstring: None,
-            signature: Some(symbol.to_string()),
+            // The declaration as it was read. It used to be the symbol path,
+            // which the response already carries as `symbol_path`, so the one
+            // thing a caller wanted was the one thing that was thrown away.
+            signature: Some(normalized.to_string()),
             dependencies: deps.clone(),
         };
 
@@ -840,35 +851,36 @@ impl AstIndex {
         }
         impacted_tests.extend(method_expansions);
 
-        // Fallback: Whole-word reference search across all registered test nodes
+        // Fallback: a test whose own name carries the symbol's, for the case
+        // where nothing in the graph reaches it.
+        //
+        // This reads the symbol path. It used to read `signature` as well,
+        // which held the symbol path again, so the two were the same string
+        // and the extra checks were the same check. Now that `signature` holds
+        // the declaration, matching it here would put every test whose
+        // declaration mentions a name into the answer, which is the loosening
+        // that once returned all 49 tests for every symbol in this repository.
         if impacted_tests.is_empty() && !simple_name.is_empty() {
             let test_pattern_1 = format!("{}Test", simple_name);
             let test_pattern_2 = format!("test{}", simple_name);
             let call_pattern_1 = format!("{}.", simple_name);
             let call_pattern_2 = format!("{}::", simple_name);
-            let call_pattern_3 = format!("new {}", simple_name);
-            let type_pattern = format!("{} ", simple_name);
 
             for (sym, node) in nodes.iter() {
-                if node.kind == "test" {
-                    let sig = node.signature.as_deref().unwrap_or("");
-                    if (sym.contains(&test_pattern_1)
+                if node.kind == "test"
+                    && (sym.contains(&test_pattern_1)
                         || sym.contains(&test_pattern_2)
                         || sym.contains(&canonical_symbol)
-                        || sig.contains(&canonical_symbol)
-                        || sig.contains(&call_pattern_1)
-                        || sig.contains(&call_pattern_2)
-                        || sig.contains(&call_pattern_3)
-                        || sig.contains(&type_pattern)
+                        || sym.contains(&call_pattern_1)
+                        || sym.contains(&call_pattern_2)
                         || node
                             .dependencies
                             .iter()
                             .any(|d| d == simple_name || d == &canonical_symbol))
-                        && !impacted_tests.contains(sym)
-                    {
-                        impacted_tests.push(sym.clone());
-                        tests_by_depth.entry(1).or_default().push(sym.clone());
-                    }
+                    && !impacted_tests.contains(sym)
+                {
+                    impacted_tests.push(sym.clone());
+                    tests_by_depth.entry(1).or_default().push(sym.clone());
                 }
             }
         }
@@ -1710,7 +1722,13 @@ impl AstIndex {
                                 }
                             }
 
-                            self.index_node(&full_symbol, kind, trimmed, node_deps);
+                            self.index_node_at(
+                                &full_symbol,
+                                kind,
+                                trimmed,
+                                node_deps,
+                                Some((i, i)),
+                            );
                             self.file_to_symbols
                                 .write()
                                 .unwrap()
@@ -1745,6 +1763,11 @@ impl AstIndex {
                 || trimmed.starts_with("CompletableFuture"))
                 && trimmed.contains('(')
             {
+                // Where the declaration starts, before the join below walks
+                // `i` to the end of a wrapped parameter list. Reporting the
+                // last line as the position would point a caller at the line
+                // the parameters happen to close on.
+                let decl_start = i;
                 let mut full_sig = trimmed.to_string();
                 let is_annotated_test = full_sig.contains("@Test")
                     || (i > 0 && lines[i - 1].trim().starts_with("@Test"));
@@ -1833,7 +1856,13 @@ impl AstIndex {
                         }
                     }
 
-                    self.index_node(&full_symbol, kind, signature_clean, node_deps);
+                    self.index_node_at(
+                        &full_symbol,
+                        kind,
+                        signature_clean,
+                        node_deps,
+                        Some((decl_start, i)),
+                    );
                     self.file_to_symbols
                         .write()
                         .unwrap()
@@ -1937,7 +1966,13 @@ impl AstIndex {
                         let is_test = name.starts_with("test_") || trimmed.contains("#[test]");
                         let kind = if is_test { "test" } else { "function" };
 
-                        self.index_node_at(&symbol, kind, trimmed, uses.clone(), Some(line_no));
+                        self.index_node_at(
+                            &symbol,
+                            kind,
+                            trimmed,
+                            uses.clone(),
+                            Some((line_no, line_no)),
+                        );
                         *nodes_count += 1;
                     }
                 } else if trimmed.starts_with("struct ")
@@ -1956,7 +1991,13 @@ impl AstIndex {
 
                     if Self::is_valid_identifier(&name) {
                         let symbol = format!("{}::{}", file_path, name);
-                        self.index_node_at(&symbol, "struct", trimmed, uses.clone(), Some(line_no));
+                        self.index_node_at(
+                            &symbol,
+                            "struct",
+                            trimmed,
+                            uses.clone(),
+                            Some((line_no, line_no)),
+                        );
                         *nodes_count += 1;
                     }
                 }
@@ -2065,7 +2106,13 @@ impl AstIndex {
                     } else {
                         "class"
                     };
-                    self.index_node_at(&symbol, kind, trimmed, imports.clone(), Some(line_no));
+                    self.index_node_at(
+                        &symbol,
+                        kind,
+                        trimmed,
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
                     *nodes_count += 1;
                 }
             } else if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
@@ -2087,7 +2134,13 @@ impl AstIndex {
                     let is_test = name.starts_with("test_");
                     let kind = if is_test { "test" } else { "function" };
 
-                    self.index_node_at(&symbol, kind, trimmed, imports.clone(), Some(line_no));
+                    self.index_node_at(
+                        &symbol,
+                        kind,
+                        trimmed,
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
                     *nodes_count += 1;
                 }
             }
@@ -2122,7 +2175,13 @@ impl AstIndex {
                         || file_path.contains("spec");
                     let kind = if is_test { "test" } else { "function" };
 
-                    self.index_node_at(&symbol, kind, trimmed, imports.clone(), Some(line_no));
+                    self.index_node_at(
+                        &symbol,
+                        kind,
+                        trimmed,
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
                     *nodes_count += 1;
                 }
             } else if trimmed.starts_with("class ")
@@ -2142,7 +2201,13 @@ impl AstIndex {
 
                 if !name.is_empty() {
                     let symbol = format!("{}::{}", file_path, name);
-                    self.index_node_at(&symbol, "class", trimmed, imports.clone(), Some(line_no));
+                    self.index_node_at(
+                        &symbol,
+                        "class",
+                        trimmed,
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
                     *nodes_count += 1;
                 }
             }
@@ -2160,7 +2225,7 @@ impl AstIndex {
                     let is_test = name.starts_with("Test");
                     let kind = if is_test { "test" } else { "function" };
 
-                    self.index_node_at(&symbol, kind, trimmed, vec![], Some(line_no));
+                    self.index_node_at(&symbol, kind, trimmed, vec![], Some((line_no, line_no)));
                     *nodes_count += 1;
                 }
             }

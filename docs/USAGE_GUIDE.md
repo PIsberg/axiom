@@ -83,12 +83,19 @@ Look up one symbol.
     "kind": "function",
     "id": "node_2b4cc05ea97d",
     "hash": "2b4cc05ea97d276538c9650a9ba3942a743b681c46fe6f6980b072c05b2dd23c",
-    "signature": "C:/work/src/lib.rs::validate_token",
+    "signature": "pub fn validate_token(token: &str) -> bool {",
     "docstring": null,
-    "source_range": [0, 40],
+    "source_range": [42, 42],
     "dependencies": []
   }
   ```
+
+`signature` is the declaration as it was read, and `source_range` is a
+one-based inclusive line range in the file `symbol_path` names, so
+`sed -n '42,42p' C:/work/src/lib.rs` prints it. A wrapped parameter list spans
+several lines and the range covers all of them. `[0, 0]` means the parser
+recorded no position, which is what a node inserted through
+`axiom_apply_mutation` has.
 
 A shorter name resolves when it identifies exactly one symbol: `validate_token`
 finds `pkg.Class::validate_token`. A name matching several returns the candidates

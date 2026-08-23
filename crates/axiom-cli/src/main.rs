@@ -1568,12 +1568,12 @@ fn mutate_and_run(
     let Ok(content) = std::fs::read_to_string(file_path) else {
         return Ok(None);
     };
-    // Located by the declaration in the source, because neither stored field can
-    // do it: `source_range` is (0, signature length) rather than a position, and
-    // `signature` holds the symbol path rather than the declaration. Trusting
-    // `source_range` made the mutator edit from line 0 to line `len`, which on a
-    // short file is all of it, and produced a run blaming one symbol for
-    // breaking a test that a different symbol covered.
+    // Located by the declaration in the source rather than by `source_range`,
+    // which brackets the declaration and not the body, and describes the file
+    // as it was scanned rather than as it is now. Reading it as a body range,
+    // back when it held (0, signature length), made the mutator edit from line
+    // 0 to line `len`, which on a short file is all of it, and produced a run
+    // blaming one symbol for breaking a test that a different symbol covered.
     let short = node
         .symbol_path
         .rsplit("::")
