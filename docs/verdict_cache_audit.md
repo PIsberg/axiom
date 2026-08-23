@@ -176,6 +176,43 @@ of 51 keys move and the remaining 35 verdicts still hold, which is a two-thirds
 saving with no symbol named. That is worth having, and it is a different claim
 from the one the pruning numbers make.
 
+## A second tree, which does not agree
+
+The first repository this ran on is the one it was written in, and the caveat
+above says that is one measurement. Running it on a small four-file polyglot
+fixture gives a different answer:
+
+```
+ Tests in index:             4
+ Tests with a usable key:    4 of 4
+ Keyed without guessing:     4 of 4
+ Cache would wrongly skip:   1
+ Agreement:                  85.71%
+```
+
+The pair it names is a Python test method and the class that encloses it:
+
+```
+   billing.py::BillingTest -> billing.py::BillingTest::test_total
+```
+
+The blast radius says changing the class reaches the test inside it, which is
+right. The forward closure of that test does not contain its own enclosing type,
+because containment is not a call and nothing records it as an edge. So the
+closure is missing a real dependency, and a cache keyed on it would skip a test
+whose class had changed.
+
+That is a different gap from the ones above, it did not appear on this
+repository, and it is exactly why the conclusion is not "zero here, therefore
+safe". A second tree found a second hole within minutes.
+
+Worth noting alongside it: `crate::auth::validate_token` is reported as a name
+from outside the tree, and it is not, it is `auth.rs::validate_token` written the
+way Rust writes it. Suffix matching does not connect the two, so an in-tree
+dependency is being folded into the environment key. It happened to be harmless
+in the fixture, because the test also calls `validate_token` by its bare name and
+that edge does resolve, but nothing guarantees that.
+
 ## What would come next
 
 In order, each gated on the one before:
@@ -187,12 +224,14 @@ In order, each gated on the one before:
    do.~~ Answered a different way: over-approximate instead of resolving. The
    cache wants the opposite bias from selection, so it does not need the type
    information selection would.
-3. Run the audit on several real trees, not just this one. Everything above is
-   one measurement on 26 files.
-4. Find the references the parsers never recorded. This audit cannot: both
+3. Teach the closure that a method depends on its enclosing type, and resolve
+   `crate::`-prefixed paths to the symbols they name. Both were found by running
+   the audit on a second tree.
+4. Run the audit on more real trees still. Two is not many.
+5. Find the references the parsers never recorded. This audit cannot: both
    directions read the same edges, so a missing edge is invisible to it. That
    needs a different check, comparing against a real test run.
-5. Only then let it skip anything.
+6. Only then let it skip anything.
 
 The measurement stays in the repository either way, because the number moves when
 the graph changes, and a cache is exactly the feature that must not be built on a
