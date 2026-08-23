@@ -251,20 +251,20 @@ Copy the generated configuration into your AI client's settings:
 | `axiom verify --symbol <SYM> --prompt <P>` | Looks up the provenance record for a symbol and prompt, and checks it is unaltered |
 | `axiom keygen --out <PATH>` | Generates an Ed25519 keypair for signing provenance records. Keep the private key outside any workspace you index |
 | `axiom mcp-config` | Outputs ready-to-copy JSON configuration for AI IDEs |
-| `axiom watch --path <DIR>` | Watches filesystem for live incremental AST Merkle updates |
-| `axiom git-export` | Exports current Merkle state to a Git-compatible commit summary |
-| `axiom dashboard` | Displays live real-time terminal metrics & swarm activity TUI |
+| `axiom watch --path <DIR>` | Polls a cheap fingerprint of the tree and re-scans the whole tree when it changes. The re-index is a full re-parse, not an incremental one |
+| `axiom git-export` | Writes `.axiom/export.md` summarising the index and Merkle root. It does not touch git |
+| `axiom dashboard` | Prints a one-shot snapshot of the workspace: symbol counts by kind, index file size, CRDT node count, Merkle root, provenance record count. Not a TUI and not a live feed |
 
 ---
 
 ## 🧪 Running Tests
 
-To run the full automated test suite (including all 6 End-to-End integration tests):
+To run the full automated test suite, 138 tests across 24 binaries, of which 38 are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`:
 ```bash
 cargo test
 ```
 
-### Verified Test Suites:
+### Six of the end-to-end tests, and what each one pins:
 * `test_e2e_agent_full_loop_over_mcp`: Full multi-language scan, symbol query, sandbox error trap, self-healing, Tree-CRDT mutation, and provenance record.
 * `test_e2e_disk_persistence_cross_instance`: Cross-process `.axiom/index.json` save and load verification.
 * `test_e2e_truth_preserving_assertions`: Real compiler execution catching panics and invariant failures with zero false-positives.

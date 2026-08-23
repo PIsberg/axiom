@@ -398,4 +398,4 @@ fabricated 1.
 | `axiom search --query <STR>` | Ultra-fast Zoekt trigram regex and text search across repo |
 | `axiom watch --path <DIR> [--interval-ms N] [--once]` | Re-indexes the tree when it changes, polling a cheap fingerprint between scans |
 | `axiom git-export` | Writes .axiom/export.md summarising the index. It does not touch git |
-| `axiom dashboard` | Displays live real-time terminal metrics & swarm activity |
+| `axiom dashboard` | Prints a one-shot snapshot of the workspace: symbol counts by kind, index file size, CRDT node count, Merkle root, provenance record count. Not a TUI and not a live feed |
