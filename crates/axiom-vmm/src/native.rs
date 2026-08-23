@@ -742,6 +742,56 @@ fn temp_work_dir(tag: &str) -> std::io::Result<PathBuf> {
 ///
 /// A report comes back in every case. The one thing that never comes back is
 /// `PASSED` for something that did not compile and run.
+/// Did the toolchain fail before it ever reached the snippet?
+///
+/// A non-zero exit is not by itself a verdict about the code. `scala` and the
+/// JVM launchers fetch their own compiler and dependencies on first use, and
+/// when that fetch fails they exit non-zero having executed nothing the caller
+/// wrote. Reporting `FAILED` there tells an agent its code is wrong on the
+/// strength of a download, which is the same class as the assertion-substring
+/// fallback removed earlier: a verdict produced by something that is not a run
+/// of the code.
+///
+/// Observed on CI, where this returned FAILED after 134s:
+///
+/// ```text
+/// Failed to download https://.../bloop-frontend_2.12-2.0.19.pom
+/// ```
+///
+/// The markers are deliberately narrow, and all of them belong to a resolver or
+/// a downloader rather than to a compiler or a program. A snippet that prints
+/// one of these itself is misread as an unusable toolchain, which costs a
+/// refusal where a verdict was possible. That is the safe direction: refusing
+/// says nothing was established, which is true either way.
+pub fn toolchain_failure_reason(stdout: &str, stderr: &str) -> Option<String> {
+    const RESOLVER_FAILURES: &[&str] = &[
+        "Failed to download",
+        "Error downloading",
+        "failed to resolve",
+        "Could not resolve",
+        "unresolved dependency",
+        "not found in any repository",
+        "Server returned HTTP response code",
+        "UnknownHostException",
+        "Connection refused",
+        "Connection timed out",
+        "Network is unreachable",
+        "Could not find or load main class",
+    ];
+
+    for stream in [stderr, stdout] {
+        for line in stream.lines() {
+            if RESOLVER_FAILURES.iter().any(|m| line.contains(m)) {
+                return Some(format!(
+                    "the toolchain did not get as far as running the snippet: {}",
+                    line.trim().chars().take(200).collect::<String>()
+                ));
+            }
+        }
+    }
+    None
+}
+
 pub fn evaluate(
     language: &NativeLanguage,
     symbol_path: &str,
@@ -843,6 +893,21 @@ pub fn evaluate(
             Ok(done) if !done.succeeded() => {
                 let elapsed = ms(&start);
                 let _ = std::fs::remove_dir_all(&work_dir);
+                // A build that could not fetch its own dependencies has not
+                // found anything wrong with the snippet, so it is not a
+                // compilation error any more than it is a failure.
+                if let Some(reason) = toolchain_failure_reason(&done.stdout, &done.stderr) {
+                    return unavailable(
+                        task_id,
+                        language.engine,
+                        symbol_path,
+                        elapsed,
+                        reason,
+                        format!(
+                            "{program} exited non-zero without compiling the snippet, so                              nothing is known about it. Retry once its dependencies can be                              fetched, or run the project's own tests and report the outcome                              with axiom_record_verification."
+                        ),
+                    );
+                }
                 return compilation_error(
                     task_id,
                     language.engine,
@@ -919,6 +984,19 @@ pub fn evaluate(
         report.stdout = done.stdout;
         report.stderr = done.stderr;
         return report;
+    }
+
+    if let Some(reason) = toolchain_failure_reason(&done.stdout, &done.stderr) {
+        return unavailable(
+            task_id,
+            language.engine,
+            symbol_path,
+            duration,
+            reason,
+            format!(
+                "{program} exited non-zero without running the snippet, so nothing is                  known about it. Retry once its dependencies can be fetched, or run                  the project's own tests and report the outcome with                  axiom_record_verification."
+            ),
+        );
     }
 
     let detail = if done.stderr.trim().is_empty() {

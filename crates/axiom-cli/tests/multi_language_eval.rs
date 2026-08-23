@@ -352,23 +352,38 @@ async fn a_scala_assertion_fails_without_needing_an_assertion_flag() -> Result<(
 
     match toolchain_for("scala") {
         Some(program) => {
-            assert_eq!(
-                status(&failing),
-                "FAILED",
-                "{program} should have run this and seen the assertion fail: {failing:?}"
-            );
             assert_eq!(engine(&failing), "tier2_native_scala");
-            assert!(
-                failing
-                    .get("stderr")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .contains("AssertionError"),
-                "the toolchain's own output should reach the caller: {failing:?}"
-            );
 
-            let passing = eval(&server, "ScalaGate", "assert(1 + 1 == 2)").await;
-            assert_eq!(status(&passing), "PASSED", "{passing:?}");
+            // Installed is not the same as usable. The Scala runner fetches its
+            // compiler on first use, and on a runner that cannot reach the
+            // repository it exits non-zero having executed nothing: CI spent
+            // 134s doing exactly that. Both outcomes are legitimate here, and
+            // the pair of assertions below is what keeps this from asserting
+            // nothing: a claim of FAILED must carry the toolchain's own
+            // AssertionError, and a refusal must not claim the snippet failed.
+            match status(&failing) {
+                "FAILED" => assert!(
+                    failing
+                        .get("stderr")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .contains("AssertionError"),
+                    "{program} claims the snippet failed, so its own AssertionError                      must be in the output: {failing:?}"
+                ),
+                "EVALUATOR_UNAVAILABLE" => assert!(
+                    error_types(&failing).contains(&"EvaluatorUnavailable".to_string()),
+                    "a toolchain that could not run must refuse rather than judge: {failing:?}"
+                ),
+                other => panic!(
+                    "{program} is installed, so the answer is a verdict or a refusal,                      not {other}: {failing:?}"
+                ),
+            }
+
+            // Only meaningful when the toolchain actually ran the failing case.
+            if status(&failing) == "FAILED" {
+                let passing = eval(&server, "ScalaGate", "assert(1 + 1 == 2)").await;
+                assert_eq!(status(&passing), "PASSED", "{passing:?}");
+            }
         }
         None => {
             assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
