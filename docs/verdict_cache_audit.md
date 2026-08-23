@@ -206,12 +206,35 @@ That is a different gap from the ones above, it did not appear on this
 repository, and it is exactly why the conclusion is not "zero here, therefore
 safe". A second tree found a second hole within minutes.
 
-Worth noting alongside it: `crate::auth::validate_token` is reported as a name
-from outside the tree, and it is not, it is `auth.rs::validate_token` written the
-way Rust writes it. Suffix matching does not connect the two, so an in-tree
-dependency is being folded into the environment key. It happened to be harmless
-in the fixture, because the test also calls `validate_token` by its bare name and
-that edge does resolve, but nothing guarantees that.
+Alongside it: `crate::auth::validate_token` was reported as a name from outside
+the tree, and it is not, it is `auth.rs::validate_token` written the way Rust
+writes it. Suffix matching did not connect the two, so an in-tree dependency was
+folded into the environment key, which is the unsound direction: editing it would
+not have moved the key. It was harmless in that fixture only because the test
+also calls `validate_token` by its bare name and that edge does resolve.
+
+### Both are now fixed, and the numbers moved
+
+A method's closure contains the type enclosing it, and `crate::`, `self::` and
+`super::` paths resolve here rather than counting as outside. The fallback is
+restricted to those three prefixes on purpose: matching any colonned name by its
+last segment would let `anyhow::Result` bind to a local `Result` and stop being
+covered by the environment, which is the same unsoundness pointing the other way.
+
+```
+                        fixture before   fixture after   this repo after
+ Usable keys              4 of 4          4 of 4          51 of 51
+ Would wrongly skip       1               0               0
+ Agreement                85.71%          87.50%          15.63%
+ Extra symbols                0               0            1,111
+```
+
+**Read the two zeros carefully.** The containment edge was a real missing
+dependency, and adding it also moved the closure closer to what the blast radius
+already believed. The audit measures agreement between two readings of one graph,
+so making one match the other raises agreement without establishing that either
+is right about the code. The structural caveat below still applies, and it is now
+the main thing standing between this and a cache.
 
 ## What would come next
 
@@ -224,10 +247,11 @@ In order, each gated on the one before:
    do.~~ Answered a different way: over-approximate instead of resolving. The
    cache wants the opposite bias from selection, so it does not need the type
    information selection would.
-3. Teach the closure that a method depends on its enclosing type, and resolve
-   `crate::`-prefixed paths to the symbols they name. Both were found by running
-   the audit on a second tree.
-4. Run the audit on more real trees still. Two is not many.
+3. ~~Teach the closure that a method depends on its enclosing type, and resolve
+   `crate::`-prefixed paths to the symbols they name.~~ Done, and both were
+   found by running the audit on a second tree rather than by reasoning.
+4. Run the audit on more real trees still. Two is not many, and each of the two
+   so far produced a finding the other did not.
 5. Find the references the parsers never recorded. This audit cannot: both
    directions read the same edges, so a missing edge is invisible to it. That
    needs a different check, comparing against a real test run.

@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 100 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 103 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -249,10 +249,15 @@ The portable form is a bare `throw`, which is why `throw ` is in the language's
 it depends on, and compares that against what the blast radius selects. Nothing is
 cached and no test is skipped. On this repository 51 of 51 tests produce a usable key
 and nothing disagrees in the direction that would skip a test the selector says must run.
-On a four-file polyglot fixture one pair does: a test method's closure omits the class
-enclosing it, because containment is not a call and nothing records it as an edge. Two
-trees, two answers, so read a zero as "not on this tree" rather than as safe. Two causes
-of unkeyability, needing different fixes. Names from crates outside the tree
+A four-file polyglot fixture disagreed on one pair, which is
+how the two remaining closure gaps were found: a method did not depend on the type
+enclosing it, since containment is not a call, and a `crate::` path was charged to the
+environment as though it named something outside the tree. Both are fixed and both trees
+now report zero, but read that carefully: adding the containment edge moved the closure
+closer to what the blast radius already believed, and the audit measures agreement
+between two readings of one graph. Making one match the other raises agreement without
+establishing that either is right about the code. Two causes of unkeyability, needing
+different fixes. Names from crates outside the tree
 (`anyhow::Result`, `std::path::{Path, PathBuf}`) are now folded into `EnvironmentKey`,
 a digest over lock files, manifests and compiler versions, rather than counting as
 gaps; a `cargo update` or a compiler upgrade moves that digest and invalidates every

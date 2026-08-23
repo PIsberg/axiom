@@ -336,3 +336,122 @@ fn the_audit_counts_both_directions_of_disagreement() {
         ),
     }
 }
+
+/// A method depends on the type that encloses it.
+///
+/// Containment is not a call, so nothing recorded it as an edge and the closure
+/// of a test method did not contain its own class. The blast radius does select
+/// that test when the class changes, correctly, so the two disagreed and a cache
+/// keyed on the closure would have skipped a test whose class had moved.
+///
+/// Found by running the audit on a second tree. It did not appear on the
+/// repository the audit was written in, which is the argument for running it
+/// somewhere else before trusting a zero.
+#[test]
+fn a_method_closure_contains_the_type_that_encloses_it() {
+    let dir = TempDir::new("containment");
+    dir.write(
+        "billing.py",
+        "def compute_total(items):\n\
+         \x20   return sum(items)\n\
+         \n\
+         class BillingTest:\n\
+         \x20   def test_total(self):\n\
+         \x20       assert compute_total([1, 2]) == 3\n",
+    );
+
+    let index = scan(&dir);
+    let closure = index
+        .forward_closure("test_total", AstIndex::CLOSURE_DEPTH)
+        .expect("the test method is indexed");
+
+    assert!(
+        closure
+            .reachable
+            .iter()
+            .any(|r| r.ends_with("::BillingTest")),
+        "the enclosing class must be in the closure, or editing it leaves the \
+         test's key unmoved: {closure:?}"
+    );
+}
+
+/// A `crate::` path names something in this tree, so failing to match one must
+/// not be read as a crate from outside.
+///
+/// `crate::auth::validate_token` was filed as outside and folded into the
+/// environment key. An in-tree dependency covered by the environment is the
+/// unsound direction: editing it would not move the key. It was harmless in the
+/// fixture that found it only because the same test also called the function by
+/// its bare name, and nothing guarantees that.
+#[test]
+fn an_in_crate_path_resolves_here_rather_than_counting_as_outside() {
+    let dir = TempDir::new("cratepath");
+    dir.write(
+        "auth.rs",
+        "pub fn validate_token(token: &str) -> bool { token.len() > 10 }\n",
+    );
+    // The `use` line is the only mention: no bare call to fall back on, which is
+    // the case that was silently unsound.
+    dir.write(
+        "auth_test.rs",
+        "use crate::auth::validate_token;\n\
+         \n\
+         #[test]\n\
+         fn test_uses_only_the_path() {\n\
+         \x20   assert!(true);\n\
+         }\n",
+    );
+
+    let index = scan(&dir);
+    let closure = index
+        .forward_closure("test_uses_only_the_path", AstIndex::CLOSURE_DEPTH)
+        .expect("the test is indexed");
+
+    assert!(
+        !closure
+            .outside
+            .iter()
+            .any(|o| o.contains("crate::auth::validate_token")),
+        "a crate:: path is in this tree and must not be charged to the \
+         environment: {closure:?}"
+    );
+    assert!(
+        closure
+            .reachable
+            .iter()
+            .any(|r| r.ends_with("::validate_token")),
+        "it must resolve to the symbol it names: {closure:?}"
+    );
+}
+
+/// The fallback must not reach further than it should.
+///
+/// Matching any dotted or colonned name by its last segment would let
+/// `anyhow::Result` bind to a local `Result` and stop being covered by the
+/// environment key, which is the same unsoundness pointing the other way. Only
+/// `crate::`, `self::` and `super::` say "in this tree".
+#[test]
+fn an_external_path_is_still_charged_to_the_environment() {
+    let dir = TempDir::new("external");
+    dir.write("result.rs", "pub struct Result {}\n");
+    dir.write(
+        "user.rs",
+        "use anyhow::Result;\n\
+         \n\
+         #[test]\n\
+         fn test_uses_anyhow() {\n\
+         \x20   assert!(true);\n\
+         }\n",
+    );
+
+    let index = scan(&dir);
+    let closure = index
+        .forward_closure("test_uses_anyhow", AstIndex::CLOSURE_DEPTH)
+        .expect("the test is indexed");
+
+    assert!(
+        closure.outside.iter().any(|o| o.contains("anyhow")),
+        "a crate outside the tree must stay outside even when a local symbol \
+         shares its last segment: {closure:?}"
+    );
+}

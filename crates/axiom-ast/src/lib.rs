@@ -2561,6 +2561,23 @@ impl AstIndex {
             let Some(node) = nodes.get(&current) else {
                 continue;
             };
+
+            // A method depends on the type that encloses it. Containment is not
+            // a call, so nothing recorded it as an edge, and the closure of
+            // `BillingTest::test_total` did not contain `BillingTest`. The blast
+            // radius selects that test when the class changes, correctly, so the
+            // two mechanisms disagreed and a cache keyed on the closure would
+            // have skipped a test whose class had moved. Found by running the
+            // audit on a second tree, not on this one.
+            //
+            // Only the immediate owner is added here; a nested type reaches its
+            // own owner when it comes off the queue.
+            if let Some((owner, _)) = current.rsplit_once("::") {
+                if nodes.contains_key(owner) && reachable.insert(owner.to_string()) {
+                    queue.push_back((owner.to_string(), depth + 1));
+                }
+            }
+
             for dependency in &node.dependencies {
                 let name = dependency.trim();
                 if name.is_empty() {
@@ -2606,6 +2623,24 @@ impl AstIndex {
     /// `get_symbol` takes the lock itself, and the closure walk holds it for the
     /// whole traversal, so the lookup is repeated here rather than dropping and
     /// retaking the guard once per edge.
+    /// The remainder of a path that names something inside this tree, if it is
+    /// one.
+    ///
+    /// Rust spells an in-crate path `crate::a::b`, and inside a module also
+    /// `self::b` and `super::b`. All three are statements that the target is
+    /// here, which is exactly what the closure needs to know, and none of them
+    /// can be a crate from outside.
+    fn strip_in_crate_prefix(name: &str) -> Option<&str> {
+        for prefix in ["crate::", "self::", "super::"] {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                // `super::super::x` unwinds to `x` rather than stopping at the
+                // second `super`.
+                return Some(Self::strip_in_crate_prefix(rest).unwrap_or(rest));
+            }
+        }
+        None
+    }
+
     fn resolve_within(nodes: &HashMap<String, AstNode>, name: &str) -> Resolution {
         if nodes.contains_key(name) {
             return Resolution::One(name.to_string());
@@ -2615,6 +2650,32 @@ impl AstIndex {
             .filter(|k| Self::is_suffix_match(k, name))
             .cloned()
             .collect();
+
+        // A `crate::`, `self::` or `super::` path names something in this tree
+        // by definition, so failing to match one must not be read as "outside".
+        //
+        // `crate::auth::validate_token` did exactly that: it matched no key,
+        // because the key is the file path plus the symbol, so it was filed as a
+        // crate outside the tree and folded into the environment digest. An
+        // in-tree dependency covered by the environment key is the unsound
+        // direction, since editing it would not move the key. It was harmless
+        // only where the same test also called the function by its bare name.
+        //
+        // The fallback is restricted to these three prefixes on purpose. Doing
+        // it for any dotted or colonned name would let `anyhow::Result` match a
+        // local `Result` and stop being covered by the environment, which is the
+        // same unsoundness pointing the other way.
+        if matches.is_empty() {
+            if let Some(rest) = Self::strip_in_crate_prefix(name) {
+                let tail = rest.rsplit("::").next().unwrap_or(rest);
+                matches = nodes
+                    .keys()
+                    .filter(|k| Self::is_suffix_match(k, rest) || Self::is_suffix_match(k, tail))
+                    .cloned()
+                    .collect();
+            }
+        }
+
         match matches.len() {
             // Nothing in the index answers to this name at all, which on a real
             // tree usually means a crate outside it.
