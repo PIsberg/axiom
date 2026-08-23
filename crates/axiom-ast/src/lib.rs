@@ -1921,6 +1921,18 @@ impl AstIndex {
         for (line_no, line) in content.lines().enumerate() {
             let braces = counted.get(line_no).copied().unwrap_or("");
             let trimmed = line.trim();
+            // What counts as a declaration is read from the stripped text, not
+            // from the raw line. A repository whose subject is parsing writes
+            // source inside string literals constantly, and matching the raw
+            // line indexed those fixtures: `blast_radius.rs::looks_like_a_pattern`
+            // existed as a symbol because a test writes a Rust fixture as a
+            // string. That is not only a larger index. It made the real
+            // `looks_like_a_pattern` ambiguous, so `axiom symbol` refused a
+            // real function by its real name.
+            //
+            // The raw line is still what gets stored, so a signature keeps the
+            // string a declaration genuinely contains.
+            let decl = braces.trim();
 
             let opens = braces.matches('{').count();
             let closes = braces.matches('}').count();
@@ -1931,24 +1943,18 @@ impl AstIndex {
                 || trimmed.starts_with('*')
                 || trimmed.starts_with("*/"))
             {
-                if let Some(owner) = Self::rust_owner_opened_by(trimmed) {
+                if let Some(owner) = Self::rust_owner_opened_by(decl) {
                     owner_stack.push((owner, depth + opens.max(1)));
-                } else if trimmed.starts_with("use ") {
-                    uses.push(
-                        trimmed
-                            .replace("use ", "")
-                            .replace(';', "")
-                            .trim()
-                            .to_string(),
-                    );
-                } else if trimmed.contains("fn ")
-                    && (trimmed.starts_with("fn ")
-                        || trimmed.starts_with("pub ")
-                        || trimmed.starts_with("async ")
-                        || trimmed.starts_with("pub async ")
-                        || trimmed.starts_with("pub(crate) "))
+                } else if decl.starts_with("use ") {
+                    uses.push(decl.replace("use ", "").replace(';', "").trim().to_string());
+                } else if decl.contains("fn ")
+                    && (decl.starts_with("fn ")
+                        || decl.starts_with("pub ")
+                        || decl.starts_with("async ")
+                        || decl.starts_with("pub async ")
+                        || decl.starts_with("pub(crate) "))
                 {
-                    let name = trimmed
+                    let name = decl
                         .split('(')
                         .next()
                         .unwrap_or("")
@@ -1963,7 +1969,7 @@ impl AstIndex {
                             Some((owner, _)) => format!("{}::{}::{}", file_path, owner, name),
                             None => format!("{}::{}", file_path, name),
                         };
-                        let is_test = name.starts_with("test_") || trimmed.contains("#[test]");
+                        let is_test = name.starts_with("test_") || decl.contains("#[test]");
                         let kind = if is_test { "test" } else { "function" };
 
                         self.index_node_at(
@@ -1975,15 +1981,15 @@ impl AstIndex {
                         );
                         *nodes_count += 1;
                     }
-                } else if trimmed.starts_with("struct ")
-                    || trimmed.starts_with("pub struct ")
-                    || trimmed.starts_with("pub(crate) struct ")
-                    || trimmed.starts_with("enum ")
-                    || trimmed.starts_with("pub enum ")
+                } else if decl.starts_with("struct ")
+                    || decl.starts_with("pub struct ")
+                    || decl.starts_with("pub(crate) struct ")
+                    || decl.starts_with("enum ")
+                    || decl.starts_with("pub enum ")
                 {
-                    let name = trimmed
+                    let name = decl
                         .split_whitespace()
-                        .nth(if trimmed.starts_with("pub ") { 2 } else { 1 })
+                        .nth(if decl.starts_with("pub ") { 2 } else { 1 })
                         .unwrap_or("")
                         .replace(['{', ';'], "")
                         .trim()
@@ -2150,15 +2156,25 @@ impl AstIndex {
     fn parse_ts_js_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let mut imports = Vec::new();
 
+        // What counts as a declaration is read from the stripped text. Matching
+        // the raw line indexed `function ghost()` written inside a string, which
+        // is how a fixture in a test file became a symbol and made a real name
+        // ambiguous. The other parsers already avoided this; TypeScript was the
+        // one that did not. The raw line is still what gets stored, so a
+        // signature keeps any string the declaration genuinely contains.
+        let clean = Self::strip_comments_and_strings(content, true);
+        let stripped: Vec<&str> = clean.lines().collect();
+
         for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("import ") {
+            let decl = stripped.get(line_no).copied().unwrap_or("").trim();
+            if decl.starts_with("import ") {
                 imports.push(trimmed.to_string());
-            } else if trimmed.contains("function ")
-                || trimmed.starts_with("export function ")
-                || trimmed.starts_with("export async function ")
+            } else if decl.contains("function ")
+                || decl.starts_with("export function ")
+                || decl.starts_with("export async function ")
             {
-                let name = trimmed
+                let name = decl
                     .split('(')
                     .next()
                     .unwrap_or("")
@@ -2184,11 +2200,11 @@ impl AstIndex {
                     );
                     *nodes_count += 1;
                 }
-            } else if trimmed.starts_with("class ")
-                || trimmed.starts_with("export class ")
-                || trimmed.starts_with("export default class ")
+            } else if decl.starts_with("class ")
+                || decl.starts_with("export class ")
+                || decl.starts_with("export default class ")
             {
-                let name = trimmed
+                let name = decl
                     .split("class ")
                     .last()
                     .unwrap_or("")
