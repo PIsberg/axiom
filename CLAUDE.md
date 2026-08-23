@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 98 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
+cargo test                            # 100 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -57,7 +57,7 @@ axiom-core  ──► cli            the MCP server: tool schemas and dispatch
 axiom-cli                      clap subcommands, all of which drive AxiomMcpServer
 ```
 
-`axiom-ast/src/lib.rs` is the bulk of the system (~1000 lines) and holds several indexes that must
+`axiom-ast/src/lib.rs` is the bulk of the system (~2,900 lines) and holds several indexes that must
 stay in agreement: `nodes` (symbol to AstNode), `reverse_deps` (symbol to dependents), and the
 supporting `method_return_types` and `clean_file_texts` maps behind accessor inference. Anything
 that inserts into one usually has to update the others.
@@ -66,11 +66,11 @@ The CLI is not a separate code path. Every subcommand constructs an `AxiomMcpSer
 same crates the MCP tools use, so a bug reproduced through `axiom blast-radius` is the same bug an
 agent sees through `axiom_get_blast_radius`.
 
-Six MCP tools, all declared and dispatched in `axiom-core/src/mcp.rs`: `axiom_query_symbol`,
+Seven MCP tools, all declared and dispatched in `axiom-core/src/mcp.rs`: `axiom_query_symbol`,
 `axiom_get_blast_radius`, `axiom_eval_patch`, `axiom_apply_mutation`, `axiom_attest_commit`,
-`axiom_search_regex`. The tool list in `handle_request` and the dispatch `match` below it are two
-places that must be edited together; a tool declared but not dispatched fails at call time, not at
-startup.
+`axiom_record_verification`, `axiom_search_regex`. The tool list in `handle_request` and the
+dispatch `match` below it are two places that must be edited together; a tool declared but not
+dispatched fails at call time, not at startup.
 
 Language dispatch is by file extension in `parse_file_content`: Java (shared with Kotlin and Scala),
 Rust, Python, TypeScript/JavaScript, and Go each have their own line parser.
@@ -82,10 +82,17 @@ directories looking for `.axiom/index.json`. The MCP server inherits its client'
 which is the agent's project, not this repo. A server that appears to know nothing about the
 codebase is usually one started somewhere with no index above it.
 
-**An empty index seeds two demo nodes.** `AxiomMcpServer::new` inserts
-`auth::service::validate_token` and `test_auth_validation` when the index is empty, which makes a
-fresh server *look* functional. When verifying real behaviour, read `total_symbols_in_index` in the
-response: a 2 means you are talking to the seed, not to a scanned repository.
+**Seeding is asked for, not automatic, and the check this section used to name is gone.**
+`AxiomMcpServer::new` once inserted `auth::service::validate_token` and `test_auth_validation`
+whenever the index was empty, which made a workspace nobody had scanned answer confidently about a
+symbol in no real codebase. That is now `seed_demo_workspace`, called only by `axiom demo`, so a
+server with no index above it answers nothing rather than answering a fixture.
+
+The advice that replaced it was to read `total_symbols_in_index` in the response. No such field
+exists, in this or any earlier version reachable from here; `axiom_query_symbol` returns
+`dependencies`, `docstring`, `hash`, `id`, `kind`, `signature`, `source_range` and `symbol_path`.
+To tell a real index from an empty one, run `axiom scan` and read the symbol count it prints, or
+look for `.axiom/index.json` above the working directory.
 
 **The parsers are line-based heuristics, not ASTs.** `parse_java_content` and its siblings walk
 lines and match on shape. That approach has already produced: javadoc lines containing the words
@@ -240,9 +247,12 @@ The portable form is a bare `throw`, which is why `throw ` is in the language's
 **The verdict cache is measured, not built, and the measurement says do not build it.**
 `axiom cache-audit` reads the same graph in the forward direction, from a test to what
 it depends on, and compares that against what the blast radius selects. Nothing is
-cached and no test is skipped. On this repository 51 of 51 tests produce a usable key,
-and 0 symbol/test pairs disagree in the direction that would skip a test the selector
-says must run. Two causes, needing different fixes. Names from crates outside the tree
+cached and no test is skipped. On this repository 51 of 51 tests produce a usable key
+and nothing disagrees in the direction that would skip a test the selector says must run.
+On a four-file polyglot fixture one pair does: a test method's closure omits the class
+enclosing it, because containment is not a call and nothing records it as an edge. Two
+trees, two answers, so read a zero as "not on this tree" rather than as safe. Two causes
+of unkeyability, needing different fixes. Names from crates outside the tree
 (`anyhow::Result`, `std::path::{Path, PathBuf}`) are now folded into `EnvironmentKey`,
 a digest over lock files, manifests and compiler versions, rather than counting as
 gaps; a `cargo update` or a compiler upgrade moves that digest and invalidates every
