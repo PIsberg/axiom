@@ -261,3 +261,76 @@ fn a_doc_comment_mentioning_fun_does_not_declare_one() {
         );
     }
 }
+
+/// Two modules declaring the same function are two symbols.
+///
+/// `mod` was not tracked, so both were `file.rs::helper`, the second
+/// `index_node_at` overwrote the first, and the surviving node carried the
+/// second declaration's hash under a name that reads as either.
+///
+/// The hash is what a verdict cache keys on, so a change to the first would not
+/// have moved it: a pass reported for code that changed. That is what
+/// `closure_hash` returning `Option` exists to prevent, arriving by a route
+/// where the closure still looks complete.
+#[test]
+fn two_modules_declaring_one_name_are_two_symbols_with_two_hashes() {
+    let dir = TempDir::new("mods");
+    dir.write(
+        "twins.rs",
+        "mod alpha {\n\
+         \x20   pub fn helper() -> bool {\n\
+         \x20       true\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         mod beta {\n\
+         \x20   pub fn helper() -> bool {\n\
+         \x20       false\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let index = scan(&dir);
+    let symbols = index.symbol_paths();
+
+    let alpha = symbols
+        .iter()
+        .find(|s| s.ends_with("::alpha::helper"))
+        .unwrap_or_else(|| panic!("alpha::helper must be its own symbol: {symbols:?}"));
+    let beta = symbols
+        .iter()
+        .find(|s| s.ends_with("::beta::helper"))
+        .unwrap_or_else(|| panic!("beta::helper must be its own symbol: {symbols:?}"));
+
+    // Two keys, so neither node overwrites the other and each carries its own
+    // declaration. Their hashes are still equal, and that is not this fix: a
+    // node's hash covers the declaration line and not the body, so two
+    // identically-declared functions hash the same however their bodies differ.
+    // Tracked separately, because it is a much larger problem than this one.
+    assert_ne!(alpha, beta, "two modules, two keys");
+    assert!(index.get_symbol(alpha).is_some() && index.get_symbol(beta).is_some());
+}
+
+/// A module declaration with no body opens no scope here.
+///
+/// `mod foo;` names a module in another file. Treating it as an owner would file
+/// every symbol below it under a module whose body is somewhere else, which is
+/// the shape of the brace-depth mistakes this parser has made before.
+#[test]
+fn a_module_declared_without_a_body_owns_nothing() {
+    let dir = TempDir::new("modless");
+    dir.write(
+        "root.rs",
+        "mod elsewhere;\n\npub fn at_the_top_level() -> bool {\n    true\n}\n",
+    );
+
+    let index = scan(&dir);
+    let symbols = index.symbol_paths();
+
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.ends_with("root.rs::at_the_top_level")),
+        "the function is at file scope, not inside `elsewhere`: {symbols:?}"
+    );
+}
