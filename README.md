@@ -1,5 +1,15 @@
 # AXIOM: The Agent-Native Autonomous Software Engine
 
+[![CI](https://github.com/PIsberg/axiom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PIsberg/axiom/actions/workflows/ci.yml)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
+[![Commercial use: separate licence](https://img.shields.io/badge/commercial%20use-separate%20licence-orange)](https://deversity.se/pricing.html)
+[![Rust 2021 edition](https://img.shields.io/badge/rust-2021%20edition-b7410e)](Cargo.toml)
+[![Tested on Linux and Windows](https://img.shields.io/badge/tested-linux%20%7C%20windows-lightgrey)](.github/workflows/ci.yml)
+
+**Source-available, not open source.** Any noncommercial use is permitted;
+commercial use needs a separate licence. The badge is not the whole story and the
+distinction matters, so the terms are set out once, in [License](#-license).
+
 > **Replace passive, text-oriented version control (Git) and 10-minute CI/CD pipelines with an active, executable Merkle AST graph and an in-process sandbox, purpose-built for autonomous AI coding agents.**
 
 ---
