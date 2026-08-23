@@ -2269,20 +2269,90 @@ impl AstIndex {
         }
     }
 
+    /// The receiver type and the method name on a Go `func` line.
+    ///
+    /// `func (a *Alpha) Search(q string) bool` is a method on `Alpha`. Taking
+    /// everything before the first `(` as the name gives the empty string here,
+    /// which is why methods were skipped entirely and a Go codebase held
+    /// package-level free functions and nothing else.
+    fn go_receiver_and_name(after_func: &str) -> (Option<String>, String) {
+        let rest = after_func.trim_start();
+        let Some(inner) = rest.strip_prefix('(') else {
+            let name = rest.split('(').next().unwrap_or("").trim().to_string();
+            return (None, name);
+        };
+
+        let Some(end) = inner.find(')') else {
+            return (None, String::new());
+        };
+        // `a *Alpha` or `Alpha`: the type is the last word, and a pointer
+        // receiver is the same type as a value one.
+        let receiver = inner[..end]
+            .split_whitespace()
+            .next_back()
+            .unwrap_or("")
+            .trim_start_matches('*')
+            .to_string();
+        let name = inner[end + 1..]
+            .split('(')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let owner = Self::is_valid_identifier(&receiver).then_some(receiver);
+        (owner, name)
+    }
+
     fn parse_go_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
+        // Declarations are read from the stripped text for the same reason as
+        // every other parser: source written inside a string is not a
+        // declaration.
+        let clean = Self::strip_comments_and_strings(content, false);
+        let stripped: Vec<&str> = clean.lines().collect();
+
         for (line_no, line) in content.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("func ") {
-                let sig = trimmed.replace("func ", "");
-                let name = sig.split('(').next().unwrap_or("").trim().to_string();
-                if !name.is_empty() {
-                    let symbol = format!("{}::{}", file_path, name);
-                    let is_test = name.starts_with("Test");
-                    let kind = if is_test { "test" } else { "function" };
+            let decl = stripped.get(line_no).copied().unwrap_or("").trim();
 
-                    self.index_node_at(&symbol, kind, trimmed, vec![], Some((line_no, line_no)));
-                    *nodes_count += 1;
+            if let Some(after_func) = decl.strip_prefix("func ") {
+                let (owner, name) = Self::go_receiver_and_name(after_func);
+                if !Self::is_valid_identifier(&name) {
+                    continue;
                 }
+                let symbol = match &owner {
+                    Some(recv) => format!("{file_path}::{recv}::{name}"),
+                    None => format!("{file_path}::{name}"),
+                };
+                // Go's convention, and what `go test` runs.
+                let kind = if name.starts_with("Test") {
+                    "test"
+                } else {
+                    "function"
+                };
+                self.index_node_at(&symbol, kind, trimmed, vec![], Some((line_no, line_no)));
+                *nodes_count += 1;
+            } else if let Some(after_type) = decl.strip_prefix("type ") {
+                // `type Alpha struct {` and `type Reader interface {`. A type
+                // alias, `type Meters float64`, is a declaration too and is
+                // indexed as one rather than being dropped for lacking a
+                // keyword.
+                let mut words = after_type.split_whitespace();
+                let Some(name) = words.next() else {
+                    continue;
+                };
+                let name = name.trim_end_matches('{').trim();
+                if !Self::is_valid_identifier(name) {
+                    continue;
+                }
+                let kind = match words.next() {
+                    Some(w) if w.starts_with("interface") => "interface",
+                    Some(w) if w.starts_with("struct") => "struct",
+                    _ => "type",
+                };
+                let symbol = format!("{file_path}::{name}");
+                self.index_node_at(&symbol, kind, trimmed, vec![], Some((line_no, line_no)));
+                *nodes_count += 1;
             }
         }
     }
