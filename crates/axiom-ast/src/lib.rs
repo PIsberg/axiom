@@ -1270,12 +1270,24 @@ impl AstIndex {
             if path.is_dir() {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 // Skip hidden folders and build directories
-                if !dir_name.starts_with('.')
-                    && dir_name != "target"
-                    && dir_name != "node_modules"
-                    && dir_name != "build"
-                    && dir_name != "dist"
-                {
+                // Directories whose contents are dependencies or build output,
+                // not the codebase under study. Indexing them buries the real
+                // symbols and fills the trigram store with vendored source.
+                // Hidden directories are skipped too, `.git` among them.
+                const SKIP: &[&str] = &[
+                    "target",
+                    "node_modules",
+                    "build",
+                    "dist",
+                    "vendor",
+                    "venv",
+                    ".venv",
+                    "__pycache__",
+                    ".mypy_cache",
+                    ".pytest_cache",
+                    ".gradle",
+                ];
+                if !dir_name.starts_with('.') && !SKIP.contains(&dir_name) {
                     self.walk_dir(&path, root, root_key, files_count, nodes_count, visited)?;
                 }
             } else if path.is_file() {
@@ -2681,9 +2693,21 @@ impl AstIndex {
 }
 
 /// Zoekt Trigram-based In-Memory Search Engine
+///
+/// A posting is a path id, not the path string. `add_document` used to insert
+/// `path.to_string()` into a set once per trigram, which is once per byte of
+/// the file: a megabyte of source meant a million path allocations, paid again
+/// on every server start, because the trigram index is rebuilt from the source
+/// on load. The path is interned to a `u32` once and the postings hold that.
 pub struct ZoektIndex {
-    files: HashMap<String, String>,
-    trigrams: HashMap<[u8; 3], HashSet<String>>,
+    /// Interned path for each id, indexed by the id.
+    paths: Vec<String>,
+    /// The id assigned to each path.
+    path_ids: HashMap<String, u32>,
+    /// The source of each path, kept for reading the matching line back out.
+    contents: HashMap<u32, String>,
+    /// Trigram to the ids of the documents that contain it.
+    trigrams: HashMap<[u8; 3], HashSet<u32>>,
 }
 
 impl Default for ZoektIndex {
@@ -2695,21 +2719,33 @@ impl Default for ZoektIndex {
 impl ZoektIndex {
     pub fn new() -> Self {
         Self {
-            files: HashMap::new(),
+            paths: Vec::new(),
+            path_ids: HashMap::new(),
+            contents: HashMap::new(),
             trigrams: HashMap::new(),
         }
     }
 
+    /// The id for a path, assigning one the first time it is seen.
+    fn intern(&mut self, path: &str) -> u32 {
+        if let Some(id) = self.path_ids.get(path) {
+            return *id;
+        }
+        let id = self.paths.len() as u32;
+        self.paths.push(path.to_string());
+        self.path_ids.insert(path.to_string(), id);
+        id
+    }
+
     pub fn add_document(&mut self, path: &str, content: &str) {
-        self.files.insert(path.to_string(), content.to_string());
+        let id = self.intern(path);
+        self.contents.insert(id, content.to_string());
         let bytes = content.as_bytes();
         if bytes.len() >= 3 {
             for i in 0..bytes.len() - 2 {
                 let tri = [bytes[i], bytes[i + 1], bytes[i + 2]];
-                self.trigrams
-                    .entry(tri)
-                    .or_default()
-                    .insert(path.to_string());
+                // `id` is a Copy u32, so this inserts no allocation per byte.
+                self.trigrams.entry(tri).or_default().insert(id);
             }
         }
     }
@@ -2726,31 +2762,31 @@ impl ZoektIndex {
         // Trigram prefiltering only holds for a literal query: the trigrams of a
         // pattern are not text that appears in any file. A regex search scans
         // every document instead, trading speed for not missing matches.
-        let candidates: Vec<&String> = if compiled.is_some() {
-            self.files.keys().collect()
+        let all_ids = || -> Vec<u32> { (0..self.paths.len() as u32).collect() };
+        let candidates: Vec<u32> = if compiled.is_some() {
+            all_ids()
         } else if query_bytes.len() >= 3 {
-            let mut candidate_set: Option<HashSet<String>> = None;
+            let mut candidate_set: Option<HashSet<u32>> = None;
             for i in 0..query_bytes.len() - 2 {
                 let tri = [query_bytes[i], query_bytes[i + 1], query_bytes[i + 2]];
                 if let Some(set) = self.trigrams.get(&tri) {
                     if let Some(ref mut c) = candidate_set {
-                        *c = c.intersection(set).cloned().collect();
+                        *c = c.intersection(set).copied().collect();
                     } else {
                         candidate_set = Some(set.clone());
                     }
                 }
             }
-            if let Some(c) = candidate_set {
-                self.files.keys().filter(|k| c.contains(*k)).collect()
-            } else {
-                self.files.keys().collect()
+            match candidate_set {
+                Some(c) => c.into_iter().collect(),
+                None => all_ids(),
             }
         } else {
-            self.files.keys().collect()
+            all_ids()
         };
 
-        for path in candidates {
-            if let Some(content) = self.files.get(path) {
+        for id in candidates {
+            if let Some(content) = self.contents.get(&id) {
                 for (line_no, line) in content.lines().enumerate() {
                     let hit = match compiled {
                         Some(re) => re.is_match(line),
@@ -2759,7 +2795,7 @@ impl ZoektIndex {
                     if hit {
                         matches.push(ZoektMatch {
                             match_kind: "text".to_string(),
-                            file_path: path.clone(),
+                            file_path: self.paths[id as usize].clone(),
                             line_number: Some(line_no + 1),
                             line_content: line.trim().to_string(),
                         });

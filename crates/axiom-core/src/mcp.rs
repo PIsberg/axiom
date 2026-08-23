@@ -42,6 +42,30 @@ pub const UNATTRIBUTED: &str = "unattributed";
 /// than truncated at each of those.
 const MAX_AGENT_IDENTITY: usize = 128;
 
+/// What an agent is meant to do with these tools, and in what order. Returned
+/// from `initialize`, which is where MCP expects a server to say so.
+const INSTRUCTIONS: &str = "\
+Axiom indexes a codebase into a symbol graph and answers queries against it. The \
+index is a snapshot from `axiom scan`; it does not track edits made since, so a \
+result reflects the code as last scanned.
+
+A change to one symbol is checked like this:
+1. axiom_query_symbol to read a symbol, its signature and its dependencies. A \
+short name that matches several symbols comes back as candidates, not a guess.
+2. axiom_get_blast_radius to list the tests that reach the symbol, so only those \
+need running. An empty list means none were found in the index, not that nothing \
+is affected.
+3. axiom_eval_patch to compile and run a snippet in the language of the symbol's \
+file. It never returns PASSED for something that did not run, and the snippet \
+runs with a confined environment.
+4. Either attest against that run, or run the project's own tests and report the \
+outcome with axiom_record_verification, then axiom_attest_commit. A record is \
+only issued for a check that happened and passed, and says whether axiom ran it \
+or an agent reported it.
+
+axiom_apply_mutation records a Tree-CRDT change, and axiom_search_regex searches \
+source text.";
+
 /// The identity a caller asked to be recorded as, or an error naming the field.
 ///
 /// Self-declared and unverified: axiom stores what it is told. That is honest
@@ -486,7 +510,13 @@ impl AxiomMcpServer {
                     },
                     "capabilities": {
                         "tools": {}
-                    }
+                    },
+                    // The loop these tools are for, in the field MCP provides so
+                    // a client can put it in front of the model without the
+                    // agent having to discover the order by trial. The index is
+                    // a snapshot taken by `axiom scan`; a change on disk since
+                    // then is not reflected until the next scan.
+                    "instructions": INSTRUCTIONS
                 })),
                 error: None,
             },
