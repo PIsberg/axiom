@@ -66,11 +66,19 @@ The CLI is not a separate code path. Every subcommand constructs an `AxiomMcpSer
 same crates the MCP tools use, so a bug reproduced through `axiom blast-radius` is the same bug an
 agent sees through `axiom_get_blast_radius`.
 
-Seven MCP tools, all declared and dispatched in `axiom-core/src/mcp.rs`: `axiom_query_symbol`,
+Eight MCP tools, all declared and dispatched in `axiom-core/src/mcp.rs`: `axiom_query_symbol`,
 `axiom_get_blast_radius`, `axiom_eval_patch`, `axiom_apply_mutation`, `axiom_attest_commit`,
-`axiom_record_verification`, `axiom_search_regex`. The tool list in `handle_request` and the
-dispatch `match` below it are two places that must be edited together; a tool declared but not
-dispatched fails at call time, not at startup.
+`axiom_record_verification`, `axiom_search_regex`, `axiom_run_tests`. The tool list in
+`handle_request` and the dispatch `match` below it are two places that must be edited together; a
+tool declared but not dispatched fails at call time, not at startup, and
+`declared_tools_are_dispatched.rs` pins the set so the count here cannot drift.
+
+`axiom_run_tests` runs the project's own test command in the workspace and records the outcome as a
+third verification kind, `executed`: axiom ran it and saw the exit code, so it can vouch for it,
+between `sandbox` (axiom's own evaluator ran it) and `reported` (an agent says it ran something).
+The command runs with the confined environment `run_with_timeout` gives every evaluation, so it
+cannot read the signing key, and is killed as a whole process tree past `AXIOM_TEST_TIMEOUT_SECS`
+(default 600, separate from the evaluator's).
 
 Language dispatch is by file extension in `parse_file_content`: Java (shared with Kotlin and Scala),
 Rust, Python, TypeScript/JavaScript, and Go each have their own line parser.
@@ -211,6 +219,25 @@ not in any fixture. The apostrophe means a string rather than a character in Pyt
 JavaScript and TypeScript, so the caller says which language is being read: a closing
 apostrophe is required for a char literal and optional for a string that ends its line.
 Without that, `'sensitive_thing() is not called here'` was a call.
+
+**Symbol keys are relative to the scan root, so the index and its Merkle root are the same on any
+machine.** `key_under_root` returns the path below the scanned root with forward slashes and no
+absolute prefix, so a Rust symbol is `crates/axiom-ast/src/lib.rs::AstIndex`, not
+`C:/dev/.../lib.rs::AstIndex`. That is what makes the index committable and a ledger's
+`commit_merkle_root` comparable across machines; `keys_are_portable.rs` pins that the same source
+under two directories indexes identically. The filesystem still needs the absolute path, so the
+scan root is kept in `scan_root`, the per-file root in `file_roots` (one index can hold two subtrees
+scanned separately), and re-derived on load from the index's own location, the parent of its
+`.axiom`, so a repository that moved still resolves. `file_of_symbol` joins it back on and returns an
+absolute path, which is the one accessor that reaches a real file; a test that read the key prefix as
+a path directly had to move to `file_of_symbol`.
+
+**`forget_file` only deletes a symbol it still exclusively owns.** Two files can carry one key, a
+package-keyed Java class of the same name among them, so purging a stale file must not delete a
+symbol another file still declares. It checks `symbol_to_file` for the current owner before removing
+a node. This was an intermittent parallel failure of the full end-to-end loop: a stale entry in a
+shared index, left by one test and re-declared by another, deleted the live symbol when purged.
+`forget_keeps_shared_symbols.rs` pins it.
 
 **A symbol's short name is not its last dot-separated segment.** `simple_name_of` distinguishes a
 package-keyed symbol, `pkg.Class::method` to `Class`, from a file-keyed one,

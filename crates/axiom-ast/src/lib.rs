@@ -1,8 +1,22 @@
 use axiom_proto::AstNode;
+use rayon::prelude::*;
 use regex::Regex;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+
+thread_local! {
+    /// The file the calling thread is currently parsing, so `index_node_at`
+    /// attributes a symbol to it whichever parser produced the symbol.
+    ///
+    /// A thread-local rather than a field, because the walk parses files in
+    /// parallel: a single shared "current file" would be whatever file some
+    /// other worker happened to set last, so a symbol from one file would be
+    /// filed under another. Each worker sets its own for the duration of one
+    /// file.
+    static PARSING_FILE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// Hold an exclusive lock beside the index while it is read and rewritten.
 ///
@@ -17,6 +31,11 @@ use std::sync::RwLock;
 pub struct IndexLock {
     path: PathBuf,
     token: String,
+    /// Set on drop to stop the heartbeat, which then exits at its next tick.
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The heartbeat thread, joined on drop so it cannot touch the lock file
+    /// after the lock is released.
+    heartbeat: Option<std::thread::JoinHandle<()>>,
 }
 
 impl IndexLock {
@@ -29,8 +48,60 @@ impl IndexLock {
     /// agent for half a minute per operation after a single crash.
     const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
+    /// How often a held lock refreshes its own mtime, well under `STALE_AFTER`
+    /// so several refreshes fall inside one staleness window.
+    ///
+    /// Without this a write that runs longer than `STALE_AFTER`, a large index
+    /// save under contention, left the lock untouched, so a live writer looked
+    /// like a crashed one and another agent took the lock over mid-write. The
+    /// heartbeat means an aged mtime is evidence the holder is really gone.
+    const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
+
     /// How long to keep waiting for a live holder before giving up.
     const GIVE_UP_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Start the heartbeat that keeps a held lock's mtime fresh. It refreshes
+    /// only while the file still holds our token: if another agent judged us
+    /// stale and took over, the heartbeat stops rather than stamping on their
+    /// lock.
+    fn start_heartbeat(
+        path: PathBuf,
+        token: String,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let handle = std::thread::spawn(move || {
+            loop {
+                // Sleep in small steps so a drop is noticed promptly rather than
+                // after a full interval.
+                let mut waited = std::time::Duration::ZERO;
+                while waited < Self::HEARTBEAT {
+                    if stop_thread.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    waited += std::time::Duration::from_millis(50);
+                }
+                if stop_thread.load(Ordering::Relaxed) {
+                    return;
+                }
+                // Refresh only if the lock is still ours. Rewriting the token
+                // updates the mtime; if the file is gone or holds someone
+                // else's token, stop.
+                match std::fs::read_to_string(&path) {
+                    Ok(found) if found == token => {
+                        let _ = std::fs::write(&path, token.as_bytes());
+                    }
+                    _ => return,
+                }
+            }
+        });
+        (stop, handle)
+    }
 
     pub fn acquire(index_path: &Path) -> std::io::Result<Self> {
         let path = index_path.with_extension("lock");
@@ -61,7 +132,15 @@ impl IndexLock {
                     // Confirm the lock still says what we wrote. If another agent
                     // judged ours stale and replaced it, we do not hold it.
                     match std::fs::read_to_string(&path) {
-                        Ok(found) if found == token => return Ok(Self { path, token }),
+                        Ok(found) if found == token => {
+                            let (stop, handle) = Self::start_heartbeat(path.clone(), token.clone());
+                            return Ok(Self {
+                                path,
+                                token,
+                                stop,
+                                heartbeat: Some(handle),
+                            });
+                        }
                         _ => continue,
                     }
                 }
@@ -111,6 +190,13 @@ impl IndexLock {
 
 impl Drop for IndexLock {
     fn drop(&mut self) {
+        // Stop the heartbeat and wait for it to exit before touching the file,
+        // or a late refresh could recreate the lock just after it is removed.
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.heartbeat.take() {
+            let _ = handle.join();
+        }
+
         // Only remove the lock if it is still ours. If another agent judged it
         // stale and took over, deleting it here would release that agent's lock
         // rather than our own.
@@ -255,14 +341,35 @@ pub struct AstIndex {
     /// removals are recorded and subtracted from the merge.
     forgotten_symbols: RwLock<HashSet<String>>,
     forgotten_files: RwLock<HashSet<String>>,
-    /// The file currently being parsed, so every symbol it produces is attributed
-    /// to it whichever language parser produced it.
+    /// The absolute directory the relative keys are resolved against, for the
+    /// most recent scan and as the fallback for a file with no recorded root.
     ///
-    /// Recording this inside each parser meant only the Java one did, so a
-    /// deleted .rs or .py file left its symbols behind for ever: the purge works
-    /// by looking up what a file owned, and for those languages the answer was
-    /// always nothing.
-    parsing_file: RwLock<Option<String>>,
+    /// Symbol keys and the file-path maps are stored relative to the scan root,
+    /// so the index and the Merkle root over it are the same on any machine:
+    /// `crates/axiom-ast/src/lib.rs::AstIndex`, not `C:/dev/.../lib.rs::AstIndex`.
+    /// That is what lets the index be committed and a ledger's root be compared
+    /// across machines. The filesystem still needs the absolute path, so this
+    /// holds the root a relative key is joined onto: set from the scanned path
+    /// on a scan, and re-derived from where the index lives on a load, so a
+    /// repository that moved still resolves.
+    scan_root: RwLock<Option<PathBuf>>,
+    /// The absolute root each file was scanned under.
+    ///
+    /// One index can hold two disjoint subtrees, scanned separately: their keys
+    /// are each relative to their own scan root, so a file resolves and is
+    /// purged against the root it came from, not whichever scan ran last. On a
+    /// load the whole index shares one root, the workspace, so this maps every
+    /// file to it. Not persisted; rebuilt on load.
+    file_roots: RwLock<HashMap<String, PathBuf>>,
+    /// The file each symbol was indexed from, the inverse of `file_to_symbols`.
+    ///
+    /// `file_of_symbol` and `language_of_symbol` are asked on every eval, and
+    /// answered them by scanning every file's symbol list; this maps a symbol to
+    /// its file directly. Maintained at the one attribution point in
+    /// `index_node_at` and cleared for a symbol in `forget_file`, so it cannot
+    /// hold a stale file for a symbol that has moved or gone. Rebuilt from
+    /// `file_to_symbols` on load; not persisted, since it is derivable.
+    symbol_to_file: RwLock<HashMap<String, String>>,
     /// The lines each symbol was declared on, used to attribute a call site to
     /// the function it sits inside rather than to the whole file.
     ///
@@ -302,7 +409,9 @@ impl AstIndex {
             file_to_symbols: RwLock::new(HashMap::new()),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
-            parsing_file: RwLock::new(None),
+            scan_root: RwLock::new(None),
+            file_roots: RwLock::new(HashMap::new()),
+            symbol_to_file: RwLock::new(HashMap::new()),
             symbol_lines: RwLock::new(HashMap::new()),
             pending_refs: RwLock::new(HashMap::new()),
         }
@@ -447,12 +556,16 @@ impl AstIndex {
 
         // Attribution happens here rather than in each parser, so a language
         // added later cannot forget to do it.
-        if let Some(file) = self.parsing_file.read().unwrap().as_ref() {
+        if let Some(file) = PARSING_FILE.with(|f| f.borrow().clone()).as_ref() {
             let mut owned = self.file_to_symbols.write().unwrap();
             let entry = owned.entry(file.clone()).or_default();
             if !entry.iter().any(|s| s == symbol) {
                 entry.push(symbol.to_string());
             }
+            self.symbol_to_file
+                .write()
+                .unwrap()
+                .insert(symbol.to_string(), file.clone());
         }
 
         node
@@ -668,13 +781,41 @@ impl AstIndex {
     /// really breaks when it changes.
     pub fn file_of_symbol(&self, symbol_path: &str) -> Option<String> {
         let canonical = self.get_symbol(symbol_path)?.symbol_path;
-        let file_syms = self.file_to_symbols.read().unwrap();
-        for (file, symbols) in file_syms.iter() {
-            if symbols.iter().any(|s| s == &canonical) {
-                return Some(file.clone());
-            }
+        // Direct, not a scan of every file's symbol list. `symbol_to_file` is
+        // the maintained inverse of `file_to_symbols`.
+        let rel = self
+            .symbol_to_file
+            .read()
+            .unwrap()
+            .get(&canonical)
+            .cloned()?;
+        // The stored path is relative to the scan root; callers open it, so the
+        // absolute path is returned by joining the root back on. This is the
+        // one accessor that resolves a key to a real file, so it is the one
+        // place the join lives.
+        Some(self.resolve_path(&rel))
+    }
+
+    /// Join a stored, root-relative file path back onto the scan root, giving an
+    /// absolute path a caller can open. An already-absolute path, or a missing
+    /// scan root, is returned unchanged.
+    pub fn resolve_path(&self, file_path: &str) -> String {
+        if Path::new(file_path).is_absolute() {
+            return file_path.to_string();
         }
-        None
+        // The file's own scan root first, then the last scan's root as a
+        // fallback, then the key unchanged when nothing is known.
+        let root = self
+            .file_roots
+            .read()
+            .unwrap()
+            .get(file_path)
+            .cloned()
+            .or_else(|| self.scan_root.read().unwrap().clone());
+        match root {
+            Some(root) => root.join(file_path).to_string_lossy().replace('\\', "/"),
+            None => file_path.to_string(),
+        }
     }
 
     /// Every test symbol in the index, sorted.
@@ -691,15 +832,15 @@ impl AstIndex {
 
     pub fn language_of_symbol(&self, symbol_path: &str) -> Option<String> {
         let canonical = self.get_symbol(symbol_path)?.symbol_path;
-        let file_syms = self.file_to_symbols.read().unwrap();
-        for (file, symbols) in file_syms.iter() {
-            if symbols.iter().any(|s| s == &canonical) {
-                return Path::new(file)
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_string());
-            }
-        }
-        None
+        let file = self
+            .symbol_to_file
+            .read()
+            .unwrap()
+            .get(&canonical)
+            .cloned()?;
+        Path::new(&file)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
     }
 
     /// A cheap summary of every source file under `root`: path, size and
@@ -987,29 +1128,51 @@ impl AstIndex {
 
     /// Recursively scan and parse a real repository directory into the Merkle AST CAS
     pub fn scan_directory(&self, root: &Path) -> std::io::Result<ScanSummary> {
-        let mut files_scanned = 0;
-        let mut nodes_extracted = 0;
         let mut visited: HashSet<String> = HashSet::new();
 
-        // Resolve the root once. Canonicalising every file instead costs a
-        // filesystem round trip per entry, measured at 24ms/file against
-        // 3.2ms/file over a 459-file tree.
-        let root_key = Self::canonical_key(root);
-        self.walk_dir(
-            root,
-            root,
-            &root_key,
-            &mut files_scanned,
-            &mut nodes_extracted,
-            &mut visited,
-        )?;
+        // The absolute root the relative keys are resolved against. Symbol keys
+        // are stored relative to it, so joining it back on is the only place the
+        // filesystem sees an absolute path.
+        let abs_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        *self.scan_root.write().unwrap() = Some(abs_root.clone());
+
+        // Collect the files first, sequentially: reading the tree, dropping what
+        // each file contributed last time, and adding it to the trigram store.
+        // These touch shared state and are cheap; the parse that follows is the
+        // expensive part and is done in parallel.
+        let mut files: Vec<(String, String, String)> = Vec::new();
+        self.walk_dir(root, root, &mut files, &mut visited)?;
+        let files_scanned = files.len();
+
+        // Record which root each file was scanned under, so a later scan of a
+        // different subtree resolves and purges this one against its own root.
+        {
+            let mut roots = self.file_roots.write().unwrap();
+            for (rel, _, _) in &files {
+                roots.insert(rel.clone(), abs_root.clone());
+            }
+        }
+
+        // Parse in parallel. Every symbol carries its file in its key, and the
+        // current-file attribution is a thread-local, so two files parsed at
+        // once do not cross. Each file counts its own nodes; the counts are
+        // summed. Everything a parser writes goes through an RwLock, and the
+        // reference resolution that needs the whole tree runs afterwards.
+        let nodes_extracted: usize = files
+            .par_iter()
+            .map(|(rel, ext, content)| {
+                let mut n = 0;
+                self.parse_file_content(rel, ext, content, &mut n);
+                n
+            })
+            .sum();
 
         // A scan is a statement about what the tree contains now, so anything
         // recorded from a file that has since disappeared has to go. Without
         // this the index only ever grows: a deleted class stays answerable and
         // a renamed method keeps its old name alongside the new one, and the
         // blast radius then names tests that no longer exist.
-        self.forget_missing_files(&root_key, &visited);
+        self.forget_missing_files(&abs_root, &visited);
         self.rebuild_reverse_deps();
 
         // Only now, with every file read, can a reference be matched against
@@ -1024,25 +1187,19 @@ impl AstIndex {
         })
     }
 
-    /// One canonical spelling for a file, so the same file scanned as "." and as
-    /// an absolute root produces the same key. Without this the index holds two
-    /// records for one file, and a purge keyed on the root prefix matches
-    /// neither.
-    /// A file's key, built by appending its path below the walk root to the
-    /// already-resolved root. Equivalent to canonicalising the file, without
-    /// asking the filesystem again for every entry.
-    fn key_under_root(root: &Path, root_key: &str, path: &Path) -> String {
+    /// A file's key: its path below the walk root, with forward slashes and no
+    /// absolute prefix, so the key is the same on any machine.
+    ///
+    /// It used to be the absolute root followed by the relative path, which
+    /// baked one machine's filesystem into every symbol and into the Merkle
+    /// root over them. The absolute root is kept once, in `scan_root`, and
+    /// joined back on only where the filesystem is actually touched.
+    fn key_under_root(root: &Path, path: &Path) -> String {
         match path.strip_prefix(root) {
-            Ok(rest) => {
-                let rest = rest.to_string_lossy().replace('\\', "/");
-                if rest.is_empty() {
-                    root_key.to_string()
-                } else {
-                    format!("{}/{}", root_key, rest)
-                }
-            }
+            Ok(rest) => rest.to_string_lossy().replace('\\', "/"),
             // Not below the root, which the walk should make impossible; fall
-            // back to resolving the file itself rather than inventing a key.
+            // back to the file's own absolute spelling rather than inventing a
+            // key. Rare enough that a non-portable key here is acceptable.
             Err(_) => Self::canonical_key(path),
         }
     }
@@ -1061,6 +1218,7 @@ impl AstIndex {
         let previous = self.file_to_symbols.write().unwrap().remove(file_path);
         self.file_call_names.write().unwrap().remove(file_path);
         self.pending_refs.write().unwrap().remove(file_path);
+        self.file_roots.write().unwrap().remove(file_path);
         self.forgotten_files
             .write()
             .unwrap()
@@ -1070,10 +1228,23 @@ impl AstIndex {
             let mut nodes = self.nodes.write().unwrap();
             let mut forgotten = self.forgotten_symbols.write().unwrap();
             let mut lines = self.symbol_lines.write().unwrap();
+            let mut sym_file = self.symbol_to_file.write().unwrap();
             for symbol in symbols {
-                nodes.remove(&symbol);
-                lines.remove(&symbol);
-                forgotten.insert(symbol);
+                // Only drop the symbol itself if this file is still its owner.
+                // Two files can declare one key, a package-keyed Java class of
+                // the same name among them, and a stale file being forgotten
+                // must not delete a symbol another file has since re-declared.
+                // `symbol_to_file` records the current owner.
+                let owned_by_this = sym_file
+                    .get(&symbol)
+                    .map(|f| f == file_path)
+                    .unwrap_or(true);
+                if owned_by_this {
+                    nodes.remove(&symbol);
+                    lines.remove(&symbol);
+                    sym_file.remove(&symbol);
+                    forgotten.insert(symbol);
+                }
             }
         }
     }
@@ -1086,7 +1257,7 @@ impl AstIndex {
     /// roots are left alone whether or not their files still exist. Widening this
     /// to every recorded path makes one scan able to empty an unrelated project's
     /// entries out of a shared index.
-    fn forget_missing_files(&self, root_prefix: &str, visited: &HashSet<String>) {
+    fn forget_missing_files(&self, abs_root: &Path, visited: &HashSet<String>) {
         let recorded: Vec<String> = self
             .file_to_symbols
             .read()
@@ -1095,14 +1266,25 @@ impl AstIndex {
             .cloned()
             .collect();
 
+        let file_roots = self.file_roots.read().unwrap().clone();
         for file_path in recorded {
             if visited.contains(&file_path) {
                 continue;
             }
-            if !file_path.starts_with(root_prefix) {
-                continue;
-            }
-            if !Path::new(&file_path).exists() {
+            // Resolve against the root this file was scanned under, not the
+            // current scan's: a scan of one subtree must not judge a file from a
+            // different subtree missing just because it is not under the tree
+            // being scanned now.
+            let root = file_roots
+                .get(&file_path)
+                .map(|p| p.as_path())
+                .unwrap_or(abs_root);
+            let on_disk = if Path::new(&file_path).is_absolute() {
+                PathBuf::from(&file_path)
+            } else {
+                root.join(&file_path)
+            };
+            if !on_disk.exists() {
                 self.forget_file(&file_path);
             }
         }
@@ -1250,13 +1432,17 @@ impl AstIndex {
         *self.reverse_deps.write().unwrap() = rebuilt;
     }
 
+    /// Walk the tree, collecting each indexable file as `(key, ext, content)`.
+    ///
+    /// The read, the purge of what a file held last time, and the trigram index
+    /// happen here, sequentially, because they touch shared state and are cheap.
+    /// The caller parses the collected files in parallel, which is the part
+    /// worth spreading across cores.
     fn walk_dir(
         &self,
         dir: &Path,
         root: &Path,
-        root_key: &str,
-        files_count: &mut usize,
-        nodes_count: &mut usize,
+        files: &mut Vec<(String, String, String)>,
         visited: &mut HashSet<String>,
     ) -> std::io::Result<()> {
         if !dir.exists() || !dir.is_dir() {
@@ -1288,7 +1474,7 @@ impl AstIndex {
                     ".gradle",
                 ];
                 if !dir_name.starts_with('.') && !SKIP.contains(&dir_name) {
-                    self.walk_dir(&path, root, root_key, files_count, nodes_count, visited)?;
+                    self.walk_dir(&path, root, files, visited)?;
                 }
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -1296,8 +1482,7 @@ impl AstIndex {
                         "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c"
                         | "cpp" | "h" | "json" | "toml" => {
                             if let Ok(content) = std::fs::read_to_string(&path) {
-                                *files_count += 1;
-                                let rel = Self::key_under_root(root, root_key, &path);
+                                let rel = Self::key_under_root(root, &path);
                                 visited.insert(rel.clone());
 
                                 // Drop what this file contributed last time before
@@ -1311,8 +1496,7 @@ impl AstIndex {
                                     .unwrap()
                                     .add_document(&rel, &content);
 
-                                // Index into AST CAS
-                                self.parse_file_content(&rel, ext, &content, nodes_count);
+                                files.push((rel, ext.to_string(), content));
                             }
                         }
                         _ => {}
@@ -1331,9 +1515,12 @@ impl AstIndex {
         content: &str,
         nodes_count: &mut usize,
     ) {
-        *self.parsing_file.write().unwrap() = Some(file_path.to_string());
+        // Set the calling thread's current file, so attribution in
+        // `index_node_at` is correct even when other threads are parsing other
+        // files at the same time. Cleared at the end whatever happens.
+        PARSING_FILE.with(|f| *f.borrow_mut() = Some(file_path.to_string()));
         self.parse_by_language(file_path, ext, content, nodes_count);
-        *self.parsing_file.write().unwrap() = None;
+        PARSING_FILE.with(|f| *f.borrow_mut() = None);
         self.record_references(file_path, ext, content);
     }
 
@@ -2652,6 +2839,22 @@ impl AstIndex {
 
         let payload = Self::load_payload(&abs_path)?;
 
+        // The keys are relative to the workspace, so a repository that moved
+        // still resolves. The workspace is where the index lives: the parent of
+        // its `.axiom` directory. `<workspace>/.axiom/index.json` gives
+        // `<workspace>`; anything shallower falls back to the index's own
+        // parent, which is correct when the index is not under a `.axiom`.
+        let scan_root = abs_path
+            .parent()
+            .and_then(|axiom_dir| {
+                if axiom_dir.file_name().and_then(|n| n.to_str()) == Some(".axiom") {
+                    axiom_dir.parent()
+                } else {
+                    Some(axiom_dir)
+                }
+            })
+            .map(|p| p.to_path_buf());
+
         let mut reverse_deps = HashMap::new();
         for (symbol, node) in &payload.nodes {
             for dep in &node.dependencies {
@@ -2664,12 +2867,34 @@ impl AstIndex {
 
         // The searchable text is not stored in the index: it would duplicate the
         // working tree and go stale against it. The scan recorded which files it
-        // read, so re-read them here. Files that have since moved or been deleted
-        // are skipped, which costs their text search rather than the whole load.
+        // read, so re-read them here, joining the relative key back onto the
+        // workspace root. Files that have since moved or been deleted are
+        // skipped, which costs their text search rather than the whole load.
         let mut zoekt = ZoektIndex::new();
         for file_path in payload.file_call_names.keys() {
-            if let Ok(text) = std::fs::read_to_string(file_path) {
+            let on_disk = match (&scan_root, Path::new(file_path).is_absolute()) {
+                (Some(root), false) => root.join(file_path),
+                _ => PathBuf::from(file_path),
+            };
+            if let Ok(text) = std::fs::read_to_string(&on_disk) {
                 zoekt.add_document(file_path, &text);
+            }
+        }
+
+        // The inverse of file_to_symbols, rebuilt on load rather than persisted.
+        let mut symbol_to_file = HashMap::new();
+        for (file, symbols) in &payload.file_to_symbols {
+            for symbol in symbols {
+                symbol_to_file.insert(symbol.clone(), file.clone());
+            }
+        }
+
+        // A loaded index shares one root, the workspace, so every file resolves
+        // against it. A subtree scanned separately later gets its own root then.
+        let mut file_roots = HashMap::new();
+        if let Some(root) = &scan_root {
+            for file in payload.file_to_symbols.keys() {
+                file_roots.insert(file.clone(), root.clone());
             }
         }
 
@@ -2683,7 +2908,9 @@ impl AstIndex {
             file_to_symbols: RwLock::new(payload.file_to_symbols),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
-            parsing_file: RwLock::new(None),
+            scan_root: RwLock::new(scan_root),
+            file_roots: RwLock::new(file_roots),
+            symbol_to_file: RwLock::new(symbol_to_file),
             // Both are scan-scoped. A loaded index already carries the edges
             // they were used to produce, in the nodes' own dependencies.
             symbol_lines: RwLock::new(HashMap::new()),

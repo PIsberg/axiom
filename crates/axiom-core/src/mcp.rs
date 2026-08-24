@@ -4,6 +4,7 @@ pub use axiom_crdt;
 use axiom_crdt::TreeCrdt;
 use axiom_proto::{CtopStatus, NewAttestation, ProvenanceAttestation};
 use axiom_vmm::{SandboxEngine, WasiEngine};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -141,38 +142,122 @@ pub fn load_attestations() -> Result<Vec<ProvenanceAttestation>> {
 /// As above, from an explicit ledger. Kept separate so a caller that must not
 /// touch the working directory, a test above all, can point somewhere else.
 pub fn load_attestations_from(path: &std::path::Path) -> Result<Vec<ProvenanceAttestation>> {
-    match read_json_settling(path) {
-        Some(raw) => Ok(serde_json::from_str(&raw)?),
-        None => Ok(Vec::new()),
+    // A missing or empty ledger is an empty one. A file with content that yields
+    // no records is corruption, and `load_records` returns None for it, so this
+    // reports an error rather than reading a damaged ledger as nothing attested.
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    match load_records(path) {
+        Some(records) => Ok(records),
+        None => {
+            if std::fs::read_to_string(path)
+                .map(|r| r.trim().is_empty())
+                .unwrap_or(true)
+            {
+                Ok(Vec::new())
+            } else {
+                anyhow::bail!("{path:?} exists but no attestation records could be read from it")
+            }
+        }
     }
 }
 
-/// Read a file that another agent may be replacing as we look at it.
+/// Parse a record file that is either a JSON array (the format these files used
+/// to be written whole in) or JSONL, one record per line (the append-only
+/// format now). A blank or trailing line, and a final line torn by a crash
+/// mid-append, are skipped rather than failing the read.
+fn parse_records<T: DeserializeOwned>(raw: &str) -> Option<Vec<T>> {
+    if raw.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    if raw.trim_start().starts_with('[') {
+        // A whole-file array. A rename-over write is atomic, so a reader sees
+        // the old array or the new one; a parse failure here means a genuinely
+        // malformed file, which the caller retries or reports.
+        return serde_json::from_str(raw).ok();
+    }
+    // JSONL. Only the last line can be torn, because appends add at the end, so
+    // a line that does not parse is dropped rather than the whole file lost.
+    Some(
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<T>(l).ok())
+            .collect(),
+    )
+}
+
+/// Read a record file that another agent may be writing as we look at it, with
+/// brief retries. Under a lock the read is clean; `verify` and startup read
+/// without one, where a torn append can be caught and is settled by a retry.
 ///
-/// Writers rename a complete file over the target, so a reader either sees the
-/// old contents or the new ones. A reader that catches the moment in between
-/// still gets a document that does not parse, and readers here do not hold the
-/// lock: `verify` and startup both read without one. Retrying briefly turns that
-/// into the next consistent state rather than an error.
-///
-/// Returns None when there is nothing to read, which is different from a read
-/// that failed.
-fn read_json_settling(path: &std::path::Path) -> Option<String> {
+/// `None` means the file is missing or empty. `Some(records)` may be empty for
+/// an empty file. A non-empty file that yields no records is corruption, and is
+/// returned as `None` so a caller wrapping it in a `Result` can say so.
+fn load_records<T: DeserializeOwned>(path: &std::path::Path) -> Option<Vec<T>> {
     for attempt in 0..5 {
         if !path.exists() {
             return None;
         }
         match std::fs::read_to_string(path) {
             Ok(raw) if raw.trim().is_empty() => return None,
-            Ok(raw) if serde_json::from_str::<serde_json::Value>(&raw).is_ok() => return Some(raw),
-            _ => std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1))),
+            Ok(raw) => match parse_records::<T>(&raw) {
+                Some(records) if !records.is_empty() => return Some(records),
+                // Non-empty file, nothing parsed: either mid-write, or corrupt.
+                _ => std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1))),
+            },
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1))),
         }
     }
-    // Give the caller the last read so a genuinely malformed file still reports
-    // as malformed rather than as absent.
+    // After the retries, one last honest reading: parseable records if any, or
+    // None for a file that has content but yields none.
+    match std::fs::read_to_string(path).ok().as_deref() {
+        Some(raw) if !raw.trim().is_empty() => parse_records::<T>(raw).filter(|r| !r.is_empty()),
+        _ => None,
+    }
+}
+
+/// Does this file still hold a whole-file JSON array, the pre-JSONL format?
+fn is_array_format(path: &std::path::Path) -> bool {
     std::fs::read_to_string(path)
-        .ok()
-        .filter(|r| !r.trim().is_empty())
+        .map(|raw| raw.trim_start().starts_with('['))
+        .unwrap_or(false)
+}
+
+/// Append one record as a JSONL line, migrating an array-format file to lines
+/// first so the result is never half array and half lines.
+///
+/// The append is not a rename-over-whole-file, so it does not rewrite every
+/// record on every write, which was O(n) per append and O(n^2) over a session.
+/// The cost is that a crash mid-append can leave a torn final line, which the
+/// loaders skip. Callers hold the index lock across the read-check-append, so
+/// two agents do not interleave.
+fn append_record<T: Serialize + DeserializeOwned>(
+    path: &std::path::Path,
+    record: &T,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if path.exists() && is_array_format(path) {
+        let existing: Vec<T> = load_records(path).unwrap_or_default();
+        let mut buf = String::new();
+        for r in &existing {
+            buf.push_str(&serde_json::to_string(r).map_err(std::io::Error::other)?);
+            buf.push('\n');
+        }
+        axiom_ast::write_atomically(path, buf.as_bytes())?;
+    }
+    let mut line = serde_json::to_string(record).map_err(std::io::Error::other)?;
+    line.push('\n');
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.flush()?;
+    Ok(())
 }
 
 /// Append one attestation to the ledger, refusing any record that does not
@@ -207,7 +292,7 @@ pub fn append_attestation_to(
     // cover the link check too: a tail read before the lock can be stale by the
     // time the write happens.
     let _lock = axiom_ast::IndexLock::acquire(path)?;
-    let mut all = load_attestations_from(path).unwrap_or_default();
+    let all = load_attestations_from(path).unwrap_or_default();
 
     let tail = all.last().map(|a| a.seal.as_str()).unwrap_or("");
     if attestation.previous_seal != tail {
@@ -222,8 +307,7 @@ pub fn append_attestation_to(
         );
     }
 
-    all.push(attestation.clone());
-    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
+    append_record(path, attestation)?;
     Ok(())
 }
 
@@ -242,9 +326,7 @@ pub fn append_attestation_unlinked_to(
         std::fs::create_dir_all(parent)?;
     }
     let _lock = axiom_ast::IndexLock::acquire(path)?;
-    let mut all = load_attestations_from(path).unwrap_or_default();
-    all.push(attestation.clone());
-    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
+    append_record(path, attestation)?;
     Ok(())
 }
 
@@ -258,6 +340,18 @@ pub fn append_attestation_unlinked_to(
 ///
 /// With no key configured, records are still written and still tamper-evident
 /// through `seal`. They are simply anonymous, and say so.
+/// How long `axiom_run_tests` lets a suite run before killing it. A test suite
+/// is slower than a snippet, so this is minutes by default, separate from the
+/// evaluator's `AXIOM_EVAL_TIMEOUT_SECS`.
+fn test_timeout() -> std::time::Duration {
+    std::env::var("AXIOM_TEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(600))
+}
+
 pub fn configured_signing_key() -> Option<String> {
     if let Ok(key) = std::env::var("AXIOM_SIGNING_KEY") {
         if !key.trim().is_empty() {
@@ -304,10 +398,7 @@ pub fn crdt_op_log_path() -> PathBuf {
 
 /// Every operation recorded so far. A missing log is an empty one.
 pub fn load_crdt_ops(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
-    match read_json_settling(path) {
-        Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        None => Vec::new(),
-    }
+    load_records(path).unwrap_or_default()
 }
 
 /// Append one operation.
@@ -327,9 +418,7 @@ pub fn append_crdt_op(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result
         std::fs::create_dir_all(parent)?;
     }
     let _lock = axiom_ast::IndexLock::acquire(path)?;
-    let mut all = load_crdt_ops(path);
-    all.push(op.clone());
-    axiom_ast::write_atomically(path, serde_json::to_string_pretty(&all)?.as_bytes())?;
+    append_record(path, op)?;
     Ok(())
 }
 
@@ -618,6 +707,19 @@ impl AxiomMcpServer {
                                 },
                                 "required": ["query"]
                             }
+                        },
+                        {
+                            "name": "axiom_run_tests",
+                            "description": "Run the project's own test command and record the outcome so a provenance record can rest on it. Unlike axiom_record_verification, axiom runs the command itself and observes the exit code, so the record says 'executed', not 'reported'. Build the command from the tests axiom_get_blast_radius named, so only the affected tests run: for example 'cargo test --test e2e_test search_modes', or 'pytest tests/test_gate.py::test_is_open'. The command runs in the workspace root with a confined environment, so it cannot read the signing key, and is killed with everything it started if it outruns AXIOM_TEST_TIMEOUT_SECS (default 600). A non-zero exit is recorded as a failed check; attesting against a failed check is refused.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "command": { "type": "string", "description": "The test command to run, e.g. 'cargo test --test e2e_test name' or 'pytest file::test'" },
+                                    "task_id": { "type": "string", "description": "Identifier to attest against later; one is generated if omitted" },
+                                    "symbol_path": { "type": "string", "description": "The symbol the tests cover, recorded for context; optional" }
+                                },
+                                "required": ["command"]
+                            }
                         }
                     ]
                 })),
@@ -842,7 +944,7 @@ impl AxiomMcpServer {
                         return Ok(json!({ "error": format!("could not lock the ledger: {e}") }));
                     }
                 };
-                let mut existing = load_attestations_from(&ledger_path).unwrap_or_default();
+                let existing = load_attestations_from(&ledger_path).unwrap_or_default();
                 let previous_seal = existing.last().map(|a| a.seal.clone()).unwrap_or_default();
 
                 // Two real Merkle roots the engine maintains, not a constant and
@@ -878,18 +980,10 @@ impl AxiomMcpServer {
                     }
                 }
 
-                // Persist it, or verification later has nothing to look up.
-                existing.push(attestation.clone());
-                let encoded = match serde_json::to_string_pretty(&existing) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        return Ok(json!({ "error": format!("could not encode the ledger: {e}") }));
-                    }
-                };
-                if let Some(parent) = ledger_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = axiom_ast::write_atomically(&ledger_path, encoded.as_bytes()) {
+                // Persist it, or verification later has nothing to look up. An
+                // append, not a whole-file rewrite: the chain was checked
+                // against `previous_seal` above, under this lock.
+                if let Err(e) = append_record(&ledger_path, &attestation) {
                     return Ok(json!({
                         "error": format!("could not record the attestation: {e}")
                     }));
@@ -1011,6 +1105,100 @@ impl AxiomMcpServer {
                         Ok(json!({ "error": e, "query": query, "mode_requested": requested }))
                     }
                 }
+            }
+
+            "axiom_run_tests" => {
+                let command = match required_str(&args, "command") {
+                    Ok(c) => c.to_string(),
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+                let task_id = args
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty())
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| format!("test_run_{}", std::process::id()));
+
+                // Run in the workspace the index describes: the parent of the
+                // `.axiom` directory, so the project's own test runner sees its
+                // own tree.
+                let workspace = self
+                    .axiom_dir
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+                // Through the shell, so a full command line with arguments works
+                // as written. run_with_timeout confines the environment, so the
+                // command cannot read the signing key, and ends the whole
+                // process tree if it outruns the deadline.
+                let mut cmd = if cfg!(windows) {
+                    let mut c = std::process::Command::new("cmd");
+                    c.args(["/C", &command]);
+                    c
+                } else {
+                    let mut c = std::process::Command::new("sh");
+                    c.args(["-c", &command]);
+                    c
+                };
+                cmd.current_dir(&workspace);
+
+                let done = match axiom_vmm::native::run_with_timeout(cmd, test_timeout()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Ok(json!({
+                            "error": format!("could not run the test command: {e}")
+                        }));
+                    }
+                };
+
+                if done.timed_out {
+                    // A run that was killed says nothing about whether the tests
+                    // would have passed, so it is not recorded as a verification.
+                    return Ok(json!({
+                        "task_id": task_id,
+                        "status": "TIMEOUT",
+                        "passed": false,
+                        "note": format!(
+                            "the command was killed after {}s; raise AXIOM_TEST_TIMEOUT_SECS if the suite is genuinely slow. Nothing was recorded.",
+                            test_timeout().as_secs()
+                        )
+                    }));
+                }
+
+                let passed = done.succeeded();
+                let tail = |s: &str| {
+                    s.lines()
+                        .rev()
+                        .take(40)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+
+                // Recorded as "executed": axiom ran it and saw the exit code, so
+                // it can vouch for the outcome, unlike a "reported" check.
+                self.verifications.write().unwrap().insert(
+                    task_id.clone(),
+                    Verification {
+                        passed,
+                        kind: "executed".to_string(),
+                        detail: format!("axiom ran: {command}"),
+                    },
+                );
+
+                Ok(json!({
+                    "task_id": task_id,
+                    "status": if passed { "PASSED" } else { "FAILED" },
+                    "passed": passed,
+                    "recorded_as": "executed",
+                    "command": command,
+                    "stdout": tail(&done.stdout),
+                    "stderr": tail(&done.stderr),
+                    "note": "Axiom ran this command and observed its exit code. A provenance record issued against this task will say the outcome was executed by axiom."
+                }))
             }
 
             _ => anyhow::bail!("Unknown tool: {}", tool_name),

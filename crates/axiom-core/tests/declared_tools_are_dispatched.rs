@@ -83,6 +83,7 @@ async fn the_advertised_tool_set_is_the_documented_one() {
         "axiom_query_symbol",
         "axiom_record_verification",
         "axiom_search_regex",
+        "axiom_run_tests",
     ];
     expected.sort();
 

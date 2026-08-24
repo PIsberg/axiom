@@ -56,12 +56,14 @@ fn lines_at(index: &AstIndex, symbol: &str) -> String {
     let node = index
         .get_symbol(symbol)
         .unwrap_or_else(|| panic!("{symbol} should be indexed"));
-    let file = node
-        .symbol_path
-        .split("::")
-        .next()
-        .expect("a file-keyed symbol names its file");
-    let text = std::fs::read_to_string(file)
+    // The symbol key is relative to the scan root, so a caller reaches the file
+    // through `file_of_symbol`, which joins the root back on. Reading the key
+    // prefix directly only worked while keys were absolute paths, which baked
+    // one machine into every index.
+    let file = index
+        .file_of_symbol(symbol)
+        .unwrap_or_else(|| panic!("{symbol} should resolve to a file"));
+    let text = std::fs::read_to_string(&file)
         .unwrap_or_else(|e| panic!("{symbol} names {file}, which cannot be read: {e}"));
     let all: Vec<&str> = text.lines().collect();
 
