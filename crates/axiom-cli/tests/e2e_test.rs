@@ -3,18 +3,58 @@ use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest, mcp::JsonRpcResponse};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// A temporary directory path unique to this run and this call.
+/// A uniquely-named temporary directory that removes itself when dropped.
 ///
-/// The name has to be actually unique. The idiom this replaced,
+/// Two problems, one type. The name has to be unique: the idiom this replaced,
 /// `std::time::Instant::now().elapsed().as_nanos()`, is the interval between two
 /// adjacent calls, which is zero, so it produced the constant `axiom_<tag>_0`
 /// for every run of every test that used it. Colliding names made the suite
-/// order-dependent: a test that failed before its cleanup line left state in
-/// that directory, and the next run of a differently-named test, or the same
-/// one, tripped over it. Two tests naming one directory could also race under
-/// parallel execution. The process id, a per-process counter and the wall-clock
-/// time together cannot collide across runs or across threads.
-fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+/// order-dependent, and two tests naming one directory could race in parallel.
+/// The process id, a per-process counter and the wall-clock time cannot collide.
+///
+/// And the directory has to be cleaned up even when a test fails. A test that
+/// panics, or returns early through `?`, never reaches its explicit cleanup
+/// line, so it used to leave the directory behind; unique names stopped that
+/// residue from poisoning the next run, but it still accumulated. Removing the
+/// directory from `Drop` runs whatever way the test ends. The directory itself
+/// is not created here: callers create it and their subdirectories as they
+/// always have, and dropping this removes the lot.
+///
+/// It derefs to `Path` and is `AsRef<Path>`, so `temp_dir.join(..)`,
+/// `&temp_dir` and the rest read exactly as they did against a `PathBuf`.
+struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for TempDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        // Best effort: the directory may already be gone, on Windows a handle
+        // may still be open, and a test that is already failing must not be
+        // turned into a different failure by cleanup.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn unique_temp_dir(tag: &str) -> TempDir {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -22,7 +62,8 @@ fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("{tag}_{}_{seq}_{nanos:x}", std::process::id()))
+    let path = std::env::temp_dir().join(format!("{tag}_{}_{seq}_{nanos:x}", std::process::id()));
+    TempDir { path }
 }
 
 /// The helper has to actually produce distinct paths, including across threads,
@@ -37,25 +78,42 @@ fn unique_temp_dir_is_actually_unique() {
     for _ in 0..8 {
         handles.push(std::thread::spawn(|| {
             (0..64)
-                .map(|_| unique_temp_dir("axiom_uniq"))
+                .map(|_| unique_temp_dir("axiom_uniq").display().to_string())
                 .collect::<Vec<_>>()
         }));
     }
     for h in handles {
-        for dir in h.join().unwrap() {
+        for name in h.join().unwrap() {
             assert!(
-                seen.insert(dir.clone()),
-                "unique_temp_dir handed out a duplicate: {}",
-                dir.display()
+                !name.ends_with("_0"),
+                "a name ending in _0 is the collision this fixes: {name}"
             );
             assert!(
-                !dir.to_string_lossy().ends_with("_0"),
-                "a name ending in _0 is the collision this fixes: {}",
-                dir.display()
+                seen.insert(name.clone()),
+                "unique_temp_dir handed out a duplicate: {name}"
             );
         }
     }
     assert_eq!(seen.len(), 8 * 64);
+}
+
+/// A dropped `TempDir` removes its directory, so a test that fails before its
+/// own cleanup line still leaves nothing behind.
+#[test]
+fn a_temp_dir_removes_itself_on_drop() {
+    let path = {
+        let dir = unique_temp_dir("axiom_drop_check");
+        std::fs::create_dir_all(dir.join("nested")).expect("create the tree");
+        std::fs::write(dir.join("nested").join("f.txt"), b"x").expect("write a file");
+        assert!(dir.path().exists());
+        dir.path().to_path_buf()
+        // `dir` drops here.
+    };
+    assert!(
+        !path.exists(),
+        "the directory outlived the guard that owned it: {}",
+        path.display()
+    );
 }
 
 fn extract_tool_result(resp: &JsonRpcResponse) -> Value {
