@@ -34,7 +34,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
       - uses: Swatinem/rust-cache@v2
+
+      # rust-analyzer produces the SCIP index the ingestion integration test
+      # ingests. It is a rustup component, requested above, so the test runs the
+      # real indexer rather than skipping; under AXIOM_REQUIRE_TOOLCHAINS a
+      # missing one is a hard failure, so an install that did nothing goes red.
 
       # The tier 2 evaluator tests branch on whether a toolchain is installed,
       # and assert the refusal when it is not. That makes them pass on a runner

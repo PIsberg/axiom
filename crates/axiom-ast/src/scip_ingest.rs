@@ -237,6 +237,7 @@ impl AstIndex {
 impl AstIndex {
     /// Index one document, returning how many nodes it produced. Private to the
     /// ingestion; the public entry points drive it per document.
+    #[allow(clippy::too_many_arguments)]
     fn ingest_document(
         &self,
         doc: &scip::types::Document,
@@ -262,8 +263,20 @@ impl AstIndex {
                 .get(&occ.symbol)
                 .cloned()
                 .unwrap_or_else(|| ("function".to_string(), String::new()));
+            // A test is marked by the SCIP Test role where the indexer sets it,
+            // scip-java does for JUnit. rust-analyzer does not set it for a
+            // `#[test]`, so fall back to axiom's own heuristic, the same one its
+            // scan uses: a test file, or a name that starts with `test_`, which
+            // is how the Rust parser keys on `#[test]`. This decides only the
+            // kind label; the edges are resolved either way.
             if occ.symbol_roles & ROLE_TEST != 0 {
                 kind = "test".to_string();
+            } else if kind != "test" {
+                let key = render_symbol(&occ.symbol).unwrap_or_default();
+                let leaf = key.rsplit(['.', '#', ':']).next().unwrap_or("");
+                if Self::is_test_path_or_file(rel) || leaf.starts_with("test_") {
+                    kind = "test".to_string();
+                }
             }
             defs.push(Def {
                 raw: occ.symbol.clone(),

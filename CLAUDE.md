@@ -95,7 +95,14 @@ contains it, keeping only references to symbols defined somewhere in the index; 
 `enclosing_range` has its body widened to the next definition, exactly the fallback the line parsers
 use, and `scip_ingest.rs`'s tests pin that a real single-line `enclosing_range` is not widened, which
 was a bug that filed a method's calls under its enclosing class. The tests build a SCIP index in
-memory, so they need no indexer installed; a live scip-java run would need the JDK on the runner.
+memory, so they need no indexer installed. A test is marked by the SCIP `Test` role where the indexer
+sets it (scip-java does); rust-analyzer does not for `#[test]`, so ingestion falls back to axiom's own
+heuristic, `is_test_path_or_file` or a `test_` name prefix, the same one the scan uses, or the blast
+radius would find no tests in a SCIP-ingested Rust project. `SymbolInformation.relationships` add
+edges an occurrence scan misses, an implementation reaching its interface. `scip_real_indexer.rs`
+runs a real `rust-analyzer scip` (a rustup component CI installs) and ingests its output, gated on
+`AXIOM_REQUIRE_TOOLCHAINS` so a missing indexer is red rather than a silent skip; scip-java emits the
+same format and would slot in the same way.
 
 ## Things that are easy to get wrong
 
