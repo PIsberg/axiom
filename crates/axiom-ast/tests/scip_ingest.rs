@@ -68,7 +68,10 @@ fn a_relationship_becomes_an_edge_even_without_a_reference() {
 
     let mut doc = Document::new();
     doc.relative_path = "Circle.java".into();
-    doc.occurrences = vec![occ(shape.clone(), 0, DEF, 0), occ(circle.clone(), 1, DEF, 1)];
+    doc.occurrences = vec![
+        occ(shape.clone(), 0, DEF, 0),
+        occ(circle.clone(), 1, DEF, 1),
+    ];
 
     let mut rel = Relationship::new();
     rel.symbol = shape.clone();
