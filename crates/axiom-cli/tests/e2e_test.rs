@@ -3,6 +3,61 @@ use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest, mcp::JsonRpcResponse};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+/// A temporary directory path unique to this run and this call.
+///
+/// The name has to be actually unique. The idiom this replaced,
+/// `std::time::Instant::now().elapsed().as_nanos()`, is the interval between two
+/// adjacent calls, which is zero, so it produced the constant `axiom_<tag>_0`
+/// for every run of every test that used it. Colliding names made the suite
+/// order-dependent: a test that failed before its cleanup line left state in
+/// that directory, and the next run of a differently-named test, or the same
+/// one, tripped over it. Two tests naming one directory could also race under
+/// parallel execution. The process id, a per-process counter and the wall-clock
+/// time together cannot collide across runs or across threads.
+fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("{tag}_{}_{seq}_{nanos:x}", std::process::id()))
+}
+
+/// The helper has to actually produce distinct paths, including across threads,
+/// which is the whole point: the idiom it replaced did not.
+#[test]
+fn unique_temp_dir_is_actually_unique() {
+    // The idiom this replaced named the same directory every run, because
+    // `Instant::now().elapsed()` is the interval between two adjacent calls,
+    // which is ~0. The replacement is distinct on every call and across threads.
+    let mut seen = std::collections::HashSet::new();
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        handles.push(std::thread::spawn(|| {
+            (0..64)
+                .map(|_| unique_temp_dir("axiom_uniq"))
+                .collect::<Vec<_>>()
+        }));
+    }
+    for h in handles {
+        for dir in h.join().unwrap() {
+            assert!(
+                seen.insert(dir.clone()),
+                "unique_temp_dir handed out a duplicate: {}",
+                dir.display()
+            );
+            assert!(
+                !dir.to_string_lossy().ends_with("_0"),
+                "a name ending in _0 is the collision this fixes: {}",
+                dir.display()
+            );
+        }
+    }
+    assert_eq!(seen.len(), 8 * 64);
+}
+
 fn extract_tool_result(resp: &JsonRpcResponse) -> Value {
     let res = resp
         .result
@@ -50,10 +105,7 @@ async fn test_e2e_agent_full_loop_over_mcp() -> Result<()> {
     assert!(tools.iter().any(|t| t["name"] == "axiom_search_regex"));
 
     // 4. Create realistic multi-language repository workspace
-    let temp_root = std::env::temp_dir().join(format!(
-        "axiom_e2e_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_root = unique_temp_dir("axiom_e2e");
     let java_pkg = temp_root
         .join("src")
         .join("main")
@@ -336,10 +388,7 @@ fn test_token_validation() {
 
 #[tokio::test]
 async fn test_e2e_disk_persistence_cross_instance() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_persist_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_persist");
     let src_dir = temp_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -441,10 +490,7 @@ async fn test_e2e_truth_preserving_assertions() -> Result<()> {
 
 #[tokio::test]
 async fn test_e2e_java_production_vs_test_classification() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_java_test_class_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_java_test_class");
     let main_pkg = temp_dir
         .join("async-test-lib")
         .join("src")
@@ -517,10 +563,7 @@ async fn test_e2e_dynamic_merkle_root_uniqueness() -> Result<()> {
 
 #[tokio::test]
 async fn test_e2e_javadoc_no_hijacking_and_honest_assertion_counts() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_javadoc_test_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_javadoc_test");
     let pkg_dir = temp_dir
         .join("src")
         .join("main")
@@ -711,10 +754,7 @@ public class ConcurrencyRunnerTest {
 
 #[tokio::test]
 async fn test_e2e_same_package_dependencies_blast_radius() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_same_pkg_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_same_pkg");
     let main_pkg = temp_dir
         .join("src")
         .join("main")
@@ -820,10 +860,7 @@ public class SharedMessageDigestDetectorTest {
 
 #[tokio::test]
 async fn test_e2e_comment_stripping_and_class_literal_dependencies() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_comment_test_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_comment_test");
     let main_pkg = temp_dir
         .join("src")
         .join("main")
@@ -923,10 +960,7 @@ public class AsyncBodyRunnerTest {
 
 #[tokio::test]
 async fn test_e2e_accessor_return_type_dependency_resolution() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_accessor_test_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_accessor_test");
     let main_pkg = temp_dir
         .join("src")
         .join("main")
@@ -1044,10 +1078,7 @@ async fn test_e2e_swarm_50_agents_concurrency() -> Result<()> {
 /// one reloads from disk before asking.
 #[tokio::test]
 async fn test_e2e_accessor_resolution_survives_disk_round_trip() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_persist_accessor_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_persist_accessor");
     let main_pkg = temp_dir
         .join("src")
         .join("main")
@@ -1141,10 +1172,7 @@ public class Phase1DetectorSetTest {
 /// accessor resolution until the next scan rewrites it.
 #[tokio::test]
 async fn test_e2e_legacy_bare_map_index_still_loads() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_legacy_index_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_legacy_index");
     std::fs::create_dir_all(&temp_dir)?;
     let index_file = temp_dir.join("index.json");
 
@@ -1202,10 +1230,7 @@ async fn test_e2e_legacy_bare_map_index_still_loads() -> Result<()> {
 /// of source returns nothing and no caller can tell the difference.
 #[tokio::test]
 async fn test_e2e_text_search_survives_disk_round_trip() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_search_persist_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_search_persist");
     let pkg = temp_dir
         .join("src")
         .join("main")
@@ -1280,10 +1305,7 @@ public class Gate {
 /// rather than retried as a literal.
 #[tokio::test]
 async fn test_e2e_search_modes_are_explicit_and_honest() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_search_modes_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_search_modes");
     let pkg = temp_dir
         .join("src")
         .join("main")
@@ -1379,10 +1401,7 @@ public class Knobs {
 /// tests", naming a test that no longer exists is the expensive direction.
 #[tokio::test]
 async fn test_e2e_rescan_forgets_deleted_and_renamed_symbols() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_rescan_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_rescan");
     let pkg = temp_dir
         .join("src")
         .join("main")
@@ -1526,10 +1545,7 @@ async fn test_e2e_attestation_requires_a_sandbox_run_that_passed() -> Result<()>
 /// for nothing else.
 #[tokio::test]
 async fn test_e2e_attestation_ledger_binds_symbol_and_prompt() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_ledger_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_ledger");
     std::fs::create_dir_all(&temp_dir)?;
     let ledger = temp_dir.join("attestations.json");
 
@@ -1576,10 +1592,7 @@ async fn test_e2e_attestation_ledger_binds_symbol_and_prompt() -> Result<()> {
 /// before the compiler is reached.
 #[tokio::test]
 async fn test_e2e_eval_refuses_symbols_it_cannot_compile() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_eval_lang_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_eval_lang");
     let pkg = temp_dir
         .join("src")
         .join("main")
@@ -1622,10 +1635,7 @@ async fn test_e2e_eval_refuses_symbols_it_cannot_compile() -> Result<()> {
 /// two runs out of four, and which agent lost varied.
 #[tokio::test]
 async fn test_e2e_concurrent_agents_do_not_erase_each_other() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_two_agents_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_two_agents");
     std::fs::create_dir_all(&temp_dir)?;
     let shared_index = temp_dir.join(".axiom").join("index.json");
 
@@ -1670,10 +1680,7 @@ async fn test_e2e_concurrent_agents_do_not_erase_each_other() -> Result<()> {
 /// to be exclusive while held and released afterwards.
 #[tokio::test]
 async fn test_e2e_index_lock_is_exclusive_then_released() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_lock_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_lock");
     std::fs::create_dir_all(&temp_dir)?;
     let index = temp_dir.join("index.json");
 
@@ -1707,10 +1714,7 @@ async fn test_e2e_index_lock_is_exclusive_then_released() -> Result<()> {
 /// so removals are tracked and subtracted.
 #[tokio::test]
 async fn test_e2e_scan_merges_over_concurrent_work_but_still_purges() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_scan_merge_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_scan_merge");
     let src = temp_dir.join("src");
     std::fs::create_dir_all(&src)?;
     std::fs::write(
@@ -1820,10 +1824,7 @@ async fn test_e2e_unscanned_workspace_does_not_answer_from_a_fixture() -> Result
 /// made after starting it was never picked up.
 #[tokio::test]
 async fn test_e2e_watch_notices_a_change_after_the_first_scan() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_watch_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_watch");
     let src = temp_dir.join("src");
     std::fs::create_dir_all(&src)?;
     let file = src.join("lib.rs");
@@ -1868,10 +1869,7 @@ async fn test_e2e_watch_notices_a_change_after_the_first_scan() -> Result<()> {
 /// language added later cannot forget it.
 #[tokio::test]
 async fn test_e2e_rescan_purges_every_language_not_just_java() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_purge_langs_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_purge_langs");
     let src = temp_dir.join("src");
     std::fs::create_dir_all(&src)?;
 
@@ -2062,10 +2060,7 @@ async fn test_e2e_external_verification_can_back_a_record_but_says_who_ran_it() 
 /// shows now has to come from the workspace.
 #[tokio::test]
 async fn test_e2e_dashboard_counts_come_from_the_index() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_dashboard_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_dashboard");
     let src = temp_dir.join("src");
     std::fs::create_dir_all(&src)?;
     std::fs::write(src.join("lib.rs"), "pub fn alpha() {}\npub fn beta() {}\n")?;
@@ -2307,10 +2302,7 @@ async fn test_e2e_records_can_be_signed_and_tampering_is_caught() -> Result<()> 
 /// check meant to stop it, which is the downgrade this pins shut.
 #[tokio::test]
 async fn test_e2e_an_unsigned_record_cannot_satisfy_a_demanded_signer() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_downgrade_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_downgrade");
     std::fs::create_dir_all(&temp_dir)?;
     let ledger = temp_dir.join("attestations.json");
 
@@ -2536,10 +2528,7 @@ async fn test_e2e_demo_seeding_works_in_a_populated_workspace() -> Result<()> {
 /// property is what this pins.
 #[tokio::test]
 async fn test_e2e_crdt_operations_converge_across_processes() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_crdt_log_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_crdt_log");
     // Start from nothing. The temp name is derived from an elapsed time that is
     // near zero, so it repeats between runs, and a run that fails before its
     // cleanup leaves a log the next run would append to.
@@ -2626,10 +2615,7 @@ async fn test_e2e_crdt_operations_converge_across_processes() -> Result<()> {
 /// seconds is still two orders of magnitude beyond the work being protected.
 #[tokio::test]
 async fn test_e2e_a_lock_left_by_a_dead_agent_is_taken_over() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_stale_lock_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_stale_lock");
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir)?;
     let target = temp_dir.join("index.json");
@@ -2689,10 +2675,7 @@ async fn test_e2e_a_lock_left_by_a_dead_agent_is_taken_over() -> Result<()> {
 /// worse than the tear it was meant to prevent.
 #[tokio::test]
 async fn test_e2e_writes_survive_a_reader_holding_the_file_open() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_atomic_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_atomic");
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir)?;
     let target = temp_dir.join("records.json");
@@ -2748,10 +2731,7 @@ async fn test_e2e_writes_survive_a_reader_holding_the_file_open() -> Result<()> 
 /// is worse than being told straight away.
 #[tokio::test]
 async fn test_e2e_unrecoverable_write_errors_are_not_waited_out() -> Result<()> {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "axiom_fastfail_{:x}",
-        std::time::Instant::now().elapsed().as_nanos()
-    ));
+    let temp_dir = unique_temp_dir("axiom_fastfail");
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir)?;
 
