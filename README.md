@@ -201,6 +201,48 @@ axiom scan --path .
 ```
 This parses all source files into the Merkle AST CAS and writes the persistent index to `.axiom/index.json`.
 
+#### Precise indexing with SCIP (recommended for Java)
+
+`axiom scan` without a SCIP index uses fast, build-free line parsers. They are
+heuristics: they infer a symbol's owner and its callers from the shape of the
+text, and they are wrong in the ways a heuristic is wrong. If your project has a
+build, you can hand axiom a **SCIP** index instead, produced by the language's
+own indexer running the real compiler, and the symbol graph, and the blast
+radius over it, rest on resolved references rather than text matches.
+
+For Java, generate one with [scip-java](https://sourcegraph.github.io/scip-java/)
+and point axiom at it:
+
+```bash
+# In your Java project (Maven or Gradle):
+cs launch com.sourcegraph:scip-java_2.13:<version> -- index --build-tool auto
+# produces index.scip in the project root
+
+axiom scan --scip index.scip --path .
+```
+
+`--path` names the project root the index's relative paths resolve against. The
+index is written to `.axiom/index.json` exactly as a normal scan, so every MCP
+tool and CLI command works against it unchanged; `axiom_get_blast_radius` is the
+one that gains the most, since its edges are now the compiler's, not a guess.
+
+Other languages produce a SCIP index the same way, and axiom ingests any of them
+(the format is language-independent):
+
+| Language | Indexer | Command |
+| --- | --- | --- |
+| Java, Kotlin, Scala | [scip-java](https://sourcegraph.github.io/scip-java/) | `scip-java index --build-tool auto` |
+| Rust | [rust-analyzer](https://rust-analyzer.github.io/) | `rust-analyzer scip .` |
+| TypeScript, JavaScript | [scip-typescript](https://github.com/sourcegraph/scip-typescript) | `scip-typescript index` |
+| Python | [scip-python](https://github.com/sourcegraph/scip-python) | `scip-python index .` |
+| Go | [scip-go](https://github.com/sourcegraph/scip-go) | `scip-go` |
+| C#, C/C++, Ruby, Dart | scip-dotnet, scip-clang, scip-ruby, scip-dart | see each indexer's README |
+
+The trade-off is the point: a SCIP index is slower to produce and needs a
+buildable project, where the line scan is instant and needs nothing. Use SCIP
+where a build exists and you want the graph to be exact; fall back to the scan
+for coverage, partial trees and mid-edit code.
+
 ### 2. Generate MCP Configuration
 Run:
 ```bash
@@ -240,6 +282,7 @@ Copy the generated configuration into your AI client's settings:
 |---|---|
 | `axiom serve` | Starts the native MCP server over `stdio` (JSON-RPC 2.0) |
 | `axiom scan --path <DIR>` | Scans and indexes a codebase into the Merkle AST CAS & `.axiom/index.json` |
+| `axiom scan --scip <FILE> --path <DIR>` | Ingests a precise SCIP index (scip-java, rust-analyzer scip, ...) instead of the heuristic scan |
 | `axiom search --query <STR> [--mode literal\|regex\|auto]` | Text search across the repository. Literal by default, so `.` and `(` match themselves; `--mode regex` compiles the query as a pattern, `--mode auto` picks regex only for queries that cannot be meant as literal text |
 | `axiom eval --symbol <SYM> -c <CODE>` | Runs an isolated sandbox evaluation with compiler verification |
 | `axiom blast-radius --symbol <SYM>` | Computes impacted tests and pruned percentage |

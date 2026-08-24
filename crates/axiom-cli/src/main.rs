@@ -93,6 +93,13 @@ enum Commands {
     Scan {
         #[arg(short, long, default_value = ".")]
         path: String,
+        /// Ingest a precise SCIP index instead of the heuristic scan. Point this
+        /// at the index.scip that scip-java, rust-analyzer scip, scip-typescript
+        /// and the rest produce; its edges are resolved by the real compiler, so
+        /// the blast radius rests on facts rather than text matches. `--path`
+        /// then names the project root the index's relative paths resolve to.
+        #[arg(long)]
+        scip: Option<String>,
     },
     /// Print a one-shot snapshot of the workspace: symbol counts, index size, Merkle root, provenance records
     Dashboard,
@@ -1121,7 +1128,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Scan { path } => {
+        Commands::Scan { path, scip } => {
             println!(
                 "🔍 Scanning codebase at '{}' into Axiom Merkle AST CAS...",
                 path
@@ -1140,7 +1147,15 @@ async fn main() -> Result<()> {
             } else {
                 axiom_ast::AstIndex::new()
             };
-            let summary = index.scan_directory(p)?;
+            // A SCIP index carries resolved edges from the language's own
+            // indexer; the heuristic walk is the fallback when none is given.
+            if let Some(scip_path) = &scip {
+                println!("   Ingesting SCIP index '{}'", scip_path);
+            }
+            let summary = match &scip {
+                Some(scip_path) => index.ingest_scip(std::path::Path::new(scip_path), p)?,
+                None => index.scan_directory(p)?,
+            };
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
             // Automatically persist index to .axiom/index.json with error propagation

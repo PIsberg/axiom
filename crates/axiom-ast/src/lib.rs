@@ -18,6 +18,9 @@ thread_local! {
     static PARSING_FILE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+/// Ingesting a precise SCIP index in place of the heuristic parsers.
+pub mod scip_ingest;
+
 /// Hold an exclusive lock beside the index while it is read and rewritten.
 ///
 /// Two agents sharing one workspace both load the index, both write it whole,

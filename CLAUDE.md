@@ -83,6 +83,20 @@ cannot read the signing key, and is killed as a whole process tree past `AXIOM_T
 Language dispatch is by file extension in `parse_file_content`: Java (shared with Kotlin and Scala),
 Rust, Python, TypeScript/JavaScript, and Go each have their own line parser.
 
+`axiom-ast/src/scip_ingest.rs` is the alternative to those line parsers: it reads a SCIP index a
+language's own indexer produced (scip-java, `rust-analyzer scip`, and the rest) and builds the same
+`AstIndex` from resolved definitions and references rather than heuristics. `axiom scan --scip <file>`
+routes to `AstIndex::ingest_scip`; the CLI arm is the only caller, and it persists to
+`.axiom/index.json` exactly as a scan does, so every tool downstream is unchanged. A SCIP symbol is
+rendered to a readable key by `render_symbol` (`com/example/Foo#bar().` becomes
+`com.example.Foo#bar`), dropping the package and version so the key is portable the way relative file
+keys are. Edges come from charging each reference occurrence to the definition whose `enclosing_range`
+contains it, keeping only references to symbols defined somewhere in the index; a definition with no
+`enclosing_range` has its body widened to the next definition, exactly the fallback the line parsers
+use, and `scip_ingest.rs`'s tests pin that a real single-line `enclosing_range` is not widened, which
+was a bug that filed a method's calls under its enclosing class. The tests build a SCIP index in
+memory, so they need no indexer installed; a live scip-java run would need the JDK on the runner.
+
 ## Things that are easy to get wrong
 
 **Index discovery walks up from the current directory.** `find_index_file` in `mcp.rs` climbs parent
