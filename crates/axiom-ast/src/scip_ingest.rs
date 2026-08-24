@@ -166,6 +166,36 @@ impl AstIndex {
             }
         }
 
+        // Edges the indexer states outright through `relationships`: an
+        // implementation of an interface, a symbol whose type is another, a
+        // reference recorded on the symbol rather than as an occurrence. Each is
+        // an edge from the symbol that carries the relationship to the one it
+        // names, kept when that target is defined in the index. These reach what
+        // occurrence edges miss: a change to an interface reaching its
+        // implementors, a change to a type reaching what is typed by it.
+        let mut rel_edges: HashMap<String, HashSet<String>> = HashMap::new();
+        for doc in &index.documents {
+            for si in &doc.symbols {
+                if render_symbol(&si.symbol).is_none() {
+                    continue;
+                }
+                for r in &si.relationships {
+                    if (r.is_implementation
+                        || r.is_type_definition
+                        || r.is_reference
+                        || r.is_definition)
+                        && defined_raw.contains(&r.symbol)
+                        && r.symbol != si.symbol
+                    {
+                        rel_edges
+                            .entry(si.symbol.clone())
+                            .or_default()
+                            .insert(r.symbol.clone());
+                    }
+                }
+            }
+        }
+
         let mut files_scanned = 0usize;
         let mut nodes_indexed = 0usize;
 
@@ -183,8 +213,15 @@ impl AstIndex {
                 doc.text.lines().collect()
             };
 
-            nodes_indexed +=
-                self.ingest_document(doc, &rel, &abs_root, &defined_raw, &info, &text_lines);
+            nodes_indexed += self.ingest_document(
+                doc,
+                &rel,
+                &abs_root,
+                &defined_raw,
+                &info,
+                &rel_edges,
+                &text_lines,
+            );
         }
 
         self.rebuild_reverse_deps();
@@ -200,6 +237,7 @@ impl AstIndex {
 impl AstIndex {
     /// Index one document, returning how many nodes it produced. Private to the
     /// ingestion; the public entry points drive it per document.
+    #[allow(clippy::too_many_arguments)]
     fn ingest_document(
         &self,
         doc: &scip::types::Document,
@@ -207,6 +245,7 @@ impl AstIndex {
         abs_root: &Path,
         defined_raw: &HashSet<String>,
         info: &HashMap<String, (String, String)>,
+        rel_edges: &HashMap<String, HashSet<String>>,
         text_lines: &[&str],
     ) -> usize {
         // Definitions in this document, with their body spans.
@@ -224,8 +263,20 @@ impl AstIndex {
                 .get(&occ.symbol)
                 .cloned()
                 .unwrap_or_else(|| ("function".to_string(), String::new()));
+            // A test is marked by the SCIP Test role where the indexer sets it,
+            // scip-java does for JUnit. rust-analyzer does not set it for a
+            // `#[test]`, so fall back to axiom's own heuristic, the same one its
+            // scan uses: a test file, or a name that starts with `test_`, which
+            // is how the Rust parser keys on `#[test]`. This decides only the
+            // kind label; the edges are resolved either way.
             if occ.symbol_roles & ROLE_TEST != 0 {
                 kind = "test".to_string();
+            } else if kind != "test" {
+                let key = render_symbol(&occ.symbol).unwrap_or_default();
+                let leaf = key.rsplit(['.', '#', ':']).next().unwrap_or("");
+                if Self::is_test_path_or_file(rel) || leaf.starts_with("test_") {
+                    kind = "test".to_string();
+                }
             }
             defs.push(Def {
                 raw: occ.symbol.clone(),
@@ -287,6 +338,7 @@ impl AstIndex {
                 .get(&d.raw)
                 .into_iter()
                 .flatten()
+                .chain(rel_edges.get(&d.raw).into_iter().flatten())
                 .filter_map(|t| render_symbol(t))
                 .filter(|t| t != &key)
                 .collect();
