@@ -108,12 +108,20 @@ fn a_torn_final_line_is_skipped_not_fatal() {
 
     // A crash mid-append leaves a partial line with no newline.
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().append(true).open(&ledger).unwrap();
-    f.write_all(b"{\"partial\": \"record with no closing").unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&ledger)
+        .unwrap();
+    f.write_all(b"{\"partial\": \"record with no closing")
+        .unwrap();
     drop(f);
 
     let loaded = load_attestations_from(&ledger).expect("load past the torn line");
-    assert_eq!(loaded.len(), 1, "the whole record survives; the torn line is dropped");
+    assert_eq!(
+        loaded.len(),
+        1,
+        "the whole record survives; the torn line is dropped"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

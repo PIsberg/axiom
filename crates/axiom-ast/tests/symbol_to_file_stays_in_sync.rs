@@ -20,7 +20,11 @@ fn tmp(tag: &str) -> std::path::PathBuf {
 #[test]
 fn the_map_answers_and_does_not_go_stale() {
     let root = tmp("root");
-    std::fs::write(root.join("gate.py"), "def is_open(depth):\n    return depth > 0\n").unwrap();
+    std::fs::write(
+        root.join("gate.py"),
+        "def is_open(depth):\n    return depth > 0\n",
+    )
+    .unwrap();
     std::fs::write(root.join("lib.rs"), "pub fn helper() {}\n").unwrap();
 
     let index = AstIndex::new();

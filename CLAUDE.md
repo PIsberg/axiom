@@ -220,6 +220,25 @@ JavaScript and TypeScript, so the caller says which language is being read: a cl
 apostrophe is required for a char literal and optional for a string that ends its line.
 Without that, `'sensitive_thing() is not called here'` was a call.
 
+**Symbol keys are relative to the scan root, so the index and its Merkle root are the same on any
+machine.** `key_under_root` returns the path below the scanned root with forward slashes and no
+absolute prefix, so a Rust symbol is `crates/axiom-ast/src/lib.rs::AstIndex`, not
+`C:/dev/.../lib.rs::AstIndex`. That is what makes the index committable and a ledger's
+`commit_merkle_root` comparable across machines; `keys_are_portable.rs` pins that the same source
+under two directories indexes identically. The filesystem still needs the absolute path, so the
+scan root is kept in `scan_root`, the per-file root in `file_roots` (one index can hold two subtrees
+scanned separately), and re-derived on load from the index's own location, the parent of its
+`.axiom`, so a repository that moved still resolves. `file_of_symbol` joins it back on and returns an
+absolute path, which is the one accessor that reaches a real file; a test that read the key prefix as
+a path directly had to move to `file_of_symbol`.
+
+**`forget_file` only deletes a symbol it still exclusively owns.** Two files can carry one key, a
+package-keyed Java class of the same name among them, so purging a stale file must not delete a
+symbol another file still declares. It checks `symbol_to_file` for the current owner before removing
+a node. This was an intermittent parallel failure of the full end-to-end loop: a stale entry in a
+shared index, left by one test and re-declared by another, deleted the live symbol when purged.
+`forget_keeps_shared_symbols.rs` pins it.
+
 **A symbol's short name is not its last dot-separated segment.** `simple_name_of` distinguishes a
 package-keyed symbol, `pkg.Class::method` to `Class`, from a file-keyed one,
 `src/lib.rs::write_atomically` to `write_atomically`. Splitting on the last dot unconditionally took

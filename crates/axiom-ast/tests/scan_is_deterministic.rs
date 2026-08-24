@@ -26,7 +26,11 @@ fn write_tree(root: &std::path::Path) {
         .unwrap();
     }
     std::fs::write(root.join("app.py"), "def main():\n    return 0\n").unwrap();
-    std::fs::write(root.join("Gate.java"), "public class Gate {\n  void open() {}\n}\n").unwrap();
+    std::fs::write(
+        root.join("Gate.java"),
+        "public class Gate {\n  void open() {}\n}\n",
+    )
+    .unwrap();
 }
 
 #[test]
