@@ -12,7 +12,7 @@ use axiom_ast::scip_ingest::render_symbol;
 use protobuf::EnumOrUnknown;
 use protobuf::Message;
 use scip::types::symbol_information::Kind;
-use scip::types::{Document, Index, Occurrence, SymbolInformation};
+use scip::types::{Document, Index, Occurrence, Relationship, SymbolInformation};
 
 const DEF: i32 = 1;
 const TEST: i32 = 32;
@@ -56,6 +56,60 @@ fn tiny_index() -> Index {
     let mut index = Index::new();
     index.documents = vec![doc];
     index
+}
+
+#[test]
+fn a_relationship_becomes_an_edge_even_without_a_reference() {
+    // Circle implements Shape. SCIP records that on Circle's SymbolInformation
+    // as a relationship, not as a reference occurrence, and it is still an edge:
+    // a change to the interface Shape must be able to reach its implementor.
+    let shape = sym("com/example/Shape#");
+    let circle = sym("com/example/Circle#");
+
+    let mut doc = Document::new();
+    doc.relative_path = "Circle.java".into();
+    doc.occurrences = vec![occ(shape.clone(), 0, DEF, 0), occ(circle.clone(), 1, DEF, 1)];
+
+    let mut rel = Relationship::new();
+    rel.symbol = shape.clone();
+    rel.is_implementation = true;
+    let mut circle_info = info(circle.clone(), Kind::Class, "Circle");
+    circle_info.relationships = vec![rel];
+    doc.symbols = vec![info(shape, Kind::Interface, "Shape"), circle_info];
+
+    let mut index = Index::new();
+    index.documents = vec![doc];
+
+    let ast = AstIndex::new();
+    ast.ingest_scip_index(&index, &std::env::temp_dir())
+        .expect("ingest");
+
+    let circle_node = ast
+        .get_symbol("com.example.Circle")
+        .expect("Circle indexed");
+    assert!(
+        circle_node
+            .dependencies
+            .iter()
+            .any(|d| d == "com.example.Shape"),
+        "the implementation relationship must be an edge: {:?}",
+        circle_node.dependencies
+    );
+
+    // So a change to the interface reaches its implementor.
+    let radius = ast
+        .compute_blast_radius("com.example.Shape", 2)
+        .expect("blast radius");
+    assert!(
+        radius
+            .tests_by_depth
+            .values()
+            .flatten()
+            .chain(radius.impacted_tests.iter())
+            .count()
+            == 0,
+        "no tests in this fixture, only the edge matters"
+    );
 }
 
 #[test]
