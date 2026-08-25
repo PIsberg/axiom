@@ -78,6 +78,41 @@ jobs:
         if: runner.os == 'Windows'
         run: python .github/scripts/concurrent_agents_check.py "$env:GITHUB_WORKSPACE\target\release\axiom.exe"
 
+      - name: Verify plugin installation and live MCP runtime (Unix)
+        if: runner.os != 'Windows'
+        run: python3 .github/scripts/test_plugin_installation.py "$PWD/target/release/axiom"
+
+      - name: Verify plugin installation and live MCP runtime (Windows)
+        if: runner.os == 'Windows'
+        run: python .github/scripts/test_plugin_installation.py "$env:GITHUB_WORKSPACE\target\release\axiom.exe"
+
+  plugin-install:
+    name: Plugin Installation
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Axiom from source (cargo install)
+        run: cargo install --path crates/axiom-cli --locked
+
+      - name: Verify installation from PATH (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          which axiom
+          python3 .github/scripts/test_plugin_installation.py "$(which axiom)"
+
+      - name: Verify installation from PATH (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Get-Command axiom
+          python .github/scripts/test_plugin_installation.py (Get-Command axiom).Source
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -88,3 +123,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+
