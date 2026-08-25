@@ -1,4 +1,5 @@
 {
   "name": "axiom-engine",
+  "version": "0.1.0",
   "description": "Agent-Native Autonomous Software Engine with Merkle AST CAS, sub-second multi-language sandbox evaluation, topological blast radius test selection, Tree-CRDT atomic mutations, and Ed25519 cryptographic provenance attestations."
 }
