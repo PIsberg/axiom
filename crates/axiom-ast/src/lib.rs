@@ -2216,38 +2216,11 @@ impl AstIndex {
                 || trimmed.starts_with("*/"))
             {
                 if let Some(owner) = Self::rust_owner_opened_by(decl) {
-                    owner_stack.push((owner, depth + opens.max(1)));
-                } else if decl.starts_with("use ") {
-                    uses.push(decl.replace("use ", "").replace(';', "").trim().to_string());
-                } else if decl.contains("fn ")
-                    && (decl.starts_with("fn ")
-                        || decl.starts_with("pub ")
-                        || decl.starts_with("async ")
-                        || decl.starts_with("pub async ")
-                        || decl.starts_with("pub(crate) "))
-                {
-                    let name = decl
-                        .split('(')
-                        .next()
-                        .unwrap_or("")
-                        .split("fn ")
-                        .last()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-
-                    if Self::is_valid_identifier(&name) {
-                        // The whole stack, not its top. `mod alpha { impl X { fn y } }`
-                        // is `file.rs::alpha::X::y`, and two modules declaring
-                        // the same function are two keys rather than one node
-                        // overwriting the other.
-                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &name);
-                        let is_test = name.starts_with("test_") || decl.contains("#[test]");
-                        let kind = if is_test { "test" } else { "function" };
-
+                    if decl.contains("trait ") {
+                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &owner);
                         self.index_node_at(
                             &symbol,
-                            kind,
+                            "trait",
                             trimmed,
                             &Self::body_of(&raw, &counted, line_no),
                             uses.clone(),
@@ -2255,31 +2228,53 @@ impl AstIndex {
                         );
                         *nodes_count += 1;
                     }
-                } else if decl.starts_with("struct ")
-                    || decl.starts_with("pub struct ")
-                    || decl.starts_with("pub(crate) struct ")
-                    || decl.starts_with("enum ")
-                    || decl.starts_with("pub enum ")
-                {
-                    let name = decl
-                        .split_whitespace()
-                        .nth(if decl.starts_with("pub ") { 2 } else { 1 })
-                        .unwrap_or("")
-                        .replace(['{', ';'], "")
-                        .trim()
-                        .to_string();
+                    owner_stack.push((owner, depth + opens.max(1)));
+                } else if decl.starts_with("use ") {
+                    uses.push(decl.replace("use ", "").replace(';', "").trim().to_string());
+                } else if decl.contains("fn ") {
+                    let before_paren = decl.split('(').next().unwrap_or("").split('{').next().unwrap_or("");
+                    let before_gen = before_paren.split('<').next().unwrap_or("");
+                    let words: Vec<&str> = before_gen.split_whitespace().collect();
+                    if words.len() >= 2 && words[words.len() - 2] == "fn" {
+                        let name = words[words.len() - 1].trim();
+                        if Self::is_valid_identifier(name) {
+                            let symbol = Self::rust_symbol_in(file_path, &owner_stack, name);
+                            let is_test = name.starts_with("test_") || decl.contains("#[test]");
+                            let kind = if is_test { "test" } else { "function" };
 
-                    if Self::is_valid_identifier(&name) {
-                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &name);
-                        self.index_node_at(
-                            &symbol,
-                            "struct",
-                            trimmed,
-                            &Self::body_of(&raw, &counted, line_no),
-                            uses.clone(),
-                            Some((line_no, line_no)),
-                        );
-                        *nodes_count += 1;
+                            self.index_node_at(
+                                &symbol,
+                                kind,
+                                trimmed,
+                                &Self::body_of(&raw, &counted, line_no),
+                                uses.clone(),
+                                Some((line_no, line_no)),
+                            );
+                            *nodes_count += 1;
+                        }
+                    }
+                } else if decl.contains("struct ") || decl.contains("enum ") || decl.contains("trait ") {
+                    let before_body = decl.split('{').next().unwrap_or("").split(';').next().unwrap_or("");
+                    let before_gen = before_body.split('<').next().unwrap_or("");
+                    let words: Vec<&str> = before_gen.split_whitespace().collect();
+                    if words.len() >= 2 {
+                        let prev = words[words.len() - 2];
+                        if prev == "struct" || prev == "enum" || prev == "trait" {
+                            let name = words[words.len() - 1].trim();
+                            if Self::is_valid_identifier(name) {
+                                let kind = if prev == "trait" { "trait" } else if prev == "enum" { "enum" } else { "struct" };
+                                let symbol = Self::rust_symbol_in(file_path, &owner_stack, name);
+                                self.index_node_at(
+                                    &symbol,
+                                    kind,
+                                    trimmed,
+                                    &Self::body_of(&raw, &counted, line_no),
+                                    uses.clone(),
+                                    Some((line_no, line_no)),
+                                );
+                                *nodes_count += 1;
+                            }
+                        }
                     }
                 }
             }

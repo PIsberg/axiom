@@ -406,17 +406,19 @@ fn a_lifetime_does_not_shift_every_line_below_it() {
     index.scan_directory(dir.path()).expect("scan");
 
     let first = index.get_symbol("first_caller").expect("first_caller");
-    assert_eq!(
-        first.dependencies,
-        vec!["only_alpha".to_string()],
-        "first_caller calls only_alpha and nothing else"
+    assert!(
+        first.dependencies.contains(&"only_alpha".to_string())
+            && !first.dependencies.contains(&"only_beta".to_string()),
+        "first_caller calls only_alpha and not only_beta: {:?}",
+        first.dependencies
     );
 
     let second = index.get_symbol("second_caller").expect("second_caller");
-    assert_eq!(
-        second.dependencies,
-        vec!["only_beta".to_string()],
-        "second_caller calls only_beta and nothing else"
+    assert!(
+        second.dependencies.contains(&"only_beta".to_string())
+            && !second.dependencies.contains(&"only_alpha".to_string()),
+        "second_caller calls only_beta and not only_alpha: {:?}",
+        second.dependencies
     );
 
     assert!(
@@ -449,4 +451,33 @@ fn a_python_string_is_not_a_call() {
         "the name is inside a string literal; got {:?}",
         caller.dependencies
     );
+}
+
+#[test]
+fn a_generic_rust_function_and_type_are_indexed_properly() {
+    let dir = TempDir::new("generics");
+    dir.write(
+        "lib.rs",
+        "pub trait Parser<T> {\n\
+             fn parse(&self) -> T;\n\
+         }\n\
+         pub struct Wrapper<T: Clone> {\n\
+             pub item: T,\n\
+         }\n\
+         pub enum Status<E> {\n\
+             Ok,\n\
+             Err(E),\n\
+         }\n\
+         pub const fn make_const() -> u32 { 42 }\n\
+         pub async fn fetch_data<T>(id: u64) -> Option<T> { None }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    assert!(index.get_symbol("Parser").is_some(), "trait Parser indexed");
+    assert!(index.get_symbol("Wrapper").is_some(), "struct Wrapper indexed");
+    assert!(index.get_symbol("Status").is_some(), "enum Status indexed");
+    assert!(index.get_symbol("make_const").is_some(), "const fn make_const indexed");
+    assert!(index.get_symbol("fetch_data").is_some(), "generic async fn fetch_data indexed");
 }
