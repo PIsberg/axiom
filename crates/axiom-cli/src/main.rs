@@ -23,7 +23,7 @@ struct Cli {
 enum Commands {
     /// Start Model Context Protocol (MCP) server over stdio
     Serve,
-    /// Execute instant sub-15ms code validation sandbox
+    /// Compile and run a snippet in the symbol's own language, or refuse
     Eval {
         #[arg(short = 's', long, default_value = "anonymous")]
         symbol: String,
