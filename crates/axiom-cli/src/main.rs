@@ -1,7 +1,6 @@
 use anyhow::Result;
 use axiom_ast::SearchMode;
 use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest};
-use axiom_vmm::SandboxEngine;
 use clap::{Parser, Subcommand};
 
 mod mutate;
@@ -666,23 +665,30 @@ async fn main() -> Result<()> {
                 "\n🔹 [Step 3/5] Simulating Agent testing a BUGGY hypothesis (empty token) in sandbox..."
             );
             let s3 = Instant::now();
-            let _failed_report = server
-                .wasi_engine
-                .execute_eval(
-                    "auth::service::validate_token",
-                    "assert!(validate_token(\"\")); // BUG: empty token",
-                )
-                .await?;
+            let req3 = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(serde_json::json!(3)),
+                method: "tools/call".into(),
+                params: Some(serde_json::json!({
+                    "name": "axiom_eval_patch",
+                    "arguments": {
+                        "symbol_path": "auth::service::validate_token",
+                        "code_snippet": "assert!(validate_token(\"\")); // BUG: empty token"
+                    }
+                })),
+            };
+            let resp3 = server.handle_request(req3).await;
             let el3 = s3.elapsed().as_secs_f64() * 1000.0;
+            let failed_payload = tool_payload(&resp3);
             println!(
                 "   ↳ Sandbox Caught the Bug: ❌ CTOP_STATUS = FAILED (Sandbox latency: {:.3} ms)",
                 el3
             );
-            let hint = _failed_report
-                .failed_checks
-                .first()
-                .and_then(|c| c.hint.clone())
-                .unwrap_or_else(|| "no hint reported".to_string());
+            let hint = failed_payload["failed_checks"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|c| c["hint"].as_str())
+                .unwrap_or("no hint reported");
             println!("   ↳ Structured Diagnostic Hint: '{}'", hint);
 
             // Step 4: Agent self-corrects -> Instant Sandbox passes
@@ -690,14 +696,22 @@ async fn main() -> Result<()> {
                 "\n🔹 [Step 4/5] Agent automatically self-heals using the diagnostic hint & re-tests..."
             );
             let s4 = Instant::now();
-            let pass_report = server
-                .wasi_engine
-                .execute_eval(
-                    "auth::service::validate_token",
-                    "assert!(validate_token(\"secret_bearer_token_998\")); // FIXED",
-                )
-                .await?;
+            let req4 = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(serde_json::json!(4)),
+                method: "tools/call".into(),
+                params: Some(serde_json::json!({
+                    "name": "axiom_eval_patch",
+                    "arguments": {
+                        "symbol_path": "auth::service::validate_token",
+                        "code_snippet": "assert!(validate_token(\"secret_bearer_token_998\")); // FIXED"
+                    }
+                })),
+            };
+            let resp4 = server.handle_request(req4).await;
             let el4 = s4.elapsed().as_secs_f64() * 1000.0;
+            let pass_payload = tool_payload(&resp4);
+            let task_id = pass_payload["task_id"].as_str().unwrap_or("").to_string();
             println!(
                 "   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: {:.3} ms)",
                 el4
@@ -705,8 +719,7 @@ async fn main() -> Result<()> {
 
             // Step 5: record the provenance of the change
             println!(
-                "
-🔹 [Step 5/5] Recording the provenance of the change..."
+                "\n🔹 [Step 5/5] Recording the provenance of the change..."
             );
             let req5 = JsonRpcRequest {
                 jsonrpc: "2.0".into(),
@@ -717,19 +730,23 @@ async fn main() -> Result<()> {
                     "arguments": {
                         "prompt": "Fix token validation threshold invariant",
                         "symbol_path": "auth::service::validate_token",
-                        "ctop_task_id": pass_report.task_id
+                        "ctop_task_id": task_id
                     }
                 })),
             };
             let s5 = Instant::now();
-            let _resp5 = server.handle_request(req5).await;
+            let resp5 = server.handle_request(req5).await;
             let el5 = s5.elapsed().as_secs_f64() * 1000.0;
             let total_loop_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-            println!(
-                "   ↳ Hermetic commit sealed with Ed25519 signature in {:.3} ms",
-                el5
-            );
+            let attest_payload = tool_payload(&resp5);
+            if let Some(err) = attest_payload.get("error").and_then(|e| e.as_str()) {
+                eprintln!("   demo could not seal attestation: {err}");
+            } else {
+                println!(
+                    "   ↳ Hermetic commit sealed with Ed25519 signature in {:.3} ms",
+                    el5
+                );
+            }
 
             println!(
                 "\n================================================================================"
