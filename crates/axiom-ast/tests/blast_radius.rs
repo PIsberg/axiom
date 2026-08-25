@@ -546,3 +546,32 @@ fn typescript_generics_interfaces_types_enums_and_arrow_functions_are_indexed() 
     assert!(index.get_symbol("validateUser").is_some(), "arrow fn validateUser indexed: {symbols:?}");
     assert_eq!(index.get_symbol("validateUser").unwrap().kind, "function");
 }
+
+#[test]
+fn cpp_classes_structs_namespaces_enums_and_functions_are_indexed() {
+    let dir = TempDir::new("cpp-ast");
+    dir.write(
+        "engine.cpp",
+        "#include <iostream>\n\
+         namespace physics {\n\
+         \x20   enum State { IDLE, RUNNING };\n\
+         \x20   class RigidBody {\n\
+         \x20   public:\n\
+         \x20       void applyForce(float f) {\n\
+         \x20       }\n\
+         \x20   };\n\
+         }\n\
+         int computeTotal(int a, int b) {\n\
+         \x20   return a + b;\n\
+         }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(symbols.iter().any(|s| s.ends_with("::physics::State")), "enum physics::State indexed: {symbols:?}");
+    assert!(symbols.iter().any(|s| s.ends_with("::physics::RigidBody")), "class physics::RigidBody indexed: {symbols:?}");
+    assert!(symbols.iter().any(|s| s.ends_with("::physics::RigidBody::applyForce")), "method physics::RigidBody::applyForce indexed: {symbols:?}");
+    assert!(symbols.iter().any(|s| s.ends_with("::computeTotal")), "function computeTotal indexed: {symbols:?}");
+}

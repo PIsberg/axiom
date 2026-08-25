@@ -881,7 +881,7 @@ impl AstIndex {
 
     pub const SOURCE_EXTS: &[&str] = &[
         "java", "rs", "py", "js", "ts", "jsx", "tsx", "mjs", "cjs", "go", "kt", "scala", "c",
-        "cpp", "h", "json", "toml",
+        "cpp", "cc", "cxx", "h", "hpp", "json", "toml",
     ];
 
     fn fingerprint_dir(dir: &Path, out: &mut Vec<String>) {
@@ -1581,6 +1581,9 @@ impl AstIndex {
                 self.parse_ts_js_content(file_path, content, nodes_count)
             }
             "go" => self.parse_go_content(file_path, content, nodes_count),
+            "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" => {
+                self.parse_c_cpp_content(file_path, content, nodes_count)
+            }
             _ => {}
         }
     }
@@ -2839,6 +2842,165 @@ impl AstIndex {
         }
 
         names
+    }
+
+    fn parse_c_cpp_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
+        let clean = Self::strip_comments_and_strings(content, false);
+        let stripped: Vec<&str> = clean.lines().collect();
+        let raw: Vec<&str> = content.lines().collect();
+
+        let mut includes = Vec::new();
+        let mut scope_stack: Vec<(String, usize)> = Vec::new();
+        let mut depth = 0usize;
+
+        for (line_no, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            let decl = stripped.get(line_no).copied().unwrap_or("").trim();
+            let opens = decl.matches('{').count();
+            let closes = decl.matches('}').count();
+
+            if decl.starts_with("#include ") {
+                includes.push(trimmed.to_string());
+            } else if !decl.starts_with('#') && !decl.starts_with("using ") && !decl.starts_with("typedef ") {
+                if decl.starts_with("namespace ") {
+                    let name = decl
+                        .split("namespace ")
+                        .last()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .replace('{', "")
+                        .trim()
+                        .to_string();
+                    if !name.is_empty() && Self::is_valid_identifier(&name) {
+                        scope_stack.push((name, depth + opens.max(1)));
+                    }
+                } else if decl.contains("class ")
+                    || decl.contains("struct ")
+                    || decl.contains("enum ")
+                {
+                    let kind = if decl.contains("class ") {
+                        "class"
+                    } else if decl.contains("enum ") {
+                        "enum"
+                    } else {
+                        "struct"
+                    };
+
+                    let after_kw = if decl.contains("class ") {
+                        decl.split("class ").last().unwrap_or("")
+                    } else if decl.contains("enum ") {
+                        decl.split("enum ").last().unwrap_or("")
+                    } else {
+                        decl.split("struct ").last().unwrap_or("")
+                    };
+
+                    let name = after_kw
+                        .split(':')
+                        .next()
+                        .unwrap_or("")
+                        .split('{')
+                        .next()
+                        .unwrap_or("")
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .split('<')
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+
+                    if !name.is_empty() && Self::is_valid_identifier(&name) {
+                        let prefix = scope_stack
+                            .iter()
+                            .map(|(s, _)| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        let symbol = if prefix.is_empty() {
+                            format!("{}::{}", file_path, name)
+                        } else {
+                            format!("{}::{}::{}", file_path, prefix, name)
+                        };
+
+                        self.index_node_at(
+                            &symbol,
+                            kind,
+                            trimmed,
+                            &Self::body_of(&raw, &stripped, line_no),
+                            includes.clone(),
+                            Some((line_no, line_no)),
+                        );
+                        *nodes_count += 1;
+
+                        if opens > closes && (kind == "class" || kind == "struct") {
+                            scope_stack.push((name, depth + opens.max(1)));
+                        }
+                    }
+                } else if decl.contains('(') && (opens > 0 || decl.ends_with(';') || decl.contains("->")) {
+                    let before_paren = decl.split('(').next().unwrap_or("").trim();
+                    let before_gen = before_paren.split('<').next().unwrap_or("").trim();
+                    let last_token = before_gen
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("")
+                        .trim_start_matches('*')
+                        .trim_start_matches('&');
+
+                    let is_reserved = matches!(
+                        last_token,
+                        "if" | "while" | "for" | "switch" | "catch" | "return" | "sizeof"
+                    );
+
+                    if !is_reserved && !last_token.is_empty() {
+                        let name_parts: Vec<&str> = last_token.split("::").collect();
+                        let all_valid = name_parts.iter().all(|p| Self::is_valid_identifier(p));
+
+                        if all_valid {
+                            let prefix = scope_stack
+                                .iter()
+                                .map(|(s, _)| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join("::");
+                            let symbol = if prefix.is_empty() {
+                                format!("{}::{}", file_path, last_token)
+                            } else {
+                                format!("{}::{}::{}", file_path, prefix, last_token)
+                            };
+
+                            let is_test = last_token.starts_with("test_")
+                                || last_token.starts_with("Test")
+                                || file_path.contains("test");
+                            let kind = if is_test { "test" } else { "function" };
+
+                            self.index_node_at(
+                                &symbol,
+                                kind,
+                                trimmed,
+                                &Self::body_of(&raw, &stripped, line_no),
+                                includes.clone(),
+                                Some((line_no, line_no)),
+                            );
+                            *nodes_count += 1;
+                        }
+                    }
+                }
+            }
+
+            depth += opens;
+            depth = depth.saturating_sub(closes);
+            while let Some((_, closes_at)) = scope_stack.last() {
+                if depth < *closes_at {
+                    scope_stack.pop();
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Parse an index file.
