@@ -603,10 +603,37 @@ fn java_records_sealed_classes_generic_returns_and_junit5_annotations_are_indexe
 
     let symbols = index.symbol_paths();
     assert!(index.get_symbol("com.example.service.ServiceSuite").is_some(), "sealed class ServiceSuite indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.service.TokenPair").is_some(), "record TokenPair indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.service.ServiceSuite.TokenPair").is_some(), "record TokenPair indexed: {symbols:?}");
     assert!(index.get_symbol("com.example.service.ServiceSuite::getTokens").is_some(), "method getTokens indexed: {symbols:?}");
     assert!(index.get_symbol("com.example.service.ServiceSuite::verifyTokens").is_some(), "test verifyTokens indexed: {symbols:?}");
 
     let verify_sym = index.get_symbol("com.example.service.ServiceSuite::verifyTokens").unwrap();
     assert_eq!(verify_sym.kind, "test", "verifyTokens identified as test from JUnit 5 annotations");
+}
+
+#[test]
+fn java_nested_and_inner_classes_are_scoped_hierarchically() {
+    let dir = TempDir::new("java-nested");
+    dir.write(
+        "Outer.java",
+        "package com.example.model;\n\
+         public class Outer {\n\
+         \x20   public static class NestedConfig {\n\
+         \x20       public String getEndpoint() { return \"localhost\"; }\n\
+         \x20   }\n\
+         \x20   public class InnerWorker {\n\
+         \x20       public void doWork() {}\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(index.get_symbol("com.example.model.Outer").is_some(), "Outer indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.model.Outer.NestedConfig").is_some(), "Outer.NestedConfig indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.model.Outer.NestedConfig::getEndpoint").is_some(), "NestedConfig::getEndpoint indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.model.Outer.InnerWorker").is_some(), "Outer.InnerWorker indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.model.Outer.InnerWorker::doWork").is_some(), "InnerWorker::doWork indexed: {symbols:?}");
 }
