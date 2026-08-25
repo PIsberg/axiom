@@ -207,10 +207,24 @@ impl AstIndex {
             files_scanned += 1;
             self.forget_file(&rel);
 
-            let text_lines: Vec<&str> = if doc.text.is_empty() {
+            let content = if !doc.text.is_empty() {
+                doc.text.clone()
+            } else {
+                let on_disk = abs_root.join(&rel);
+                std::fs::read_to_string(&on_disk).unwrap_or_default()
+            };
+
+            if !content.is_empty() {
+                self.zoekt_index
+                    .write()
+                    .unwrap()
+                    .add_document(&rel, &content);
+            }
+
+            let text_lines: Vec<&str> = if content.is_empty() {
                 Vec::new()
             } else {
-                doc.text.lines().collect()
+                content.lines().collect()
             };
 
             nodes_indexed += self.ingest_document(
