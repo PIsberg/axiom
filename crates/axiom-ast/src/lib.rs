@@ -962,6 +962,8 @@ impl AstIndex {
         }
 
         let mut tests_by_depth: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut tests_recorded: HashSet<String> = HashSet::new();
+        let mut impacted_set: HashSet<String> = HashSet::new();
 
         // Walk further than is reported. `impacted_tests` stays at `max_depth`,
         // because widening it costs precision: measured on a 2,219-test suite,
@@ -980,11 +982,10 @@ impl AstIndex {
             if let Some(node) = nodes.get(&curr) {
                 if node.kind == "test" {
                     let d = depth.max(1);
-                    let already = tests_by_depth.values().any(|v| v.contains(&curr));
-                    if !already {
+                    if tests_recorded.insert(curr.clone()) {
                         tests_by_depth.entry(d).or_default().push(curr.clone());
                     }
-                    if d <= max_depth && !impacted_tests.contains(&curr) {
+                    if d <= max_depth && impacted_set.insert(curr.clone()) {
                         impacted_tests.push(curr.clone());
                     }
                 }
@@ -1031,9 +1032,11 @@ impl AstIndex {
                         if let Some(syms) = file_syms.get(file_path) {
                             for sym in syms {
                                 if let Some(node) = nodes.get(sym) {
-                                    if node.kind == "test" && !impacted_tests.contains(sym) {
+                                    if node.kind == "test" && impacted_set.insert(sym.clone()) {
                                         impacted_tests.push(sym.clone());
-                                        tests_by_depth.entry(1).or_default().push(sym.clone());
+                                        if tests_recorded.insert(sym.clone()) {
+                                            tests_by_depth.entry(1).or_default().push(sym.clone());
+                                        }
                                     }
                                 }
                             }
@@ -1044,21 +1047,29 @@ impl AstIndex {
         }
 
         // Expand any impacted test classes to include their individual test methods
-        let mut impacted_set: HashSet<String> = impacted_tests.iter().cloned().collect();
-        let mut method_expansions = Vec::new();
-        for test_sym in &impacted_tests {
-            let prefix = format!("{}::", test_sym);
+        let test_classes: Vec<String> = impacted_tests
+            .iter()
+            .filter(|s| !s.contains("::"))
+            .cloned()
+            .collect();
+
+        if !test_classes.is_empty() {
+            let mut method_expansions = Vec::new();
             for (sym, node) in nodes.iter() {
-                if node.kind == "test"
-                    && sym.starts_with(&prefix)
-                    && impacted_set.insert(sym.clone())
-                {
-                    method_expansions.push(sym.clone());
-                    tests_by_depth.entry(1).or_default().push(sym.clone());
+                if node.kind == "test" && sym.contains("::") {
+                    let class_prefix = sym.split("::").next().unwrap_or("");
+                    if test_classes.iter().any(|c| c == class_prefix)
+                        && impacted_set.insert(sym.clone())
+                    {
+                        method_expansions.push(sym.clone());
+                        if tests_recorded.insert(sym.clone()) {
+                            tests_by_depth.entry(1).or_default().push(sym.clone());
+                        }
+                    }
                 }
             }
+            impacted_tests.extend(method_expansions);
         }
-        impacted_tests.extend(method_expansions);
 
         // Fallback: a test whose own name carries the symbol's, for the case
         // where nothing in the graph reaches it.

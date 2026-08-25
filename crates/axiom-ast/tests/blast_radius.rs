@@ -637,3 +637,95 @@ fn java_nested_and_inner_classes_are_scoped_hierarchically() {
     assert!(index.get_symbol("com.example.model.InnerWorker").is_some(), "InnerWorker indexed: {symbols:?}");
     assert!(index.get_symbol("com.example.model.InnerWorker::doWork").is_some(), "InnerWorker::doWork indexed: {symbols:?}");
 }
+
+#[test]
+fn java_blast_radius_isolates_unrelated_tests_and_traces_transitive_dependencies() {
+    let dir = TempDir::new("java-radius-isolation");
+    dir.write(
+        "PaymentGateway.java",
+        "package com.example.service;\n\
+         public class PaymentGateway {\n\
+         \x20   public boolean charge(int amount) { return amount > 0; }\n\
+         }\n",
+    );
+    dir.write(
+        "OrderService.java",
+        "package com.example.service;\n\
+         public class OrderService {\n\
+         \x20   public boolean processOrder(int cost) {\n\
+         \x20       PaymentGateway gateway = new PaymentGateway();\n\
+         \x20       return gateway.charge(cost);\n\
+         \x20   }\n\
+         }\n",
+    );
+    dir.write(
+        "UserService.java",
+        "package com.example.service;\n\
+         public class UserService {\n\
+         \x20   public String getUserName(long id) { return \"user-\" + id; }\n\
+         }\n",
+    );
+    dir.write(
+        "OrderServiceTest.java",
+        "package com.example.service;\n\
+         import org.junit.jupiter.api.Test;\n\
+         public class OrderServiceTest {\n\
+         \x20   @Test\n\
+         \x20   public void testOrderProcessing() {\n\
+         \x20       OrderService service = new OrderService();\n\
+         \x20       assert service.processOrder(100);\n\
+         \x20   }\n\
+         }\n",
+    );
+    dir.write(
+        "UserServiceTest.java",
+        "package com.example.service;\n\
+         import org.junit.jupiter.api.Test;\n\
+         public class UserServiceTest {\n\
+         \x20   @Test\n\
+         \x20   public void testFetchUser() {\n\
+         \x20       UserService service = new UserService();\n\
+         \x20       assert service.getUserName(1).equals(\"user-1\");\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    // 1. Changing UserService only impacts UserServiceTest, not OrderServiceTest
+    let user_radius = index
+        .compute_blast_radius("com.example.service.UserService::getUserName", 1)
+        .expect("UserService::getUserName blast radius");
+    let user_impacted: Vec<String> = user_radius
+        .impacted_tests
+        .iter()
+        .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+        .collect();
+    assert!(user_impacted.contains(&"testFetchUser".to_string()) || user_impacted.contains(&"com.example.service.UserServiceTest".to_string()), "UserService change impacts UserServiceTest: {user_impacted:?}");
+    assert!(!user_impacted.contains(&"testOrderProcessing".to_string()), "UserService change does NOT impact OrderServiceTest: {user_impacted:?}");
+
+    // 2. Changing OrderService only impacts OrderServiceTest, not UserServiceTest
+    let order_radius = index
+        .compute_blast_radius("com.example.service.OrderService::processOrder", 1)
+        .expect("OrderService::processOrder blast radius");
+    let order_impacted: Vec<String> = order_radius
+        .impacted_tests
+        .iter()
+        .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+        .collect();
+    assert!(order_impacted.contains(&"testOrderProcessing".to_string()) || order_impacted.contains(&"com.example.service.OrderServiceTest".to_string()), "OrderService change impacts OrderServiceTest: {order_impacted:?}");
+    assert!(!order_impacted.contains(&"testFetchUser".to_string()), "OrderService change does NOT impact UserServiceTest: {order_impacted:?}");
+
+    // 3. Changing PaymentGateway reaches OrderServiceTest at depth 2 (transitive)
+    let gw_radius = index
+        .compute_blast_radius("com.example.service.PaymentGateway::charge", 2)
+        .expect("PaymentGateway::charge blast radius");
+    let gw_impacted: Vec<String> = gw_radius
+        .impacted_tests
+        .iter()
+        .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+        .collect();
+    assert!(gw_impacted.contains(&"testOrderProcessing".to_string()) || gw_impacted.contains(&"com.example.service.OrderServiceTest".to_string()), "PaymentGateway reaches OrderServiceTest transitively: {gw_impacted:?}");
+    assert!(!gw_impacted.contains(&"testFetchUser".to_string()), "PaymentGateway does NOT reach UserServiceTest: {gw_impacted:?}");
+}
