@@ -1200,10 +1200,17 @@ impl AstIndex {
     fn key_under_root(root: &Path, path: &Path) -> String {
         match path.strip_prefix(root) {
             Ok(rest) => rest.to_string_lossy().replace('\\', "/"),
-            // Not below the root, which the walk should make impossible; fall
-            // back to the file's own absolute spelling rather than inventing a
-            // key. Rare enough that a non-portable key here is acceptable.
-            Err(_) => Self::canonical_key(path),
+            Err(_) => {
+                let root_str = root.to_string_lossy().replace('\\', "/");
+                let path_str = path.to_string_lossy().replace('\\', "/");
+                let root_norm = root_str.trim_start_matches("//?/").trim_end_matches('/');
+                let path_norm = path_str.trim_start_matches("//?/");
+                if let Some(rest) = path_norm.strip_prefix(root_norm) {
+                    rest.trim_start_matches('/').to_string()
+                } else {
+                    Self::canonical_key(path)
+                }
+            }
         }
     }
 
@@ -1253,7 +1260,7 @@ impl AstIndex {
     }
 
     /// Forget files recorded under this root by an earlier scan that this one did
-    /// not see and that are no longer on disk.
+    /// not see and that are no longer on disk, or obsolete non-portable keys.
     ///
     /// Scoped to the root on purpose. A scan is a statement about the tree it was
     /// pointed at and says nothing about anything else, so records from other
@@ -1274,6 +1281,12 @@ impl AstIndex {
             if visited.contains(&file_path) {
                 continue;
             }
+            // If the key is an absolute path, it is a non-portable key
+            // that must be purged when rescanning.
+            if Path::new(&file_path).is_absolute() || file_path.contains(':') {
+                self.forget_file(&file_path);
+                continue;
+            }
             // Resolve against the root this file was scanned under, not the
             // current scan's: a scan of one subtree must not judge a file from a
             // different subtree missing just because it is not under the tree
@@ -1282,12 +1295,8 @@ impl AstIndex {
                 .get(&file_path)
                 .map(|p| p.as_path())
                 .unwrap_or(abs_root);
-            let on_disk = if Path::new(&file_path).is_absolute() {
-                PathBuf::from(&file_path)
-            } else {
-                root.join(&file_path)
-            };
-            if !on_disk.exists() {
+            let on_disk = root.join(&file_path);
+            if root == abs_root || !on_disk.exists() {
                 self.forget_file(&file_path);
             }
         }
