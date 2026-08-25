@@ -2940,12 +2940,21 @@ impl AstIndex {
                         .replace('{', "")
                         .trim()
                         .to_string();
-                    if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    if !name.is_empty() && name.split("::").all(Self::is_valid_identifier) {
                         scope_stack.push((name, depth + opens.max(1)));
                     }
-                } else if decl.contains("class ")
-                    || decl.contains("struct ")
-                    || decl.contains("enum ")
+                } else if (!decl.contains('(')
+                    || decl.starts_with("class ")
+                    || decl.starts_with("struct ")
+                    || decl.starts_with("enum ")
+                    || decl.starts_with("template"))
+                    && (decl.contains("class ")
+                        || decl.contains("struct ")
+                        || decl.contains("enum "))
+                    && !decl.contains("return ")
+                    && (!decl.contains('(')
+                        || decl.contains('{')
+                            && decl.find('{').unwrap_or(0) < decl.find('(').unwrap_or(usize::MAX))
                 {
                     let kind = if decl.contains("class ") {
                         "class"
@@ -3012,8 +3021,7 @@ impl AstIndex {
                     && (opens > 0 || decl.ends_with(';') || decl.contains("->"))
                 {
                     let before_paren = decl.split('(').next().unwrap_or("").trim();
-                    let before_gen = before_paren.split('<').next().unwrap_or("").trim();
-                    let last_token = before_gen
+                    let raw_token = before_paren
                         .split_whitespace()
                         .last()
                         .unwrap_or("")
@@ -3021,13 +3029,23 @@ impl AstIndex {
                         .trim_start_matches('&');
 
                     let is_reserved = matches!(
-                        last_token,
+                        raw_token,
                         "if" | "while" | "for" | "switch" | "catch" | "return" | "sizeof"
                     );
 
-                    if !is_reserved && !last_token.is_empty() {
-                        let name_parts: Vec<&str> = last_token.split("::").collect();
-                        let all_valid = name_parts.iter().all(|p| Self::is_valid_identifier(p));
+                    if !is_reserved && !raw_token.is_empty() {
+                        let name = if before_paren.contains("operator") {
+                            let op_part =
+                                before_paren.split("operator").last().unwrap_or("").trim();
+                            format!("operator{}", op_part)
+                        } else {
+                            raw_token.to_string()
+                        };
+
+                        let name_parts: Vec<&str> = name.split("::").collect();
+                        let all_valid = name_parts
+                            .iter()
+                            .all(|p| p.starts_with("operator") || Self::is_valid_identifier(p));
 
                         if all_valid {
                             let prefix = scope_stack
@@ -3036,13 +3054,13 @@ impl AstIndex {
                                 .collect::<Vec<_>>()
                                 .join("::");
                             let symbol = if prefix.is_empty() {
-                                format!("{}::{}", file_path, last_token)
+                                format!("{}::{}", file_path, name)
                             } else {
-                                format!("{}::{}::{}", file_path, prefix, last_token)
+                                format!("{}::{}::{}", file_path, prefix, name)
                             };
 
-                            let is_test = last_token.starts_with("test_")
-                                || last_token.starts_with("Test")
+                            let is_test = name.starts_with("test_")
+                                || name.starts_with("Test")
                                 || file_path.contains("test");
                             let kind = if is_test { "test" } else { "function" };
 

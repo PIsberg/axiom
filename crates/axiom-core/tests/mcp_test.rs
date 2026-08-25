@@ -252,3 +252,89 @@ public class ConcurrencyRunner {
         Some("se.deversity.asynctest.runner.ConcurrencyRunner")
     );
 }
+
+#[tokio::test]
+async fn test_mcp_mutation_search_and_attestation_loop() {
+    let server = AxiomMcpServer::with_index(None).expect("Failed to create MCP server");
+
+    // 1. Search text via axiom_search_regex
+    let req_search = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(9)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_search_regex",
+            "arguments": {
+                "query": "validate_token",
+                "mode": "literal"
+            }
+        })),
+    };
+    let resp_search = server.handle_request(req_search).await;
+    let res_s = extract_tool_result(&resp_search);
+    assert_eq!(
+        res_s.get("mode_applied").and_then(|v| v.as_str()),
+        Some("literal")
+    );
+
+    // 2. Apply mutation via axiom_apply_mutation
+    let req_mutate = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(10)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_apply_mutation",
+            "arguments": {
+                "node_id": "node_auth_service",
+                "symbol_path": "auth::service::validate_token",
+                "content": "pub fn validate_token(token: &str) -> bool { !token.is_empty() }"
+            }
+        })),
+    };
+    let resp_mutate = server.handle_request(req_mutate).await;
+    let res_m = extract_tool_result(&resp_mutate);
+    assert_eq!(
+        res_m.get("status").and_then(|v| v.as_str()),
+        Some("APPLIED")
+    );
+
+    // 3. Record verification via axiom_record_verification
+    let req_rec = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(11)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_record_verification",
+            "arguments": {
+                "task_id": "task_auth_verification_101",
+                "passed": true,
+                "command": "cargo test test_auth"
+            }
+        })),
+    };
+    let resp_rec = server.handle_request(req_rec).await;
+    let res_r = extract_tool_result(&resp_rec);
+    assert_eq!(res_r.get("passed").and_then(|v| v.as_bool()), Some(true));
+
+    // 4. Attest commit via axiom_attest_commit
+    let req_attest = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(12)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_attest_commit",
+            "arguments": {
+                "prompt": "Verify non-empty auth tokens",
+                "symbol_path": "auth::service::validate_token",
+                "ctop_task_id": "task_auth_verification_101",
+                "agent_identity": "test-agent"
+            }
+        })),
+    };
+    let resp_attest = server.handle_request(req_attest).await;
+    let res_a = extract_tool_result(&resp_attest);
+    assert!(
+        res_a.get("seal").is_some(),
+        "Expected cryptographic seal on attestation"
+    );
+}
