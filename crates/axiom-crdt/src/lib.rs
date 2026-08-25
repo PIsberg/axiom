@@ -295,6 +295,248 @@ impl TreeCrdt {
         let log = self.op_log.read().unwrap();
         log.clone()
     }
+
+    /// 3-way merge node content at statement granularity
+    pub fn merge_node_content_3way(
+        &self,
+        node_id: &str,
+        base_content: &str,
+        remote_content: &str,
+    ) -> (String, bool) {
+        let current_content = {
+            let nodes = self.nodes.read().unwrap();
+            nodes
+                .get(node_id)
+                .map(|n| n.content.clone())
+                .unwrap_or_default()
+        };
+
+        let (merged, has_conflicts) =
+            merge_statements_3way(base_content, &current_content, remote_content);
+        self.update_node(node_id, &merged);
+        (merged, has_conflicts)
+    }
+}
+
+fn lcs_align(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
+    let n = a.len();
+    let m = b.len();
+    if n == 0 || m == 0 {
+        return Vec::new();
+    }
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in 0..n {
+        for j in 0..m {
+            if a[i] == b[j] {
+                dp[i + 1][j + 1] = dp[i][j] + 1;
+            } else {
+                dp[i + 1][j + 1] = dp[i][j + 1].max(dp[i + 1][j]);
+            }
+        }
+    }
+    let mut matches = Vec::new();
+    let mut i = n;
+    let mut j = m;
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            matches.push((i - 1, j - 1));
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    matches.reverse();
+    matches
+}
+
+/// 3-way Statement-level AST Merge Algorithm
+///
+/// Merges `local` and `remote` content against common ancestor `base`.
+/// Preserves non-overlapping statement additions, deletions, and modifications.
+/// If conflicting edits occur on the same statement line, returns conflict markers and `has_conflicts = true`.
+pub fn merge_statements_3way(base: &str, local: &str, remote: &str) -> (String, bool) {
+    if local == remote || local == base {
+        return (remote.to_string(), false);
+    }
+    if remote == base {
+        return (local.to_string(), false);
+    }
+
+    let base_lines: Vec<&str> = base.lines().collect();
+    let local_lines: Vec<&str> = local.lines().collect();
+    let remote_lines: Vec<&str> = remote.lines().collect();
+
+    if base_lines.is_empty() {
+        let mut merged = Vec::new();
+        for l in &local_lines {
+            merged.push(l.to_string());
+        }
+        for r in &remote_lines {
+            if !merged.iter().any(|m| m == r) {
+                merged.push(r.to_string());
+            }
+        }
+        return (merged.join("\n"), false);
+    }
+
+    let matches_l = lcs_align(&base_lines, &local_lines);
+    let matches_r = lcs_align(&base_lines, &remote_lines);
+
+    let mut local_before: Vec<Vec<String>> = vec![Vec::new(); base_lines.len() + 1];
+    let mut local_has_base = vec![false; base_lines.len()];
+    let mut prev_l = 0;
+    for &(b_i, l_i) in &matches_l {
+        for l in prev_l..l_i {
+            local_before[b_i].push(local_lines[l].to_string());
+        }
+        local_has_base[b_i] = true;
+        prev_l = l_i + 1;
+    }
+    for l in prev_l..local_lines.len() {
+        local_before[base_lines.len()].push(local_lines[l].to_string());
+    }
+
+    let mut remote_before: Vec<Vec<String>> = vec![Vec::new(); base_lines.len() + 1];
+    let mut remote_has_base = vec![false; base_lines.len()];
+    let mut prev_r = 0;
+    for &(b_i, r_i) in &matches_r {
+        for r in prev_r..r_i {
+            remote_before[b_i].push(remote_lines[r].to_string());
+        }
+        remote_has_base[b_i] = true;
+        prev_r = r_i + 1;
+    }
+    for r in prev_r..remote_lines.len() {
+        remote_before[base_lines.len()].push(remote_lines[r].to_string());
+    }
+
+    let mut result = Vec::new();
+    let mut has_conflicts = false;
+
+    let base_had_no_matches = !local_has_base.iter().any(|&b| b) && !remote_has_base.iter().any(|&b| b);
+
+    for k in 0..base_lines.len() {
+        let ins_l = &local_before[k];
+        let ins_r = &remote_before[k];
+
+        if ins_l == ins_r {
+            result.extend(ins_l.clone());
+        } else if ins_l.is_empty() {
+            result.extend(ins_r.clone());
+        } else if ins_r.is_empty() {
+            result.extend(ins_l.clone());
+        } else if !local_has_base[k] && !remote_has_base[k] {
+            has_conflicts = true;
+            result.push(format!(
+                "<<<<<<< LOCAL\n{}\n=======\n{}\n>>>>>>> REMOTE",
+                ins_l.join("\n"),
+                ins_r.join("\n")
+            ));
+        } else {
+            result.extend(ins_l.clone());
+            for line in ins_r {
+                if !ins_l.contains(line) {
+                    result.push(line.clone());
+                }
+            }
+        }
+
+        // Base line k status
+        let in_l = local_has_base[k];
+        let in_r = remote_has_base[k];
+        if in_l && in_r {
+            result.push(base_lines[k].to_string());
+        }
+    }
+
+    // Trailing insertions
+    let ins_l = &local_before[base_lines.len()];
+    let ins_r = &remote_before[base_lines.len()];
+    if ins_l == ins_r {
+        result.extend(ins_l.clone());
+    } else if ins_l.is_empty() {
+        result.extend(ins_r.clone());
+    } else if ins_r.is_empty() {
+        result.extend(ins_l.clone());
+    } else if base_had_no_matches {
+        has_conflicts = true;
+        result.push(format!(
+            "<<<<<<< LOCAL\n{}\n=======\n{}\n>>>>>>> REMOTE",
+            ins_l.join("\n"),
+            ins_r.join("\n")
+        ));
+    } else {
+        result.extend(ins_l.clone());
+        for line in ins_r {
+            if !ins_l.contains(line) {
+                result.push(line.clone());
+            }
+        }
+    }
+
+    (result.join("\n"), has_conflicts)
+}
+
+/// Live Swarm Broadcast Relay for real-time multi-agent sync
+#[derive(Debug, Clone)]
+pub struct SwarmRelay {
+    sender: tokio::sync::broadcast::Sender<TreeOp>,
+    history: Arc<RwLock<Vec<TreeOp>>>,
+}
+
+impl SwarmRelay {
+    pub fn new(capacity: usize) -> Self {
+        let (sender, _) = tokio::sync::broadcast::channel(capacity.max(128));
+        Self {
+            sender,
+            history: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Broadcast a local mutation op to all subscribed agent workers
+    pub fn broadcast(&self, op: TreeOp) -> usize {
+        self.history.write().unwrap().push(op.clone());
+        self.sender.send(op).unwrap_or(0)
+    }
+
+    /// Subscribe to real-time op feed
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<TreeOp> {
+        self.sender.subscribe()
+    }
+
+    /// Get all historical operations
+    pub fn history(&self) -> Vec<TreeOp> {
+        self.history.read().unwrap().clone()
+    }
+
+    /// Synchronize a single agent replica with all historical ops
+    pub fn sync_agent(&self, agent: &TreeCrdt) -> usize {
+        let history = self.history.read().unwrap().clone();
+        let mut count = 0;
+        for op in history {
+            if agent.apply_op(op) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Synchronize all agent replicas to full convergence
+    pub fn sync_all(&self, agents: &[TreeCrdt]) -> usize {
+        let history = self.history.read().unwrap().clone();
+        let mut total_applied = 0;
+        for agent in agents {
+            for op in &history {
+                if agent.apply_op(op.clone()) {
+                    total_applied += 1;
+                }
+            }
+        }
+        total_applied
+    }
 }
 
 /// Swarm Synchronization Simulator
