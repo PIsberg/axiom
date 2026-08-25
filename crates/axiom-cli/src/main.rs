@@ -1723,7 +1723,12 @@ fn mutate_and_run(
         // the confident wrong answer this tool exists to catch.
         let matching: Vec<&String> = closures
             .keys()
-            .filter(|k| k.rsplit("::").next().map(|s| s == name).unwrap_or(false))
+            .filter(|k| {
+                k.rsplit([':', '#', '.'])
+                    .next()
+                    .map(|s| s == name)
+                    .unwrap_or(false)
+            })
             .collect();
         if matching.is_empty() {
             continue;
@@ -1787,7 +1792,11 @@ fn failing_test_names(output: &str) -> Vec<String> {
         if !status.trim_start().starts_with("FAILED") || name.is_empty() {
             continue;
         }
-        let short = name.rsplit("::").next().unwrap_or(name).to_string();
+        let short = name
+            .rsplit([':', '#', '.'])
+            .next()
+            .unwrap_or(name)
+            .to_string();
         if !names.contains(&short) {
             names.push(short);
         }
