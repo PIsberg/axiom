@@ -308,6 +308,60 @@ impl ProvenanceAttestation {
         );
         self.seal == expected
     }
+
+    /// Convert this attestation into a standardized SLSA v1.0 / in-toto Provenance statement
+    pub fn to_slsa_statement(&self) -> serde_json::Value {
+        serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [
+                {
+                    "name": self.symbol_path,
+                    "digest": {
+                        "merkleRoot": self.commit_merkle_root,
+                        "seal": self.seal
+                    }
+                }
+            ],
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicate": {
+                "buildDefinition": {
+                    "buildType": "https://axiom.dev/provenance/v1",
+                    "externalParameters": {
+                        "agentIdentity": self.agent_identity,
+                        "promptDigest": self.prompt_digest,
+                        "symbolPath": self.symbol_path
+                    },
+                    "internalParameters": {
+                        "parentMerkleRoot": self.parent_merkle_root,
+                        "ctopProofHash": self.ctop_proof_hash,
+                        "previousSeal": self.previous_seal,
+                        "signature": self.signature,
+                        "publicKey": self.public_key
+                    }
+                },
+                "runDetails": {
+                    "builder": {
+                        "id": "https://axiom.dev/verifier/v1",
+                        "version": {
+                            "axiom": env!("CARGO_PKG_VERSION")
+                        }
+                    },
+                    "metadata": {
+                        "invocationId": self.seal,
+                        "startedOn": self.timestamp,
+                        "finishedOn": self.timestamp
+                    },
+                    "byproducts": [
+                        {
+                            "name": "verification",
+                            "verifiedBy": self.verified_by,
+                            "verificationDetail": self.verification_detail
+                        }
+                    ]
+                }
+            }
+        })
+    }
 }
 
 impl CtopReport {

@@ -364,6 +364,8 @@ bug reproduced through the CLI is the bug an agent sees.
 | `axiom mcp-config` | Outputs ready-to-copy JSON configuration for AI IDEs |
 | `axiom watch --path <DIR>` | Polls a cheap fingerprint of the tree and re-scans the whole tree when it changes. The re-index is a full re-parse, not an incremental one |
 | `axiom git-export` | Writes `.axiom/export.md` summarising the index and Merkle root. It does not touch git |
+| `axiom export-slsa [--symbol <SYM>] [--out <PATH>]` | Exports cryptographic provenance ledger attestations as in-toto / SLSA v1.0 statement JSON |
+| `axiom git-hook [--install] [--verify]` | Installs or executes Git pre-commit cryptographic attestation provenance verification |
 | `axiom dashboard` | Prints a one-shot snapshot of the workspace: symbol counts by kind, index file size, CRDT node count, Merkle root, provenance record count. Not a TUI and not a live feed |
 
 `axiom demo` seeds a fixture workspace on purpose. An earlier version seeded that

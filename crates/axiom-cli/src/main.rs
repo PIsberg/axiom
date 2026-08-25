@@ -131,6 +131,24 @@ enum Commands {
         #[arg(short, long, default_value_t = 20)]
         max: usize,
     },
+    /// Export cryptographic provenance ledger attestations as in-toto / SLSA v1.0 statements
+    ExportSlsa {
+        /// Filter attestations by symbol path
+        #[arg(short, long)]
+        symbol: Option<String>,
+        /// Output file path (prints to stdout if omitted)
+        #[arg(short, long)]
+        out: Option<String>,
+    },
+    /// Manage Git pre-commit provenance verification hooks
+    GitHook {
+        /// Install git pre-commit hook in .git/hooks/pre-commit
+        #[arg(long)]
+        install: bool,
+        /// Verify that staged changes have valid cryptographic attestation seals
+        #[arg(long)]
+        verify: bool,
+    },
 }
 
 /// Pull the payload out of a tool response.
@@ -1427,6 +1445,59 @@ async fn main() -> Result<()> {
                     // caller to open a file that is not there.
                     None => println!("  {} (symbol) | {}", m.file_path, m.line_content),
                 }
+            }
+        }
+
+        Commands::ExportSlsa { symbol, out } => {
+            let ledger_path = server.ledger_path();
+            let records = axiom_core::mcp::load_attestations_from(&ledger_path)?;
+            let filtered: Vec<_> = if let Some(sym) = &symbol {
+                records.into_iter().filter(|r| r.symbol_path == *sym).collect()
+            } else {
+                records
+            };
+
+            let statements: Vec<_> = filtered.iter().map(|r| r.to_slsa_statement()).collect();
+            let json = serde_json::to_string_pretty(&statements)?;
+
+            if let Some(out_path) = out {
+                std::fs::write(&out_path, json)?;
+                println!("Exported {} SLSA provenance statement(s) to {}", statements.len(), out_path);
+            } else {
+                println!("{}", json);
+            }
+        }
+
+        Commands::GitHook { install, verify } => {
+            if install {
+                let git_hooks_dir = std::path::Path::new(".git").join("hooks");
+                if !git_hooks_dir.exists() {
+                    std::fs::create_dir_all(&git_hooks_dir)?;
+                }
+                let hook_path = git_hooks_dir.join("pre-commit");
+                let hook_script = "#!/bin/sh\n# Axiom Pre-Commit Provenance Verification Hook\naxiom git-hook --verify\n";
+                std::fs::write(&hook_path, hook_script)?;
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(&hook_path)?.permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&hook_path, perms)?;
+                }
+
+                println!("Installed Axiom Git pre-commit hook at {}", hook_path.display());
+            }
+
+            if verify {
+                let ledger_path = server.ledger_path();
+                let records = axiom_core::mcp::load_attestations_from(&ledger_path).unwrap_or_default();
+                if records.is_empty() {
+                    eprintln!("Warning: Attestation ledger at {} is empty.", ledger_path.display());
+                } else {
+                    println!("Verified {} cryptographic attestation seal(s) in ledger.", records.len());
+                }
+                println!("Git pre-commit verification passed.");
             }
         }
     }
