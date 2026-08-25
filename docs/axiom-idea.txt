@@ -1,3 +1,12 @@
+[ARCHIVE] This is the original idea note that started the project, kept for the
+record. It is not a description of what is built, and several things it describes
+in the present tense do not exist: the sub-15ms microVM sandbox, userfaultfd
+paging, AF_VSOCK IPC, and Tree-sitter parsing among them. Read
+docs/ARCHITECTURE.md for what exists, and docs/axiom_security_framework.md for
+what is actually contained at runtime.
+
+--------------------------------------------------------------------------------
+
 Reimagining GitHub for the agentic age requires abandoning the core assumption of traditional version control: that a repository is a passive, text-based ledger meant for human eyes. An agent-native platform must shift from line-based text collaboration to machine-addressable intent, instantaneous execution feedback, and strict Zero-Trust boundaries.
 
 Goal; super-fast feedback loop built for AI agentic workflow  - not that when codebase grows build, tests, compiling or creating distributables takes so long time

@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 189 tests across e2e, mcp, crdt, persistence, blast radius, eval, cache audit, key format, seal coverage, env confinement, protocol
+cargo test                            # 208 tests across 43 test binaries: e2e, mcp, crdt, persistence, blast radius, eval, cache audit, key format, seal coverage, env confinement, scip, doc drift, protocol
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -51,13 +51,13 @@ Dependencies run one way. `axiom-proto` is the leaf; nothing depends on `axiom-c
 ```
 axiom-proto ──► everything     wire types only: AstNode, CtopReport, ProvenanceAttestation
 axiom-ast   ──► core, crdt     the indexer: parsers, symbol graph, blast radius, Zoekt, disk I/O
-axiom-vmm   ──► core           the sandbox: wasmtime and rustc tiers
+axiom-vmm   ──► core           the evaluator: wasmtime (a sandbox) and the native toolchains (not)
 axiom-crdt  ──► core           Tree-CRDT plus swarm simulation
 axiom-core  ──► cli            the MCP server: tool schemas and dispatch
 axiom-cli                      clap subcommands, all of which drive AxiomMcpServer
 ```
 
-`axiom-ast/src/lib.rs` is the bulk of the system (~2,900 lines) and holds several indexes that must
+`axiom-ast/src/lib.rs` is the bulk of the system (~4,200 lines) and holds several indexes that must
 stay in agreement: `nodes` (symbol to AstNode), `reverse_deps` (symbol to dependents), and the
 supporting `method_return_types` and `clean_file_texts` maps behind accessor inference. Anything
 that inserts into one usually has to update the others.
@@ -105,6 +105,18 @@ runs a real `rust-analyzer scip` (a rustup component CI installs) and ingests it
 same format and would slot in the same way.
 
 ## Things that are easy to get wrong
+
+**The docs go stale silently, and two tests now stop the parts that can be checked.**
+`axiom_run_tests` shipped while the README said seven tools and USAGE_GUIDE.md documented
+seven; `cache-validate` shipped and the README's command table listed `cache-audit` alone.
+Both are surfaces an agent reads to decide what to call, so a gap there is not untidiness.
+`crates/axiom-core/tests/docs_name_every_tool.rs` checks the README and the usage guide
+against `tools/list`, and `crates/axiom-cli/tests/readme_lists_every_subcommand.rs` checks
+the README's command table against clap in both directions. Code is the source in both;
+the docs are checked against it, never the reverse. What no test can check is a number in
+prose: every measured figure in the README and the speed report carries the date it was
+taken, and `.github/scripts/blast_radius_stats.py` exists so the blast-radius numbers are
+re-derived rather than remembered.
 
 **Index discovery walks up from the current directory.** `find_index_file` in `mcp.rs` climbs parent
 directories looking for `.axiom/index.json`. The MCP server inherits its client's working directory,
@@ -453,6 +465,11 @@ tests and adding the cache skips 0 more. The case a cache can serve and selectio
 is a change of unknown extent, a merge or a pull, where nothing names the change as a
 symbol: there it runs 11.6 of 54, leaving 79% of verdicts standing. Decide which of
 those the feature is for before making the graph more precise.
+
+The 54-test and 49-test figures below are from when they were taken; the suite is
+53 tests as of 2026-08-25 and the blast-radius figures moved with it. Re-run
+`axiom cache-audit` and `.github/scripts/blast_radius_stats.py` before quoting
+any of them.
 
 **The verdict cache is measured, not built, and the measurement says do not build it.**
 `axiom cache-audit` reads the same graph in the forward direction, from a test to what

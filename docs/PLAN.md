@@ -1,13 +1,16 @@
 # AXIOM: Implementation Plan & Delivery Status
 
-> **Status of this document.** The heading below says 100% implemented. That is
-> true of most of it and not all, and the difference is worth stating rather than
-> leaving to be discovered.
+> **Status of this document.** It is a plan, and the phase headings below mark
+> items COMPLETED that are not built. Rather than edit each one, the difference
+> is stated here and in
+> [ARCHITECTURE.md](ARCHITECTURE.md), whose Part 3 lists what is designed and not
+> built. Where the two disagree, believe ARCHITECTURE.md, and above all believe
+> the code.
 >
-> Built and exercised against a real 2,220-test repository: the polyglot index
-> and its persistence, blast-radius pruning, literal and regex search, the
-> Tree-CRDT, concurrent access to one workspace, and the provenance record with
-> Ed25519 signing and chaining.
+> Built and exercised against a real 3,429-test repository: the polyglot index
+> and its persistence, blast-radius pruning, literal and regex search, SCIP
+> ingestion, the Tree-CRDT, concurrent access to one workspace, and the
+> provenance record with Ed25519 signing and chaining.
 >
 > Not built, though listed below as completed:
 >
@@ -18,9 +21,13 @@
 >
 > Overstated rather than absent:
 >
-> * **Instant execution.** A snippet is compiled and run: median around 175ms.
->   The sub-millisecond figures date from when evaluation matched substrings and
->   ran nothing.
+> * **Instant execution.** A snippet is compiled and run: Rust median 271 ms on
+>   the development machine, measured 2026-08-25 with `axiom bench`. The
+>   sub-millisecond figures date from when evaluation matched substrings and ran
+>   nothing.
+> * **SLSA L4+ attestation.** The provenance record is real; it is not SLSA at
+>   any level, because nothing here rebuilds an artifact or establishes a
+>   hermetic build.
 > * **Zero false positives.** The sandbox reports `EvaluatorUnavailable` instead
 >   of a verdict when it cannot run something, which is what that phrase should
 >   mean here. It says nothing about the accuracy of the blast radius, which has
@@ -30,9 +37,12 @@
 
 ---
 
-### Status: 100% IMPLEMENTED, VERIFIED & PASSING
+### Status: the plan as written, with the gaps named above
 
-All architectural phases, dual execution engines, polyglot Merkle AST parser, Zoekt trigram search engine, Tree-CRDT multi-agent swarm engine, and SLSA L4+ attestation chains are fully implemented and verified with end-to-end test suites.
+Read every COMPLETED below against the status box at the top of this file. The
+polyglot index, trigram search, Tree-CRDT swarm engine and provenance chain are
+built and covered by the suite. The MicroVM tier, Tree-sitter parsing and SLSA
+attestation are not.
 
 ---
 

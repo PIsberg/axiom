@@ -5,7 +5,8 @@
 
 ## 1. Quickstart: Registering AXIOM MCP Server
 
-To enable an AI agent to use Axiom for zero-clone code navigation and sub-millisecond test sandboxing, register the Axiom server in your agent configuration file:
+To let an AI agent navigate code without cloning it and check a hypothesis without
+a CI round trip, register the Axiom server in your agent configuration file:
 
 ### Cursor (`~/.cursor/mcp.json`) / Claude Desktop (`claude_desktop_config.json`)
 ```json
@@ -33,7 +34,7 @@ sequenceDiagram
     actor AI as AI Coding Agent
     participant MCP as Axiom MCP Gateway
     participant AST as Merkle AST Engine
-    participant VMM as Sub-15ms Sandbox
+    participant VMM as Evaluator (wasmtime, or the real toolchain)
     participant Ledger as Provenance Ledger
 
     AI->>MCP: axiom_query_symbol("auth::service::validate_token")
@@ -46,7 +47,7 @@ sequenceDiagram
 
     loop Test-Driven Hypothesis Validation
         AI->>MCP: axiom_eval_patch(snippet), else axiom_record_verification
-        MCP->>VMM: Run the snippet in its own toolchain (rustc ~175ms, javac slower)
+        MCP->>VMM: Run the snippet in its own toolchain (rustc ~271ms median, javac slower)
         VMM-->>AI: CTOP JSON Report (Status: PASSED / FAILED + Hints)
     end
 
@@ -63,7 +64,7 @@ sequenceDiagram
 
 ## 3. MCP Tool Reference
 
-Seven tools. Every response below is what the current build returns; the shapes
+Eight tools. Every response below is what the current build returns; the shapes
 were captured from a running server rather than written from memory.
 
 A tool that cannot answer returns an `error` field rather than a plausible
@@ -159,12 +160,15 @@ mentions in comment-stripped source, attributed to the function they sit in
 rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
-Measured on this repository, 154 non-test symbols against 49 tests: a mean of
-3.1 impacted tests, 93.7% pruned, mean pairwise overlap between the radii of two
-symbols 0.07, and no symbol returning the whole suite. On a sample of ten symbols
-paired with a test that plainly exercises them, nine were found within the
-survey, seven of them at depth 1. The tenth is a private helper five calls below
-any test, which is past the survey.
+Measured on this repository on 2026-08-25 with
+`.github/scripts/blast_radius_stats.py`, 490 non-test symbols against 53 tests at
+depth 1: 103 symbols reach at least one test, and those select a mean of 10.1 and
+a median of 4, pruning a mean of 81.0% and a median of 92.5%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.11. The 387 symbols that reach
+no test are the honest answer for a helper nothing exercises directly, not a
+claim that changing one is safe.
+
+These figures move with the graph. Re-run the script rather than quoting them.
 
 ---
 
@@ -205,14 +209,19 @@ is in `engine`.
 | TypeScript | `deno`, else `tsc` then `node` | `tier2_native_typescript` |
 | Go | `go run` | `tier2_native_go` |
 | Java | `javac`, then `java -ea` | `tier2_native_java` |
-| Kotlin, Scala | none | refused |
+| Kotlin | `kotlinc`, then `kotlin -J-ea` | `tier2_native_kotlin` |
+| Scala | `scala` | `tier2_native_scala` |
 
 Assertions are supplied where the language does not have them built in. A
-JavaScript snippet gets `const assert = require('node:assert')` unless it
-already asked for it; Java runs with `-ea`, without which every `assert` is a
-no-op and a false one would look like a pass. A TypeScript snippet gets nothing,
-because deno and tsc-then-node disagree about how a module is reached, so bring
-your own check.
+JavaScript snippet gets `const assert = require('node:assert')` unless it already
+asked for it. Java and Kotlin run with assertions enabled (`-ea`, `-J-ea`),
+without which every `assert` is a no-op and a false one would look like a pass.
+Scala needs no flag, because `Predef.assert` throws unconditionally; a recipe
+copied from Java to Scala would carry a flag that does nothing, and one copied the
+other way would lose one that decides whether a false assertion reports `PASSED`.
+A TypeScript snippet gets nothing, because deno and tsc-then-node disagree about
+how a module is reached: write a bare `throw` rather than importing
+`node:assert`, which is TS2591 under `tsc`.
 
 **This is not a sandbox for anything but WebAssembly.** Tier 2 invokes the real
 compiler or interpreter with the privileges the axiom process holds, exactly as
@@ -224,15 +233,22 @@ terminates cannot hold the session open.
 Three answers mean nothing ran, and none of them is ever `PASSED`:
 
 * `EVALUATOR_UNAVAILABLE` with `UnsupportedLanguage`: the language has no
-  evaluator. Kotlin and Scala are read by the Java parser, which does not make
-  `javac` able to run them.
+  evaluator at all.
 * `EVALUATOR_UNAVAILABLE` naming the programs it looked for: the toolchain is
-  not on `PATH`, or `AXIOM_EVAL_NATIVE=off`.
+  not on `PATH`, or `AXIOM_EVAL_NATIVE=off`. A launcher that failed to fetch its
+  own compiler lands here too, rather than being reported as `FAILED`, because a
+  network error is not a verdict on your code.
 * `EVALUATOR_UNAVAILABLE` with `AmbiguousSymbol` and a `candidates` list: the
   name matches several symbols, so which language to use is unknown. Name one.
 
-In all three, run the project's own tests and report the outcome with
-`axiom_record_verification`; `axiom_get_blast_radius` will name the tests.
+In all three, run the project's own tests. Prefer `axiom_run_tests`, which runs
+them and sees the exit code itself; fall back to `axiom_record_verification` when
+you ran them some other way. `axiom_get_blast_radius` will name the tests.
+
+A first evaluation on a cold machine can outlast the deadline: `scala` and
+`kotlinc` fetch their compiler on first use, which took 187 s on a fresh CI
+runner and was killed at 30 s and reported as `TIMEOUT`. Raise
+`AXIOM_EVAL_TIMEOUT_SECS` for that first run.
 
 **Agent directive**: on `FAILED`, read the hint and actual output before changing
 the code. Keep the `task_id`, because a provenance record must name it.
@@ -254,9 +270,15 @@ Report a check axiom did not run, so a provenance record can rest on it.
   }
   ```
 
-This exists because the sandbox only compiles Rust. An agent that ran a project's
-own suite has checked something real and can say so; what it cannot do is have
-that recorded as axiom's own observation.
+Use this when axiom could not run the check itself: a suite driven by Maven,
+Gradle or a script, a run on another machine, a manual verification. An agent that
+ran a project's own suite has checked something real and can say so. What it
+cannot do is have that recorded as axiom's own observation, and the provenance
+record keeps the difference visible.
+
+Prefer `axiom_run_tests` where it applies. That one runs the command itself and
+records the outcome as `executed`, which axiom can vouch for; this one records
+`reported`, which it cannot.
 
 ---
 
@@ -380,22 +402,71 @@ fabricated 1.
 
 ---
 
+### 3.8 `axiom_run_tests`
+
+Run the project's own test command, so a provenance record can rest on a check
+axiom watched happen.
+
+* **Request**: `{"command": "cargo test --test e2e_test search_modes", "task_id": "run_01", "symbol_path": "crates/axiom-ast/src/lib.rs::AstIndex::search"}`
+* **Response**:
+  ```json
+  {
+    "task_id": "run_01",
+    "status": "PASSED",
+    "passed": true,
+    "recorded_as": "executed",
+    "command": "cargo test --test e2e_test search_modes",
+    "stdout": "...last 40 lines...",
+    "stderr": "",
+    "note": "Axiom ran this command and observed its exit code. A provenance record issued against this task will say the outcome was executed by axiom."
+  }
+  ```
+
+`command` is required; `task_id` is generated if omitted; `symbol_path` is
+recorded for context.
+
+**Build the command from what `axiom_get_blast_radius` named**, so only the
+affected tests run. That is the whole point of pairing the two:
+`cargo test --test e2e_test search_modes`, `pytest tests/test_gate.py::test_is_open`,
+`mvn -pl mod test -Dtest=TelemetryEventBufferTest`.
+
+The command runs in the workspace root under the same confined environment every
+evaluation gets, so it cannot read the signing key, and it is killed along with
+everything it started if it outruns `AXIOM_TEST_TIMEOUT_SECS` (default 600,
+separate from the evaluator's `AXIOM_EVAL_TIMEOUT_SECS`). Only the last 40 lines
+of each stream come back.
+
+A non-zero exit is recorded as a failed check, and attesting against a failed
+check is refused.
+
+**This is the middle of the three verification kinds.** `sandbox` means axiom
+compiled and ran the code itself; `executed` means axiom ran your command and saw
+the exit code; `reported` means an agent said so. Prefer this over
+`axiom_record_verification` whenever axiom can run the command, because a record
+resting on `executed` carries an observation and one resting on `reported`
+carries a claim.
+
+---
+
 ## 4. CLI Reference Commands
 
 | Command | Purpose |
 |---|---|
 | `axiom serve` | Starts the native MCP server over `stdio` (JSON-RPC 2.0) |
-| `axiom eval --symbol <SYM> -c <CODE>` | Compiles and runs a Rust snippet, exiting non-zero if it fails |
+| `axiom eval --symbol <SYM> -c <CODE>` | Compiles and runs a snippet in the symbol's own language, exiting non-zero if it fails or if nothing could be run. Not a sandbox outside WebAssembly |
 | `axiom symbol --path <SYM>` | Queries AST node metadata and type signatures |
-| `axiom blast-radius --symbol <SYM>` | Calculates impacted tests and pruned percentage |
-| `axiom bench --iterations <N>` | Measures how long axiom_eval_patch takes on this machine, reporting min, median, max and mean |
+| `axiom blast-radius --symbol <SYM> [--depth N]` | The tests that can reach a symbol, and the percentage pruned |
+| `axiom cache-validate --samples <N> --depth <N>` | Breaks symbols on purpose, runs the project's own suite, and checks the blast radius selected every test that really failed |
+| `axiom cache-audit --path <DIR>` | Measures what a verdict cache would decide against what the blast radius selects, without caching anything or skipping any test |
+| `axiom bench --iterations <N>` | Measures how long one Rust evaluation takes on this machine, reporting min, median, max and mean |
 | `axiom demo` | Runs live end-to-end agent workflow demonstration |
 | `axiom swarm --agents <N> --ops <M>` | Runs multi-agent Tree-CRDT swarm simulation |
 | `axiom verify --symbol <SYM> --prompt <P> [--trusted-key K]` | Looks the provenance record up, checks the chain, and checks the signature against a signer you name |
 | `axiom keygen --out <PATH>` | Generates an Ed25519 keypair for signing provenance records. Keep the private key outside any workspace you index |
 | `axiom mcp-config` | Outputs ready-to-copy JSON configuration for AI IDEs |
-| `axiom scan --path <DIR>` | Scans and indexes a real codebase into the Merkle AST CAS |
-| `axiom search --query <STR>` | Ultra-fast Zoekt trigram regex and text search across repo |
+| `axiom scan --path <DIR>` | Scans and indexes a real codebase into the Merkle AST store |
+| `axiom scan --scip <FILE> --path <DIR>` | Ingests a precise SCIP index instead of the heuristic line scan |
+| `axiom search --query <STR> [--mode literal\|regex\|auto]` | Trigram text search across the repository. Literal by default |
 | `axiom watch --path <DIR> [--interval-ms N] [--once]` | Re-indexes the tree when it changes, polling a cheap fingerprint between scans |
 | `axiom git-export` | Writes .axiom/export.md summarising the index. It does not touch git |
 | `axiom dashboard` | Prints a one-shot snapshot of the workspace: symbol counts by kind, index file size, CRDT node count, Merkle root, provenance record count. Not a TUI and not a live feed |

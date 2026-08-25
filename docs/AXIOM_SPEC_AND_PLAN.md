@@ -1,8 +1,16 @@
 # AXIOM: Agent-Native Autonomous Software Engine
 
-> **This is a specification.** It describes what Axiom is designed to be.
-> For what is built, see the status table at the top of
-> [ARCHITECTURE.md](ARCHITECTURE.md).
+> **This is a specification and a roadmap, not a description of the build.** It
+> describes what Axiom is designed to be, including components that do not exist,
+> and it opens by saying axiom replaces Git and CI, which it does not: axiom sits
+> beside them. For what is built, read [ARCHITECTURE.md](ARCHITECTURE.md), Part 2
+> for what exists and Part 3 for what does not.
+>
+> One term below is wrong rather than merely unbuilt: **SLSA Level 4+**. SLSA is a
+> standard about build provenance and hermeticity. What is specified here, and
+> what is built, signs a prompt digest and a verification trace, which would not
+> be SLSA at any level even if every unbuilt part shipped. Do not carry the term
+> forward.
 
 ## System Architecture Specification & Engineering Roadmap
 

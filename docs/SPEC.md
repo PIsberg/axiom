@@ -1,8 +1,17 @@
 # AXIOM: Agent-Native Autonomous Software Engine
 
-> **This is a specification.** It describes what Axiom is designed to be.
-> For what is built, see the status table at the top of
-> [ARCHITECTURE.md](ARCHITECTURE.md).
+> **This is a specification, not a description of the build.** It describes what
+> Axiom is designed to be, including components that do not exist. For what is
+> built, read [ARCHITECTURE.md](ARCHITECTURE.md), whose Part 2 covers the
+> components that exist and whose Part 3 lists the ones that do not. For what is
+> and is not contained at runtime, read
+> [axiom_security_framework.md](axiom_security_framework.md).
+>
+> One term below is wrong rather than merely unbuilt: **SLSA Level 4+**. SLSA is a
+> standard about build provenance and hermeticity. What is specified here, and
+> what is built, signs a prompt digest and a verification trace, which would not
+> be SLSA at any level even if every unbuilt part shipped. Do not carry the term
+> forward.
 
 ## System Architecture Specification
 

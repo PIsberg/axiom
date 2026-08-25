@@ -123,8 +123,8 @@ Once connected, your agent receives the following 8 tools:
 | Tool | Purpose | Primary Inputs |
 | :--- | :--- | :--- |
 | `axiom_query_symbol` | Query exact AST symbol metadata, declarations & dependencies | `symbol_path` |
-| `axiom_get_blast_radius` | Topological predictive test impact analysis (80–99% pruned) | `symbol_path`, `max_depth` |
-| `axiom_eval_patch` | Sub-second sandbox compilation & evaluation (Java, Rust, Python, Go, TS/JS, Scala, Kotlin) | `symbol_path`, `code_snippet` |
+| `axiom_get_blast_radius` | The tests that can reach a symbol. How much it prunes depends on the suite: measured medians are 99.8% on a 3,429-test Java tree and 92.5% on a 53-test Rust one | `symbol_path`, `max_depth` |
+| `axiom_eval_patch` | Compile and run a snippet in the symbol's own language (Rust, Java, Python, Go, TS/JS, Kotlin, Scala, WebAssembly), or refuse. Sandboxed only for WebAssembly; every other language runs on the host | `symbol_path`, `code_snippet` |
 | `axiom_run_tests` | Run targeted test suites and record execution verifications | `command`, `task_id`, `symbol_path` |
 | `axiom_record_verification` | Record external check outcomes for provenance | `task_id`, `passed`, `command` |
 | `axiom_apply_mutation` | Tree-CRDT atomic symbol patch preventing textual merge conflicts | `node_id`, `symbol_path`, `content` |
