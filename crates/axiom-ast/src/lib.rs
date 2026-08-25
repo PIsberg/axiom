@@ -1045,14 +1045,14 @@ impl AstIndex {
         }
 
         // Expand any impacted test classes to include their individual test methods
+        let mut impacted_set: HashSet<String> = impacted_tests.iter().cloned().collect();
         let mut method_expansions = Vec::new();
         for test_sym in &impacted_tests {
             let prefix = format!("{}::", test_sym);
             for (sym, node) in nodes.iter() {
                 if node.kind == "test"
                     && sym.starts_with(&prefix)
-                    && !impacted_tests.contains(sym)
-                    && !method_expansions.contains(sym)
+                    && impacted_set.insert(sym.clone())
                 {
                     method_expansions.push(sym.clone());
                     tests_by_depth.entry(1).or_default().push(sym.clone());
@@ -1087,7 +1087,7 @@ impl AstIndex {
                             .dependencies
                             .iter()
                             .any(|d| d == simple_name || d == &canonical_symbol))
-                    && !impacted_tests.contains(sym)
+                    && impacted_set.insert(sym.clone())
                 {
                     impacted_tests.push(sym.clone());
                     tests_by_depth.entry(1).or_default().push(sym.clone());
