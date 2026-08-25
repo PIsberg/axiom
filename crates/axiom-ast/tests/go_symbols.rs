@@ -201,3 +201,32 @@ fn a_go_test_function_is_indexed_as_a_test() {
         "test"
     );
 }
+
+#[test]
+fn generic_go_functions_types_and_methods_are_indexed() {
+    let dir = TempDir::new("generics");
+    dir.write(
+        "generics.go",
+        "package main\n\n\
+         type Stack[T any] struct {\n\
+         \x20   items []T\n\
+         }\n\n\
+         type Container[K comparable, V any] interface {\n\
+         \x20   Get(k K) V\n\
+         }\n\n\
+         func (s *Stack[T]) Push(item T) {\n\
+         \x20   s.items = append(s.items, item)\n\
+         }\n\n\
+         func MapValues[K comparable, V any, R any](m map[K]V, f func(V) R) map[K]R {\n\
+         \x20   return nil\n\
+         }\n",
+    );
+
+    let index = scan(&dir);
+    let symbols = index.symbol_paths();
+
+    assert!(index.get_symbol("Stack").is_some(), "generic struct Stack indexed: {symbols:?}");
+    assert!(index.get_symbol("Container").is_some(), "generic interface Container indexed: {symbols:?}");
+    assert!(symbols.iter().any(|s| s.ends_with("::Stack::Push")), "method on generic receiver indexed: {symbols:?}");
+    assert!(index.get_symbol("MapValues").is_some(), "generic free function MapValues indexed: {symbols:?}");
+}

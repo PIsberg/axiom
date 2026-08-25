@@ -2402,6 +2402,11 @@ impl AstIndex {
                 continue;
             }
 
+            let is_indented = line.starts_with(' ') || line.starts_with('\t');
+            if !is_indented && !trimmed.starts_with("class ") {
+                current_class.clear();
+            }
+
             if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
                 imports.push(trimmed.to_string());
             } else if trimmed.starts_with("class ") {
@@ -2441,8 +2446,8 @@ impl AstIndex {
                     .trim()
                     .to_string();
 
-                if !name.is_empty() {
-                    let symbol = if !current_class.is_empty() {
+                if Self::is_valid_identifier(&name) {
+                    let symbol = if is_indented && !current_class.is_empty() {
                         format!("{}::{}::{}", file_path, current_class, name)
                     } else {
                         format!("{}::{}", file_path, name)
@@ -2553,23 +2558,39 @@ impl AstIndex {
     fn go_receiver_and_name(after_func: &str) -> (Option<String>, String) {
         let rest = after_func.trim_start();
         let Some(inner) = rest.strip_prefix('(') else {
-            let name = rest.split('(').next().unwrap_or("").trim().to_string();
+            let name = rest
+                .split('(')
+                .next()
+                .unwrap_or("")
+                .split('[')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             return (None, name);
         };
 
         let Some(end) = inner.find(')') else {
             return (None, String::new());
         };
-        // `a *Alpha` or `Alpha`: the type is the last word, and a pointer
+        // `a *Alpha` or `Alpha` or `s *Stack[T]`: the type is the last word, and a pointer
         // receiver is the same type as a value one.
-        let receiver = inner[..end]
+        let raw_receiver = inner[..end]
             .split_whitespace()
             .next_back()
             .unwrap_or("")
-            .trim_start_matches('*')
+            .trim_start_matches('*');
+        let receiver = raw_receiver
+            .split('[')
+            .next()
+            .unwrap_or("")
+            .trim()
             .to_string();
         let name = inner[end + 1..]
             .split('(')
+            .next()
+            .unwrap_or("")
+            .split('[')
             .next()
             .unwrap_or("")
             .trim()
@@ -2620,18 +2641,24 @@ impl AstIndex {
                 // alias, `type Meters float64`, is a declaration too and is
                 // indexed as one rather than being dropped for lacking a
                 // keyword.
-                let mut words = after_type.split_whitespace();
-                let Some(name) = words.next() else {
-                    continue;
-                };
-                let name = name.trim_end_matches('{').trim();
+                let name = after_type
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('[')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('{')
+                    .trim();
                 if !Self::is_valid_identifier(name) {
                     continue;
                 }
-                let kind = match words.next() {
-                    Some(w) if w.starts_with("interface") => "interface",
-                    Some(w) if w.starts_with("struct") => "struct",
-                    _ => "type",
+                let kind = if after_type.contains("interface") {
+                    "interface"
+                } else if after_type.contains("struct") {
+                    "struct"
+                } else {
+                    "type"
                 };
                 let symbol = format!("{file_path}::{name}");
                 self.index_node_at(

@@ -481,3 +481,30 @@ fn a_generic_rust_function_and_type_are_indexed_properly() {
     assert!(index.get_symbol("make_const").is_some(), "const fn make_const indexed");
     assert!(index.get_symbol("fetch_data").is_some(), "generic async fn fetch_data indexed");
 }
+
+#[test]
+fn python_class_scoping_resets_for_top_level_functions() {
+    let dir = TempDir::new("py-scope");
+    dir.write(
+        "module.py",
+        "class MyClass:\n\
+         \x20   def method_one(self):\n\
+         \x20       return 1\n\
+         \n\
+         def top_level_func():\n\
+         \x20   return 2\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::MyClass::method_one")),
+        "method_one is scoped under MyClass: {symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::top_level_func") && !s.contains("::MyClass::top_level_func")),
+        "top_level_func is NOT scoped under MyClass: {symbols:?}"
+    );
+}
