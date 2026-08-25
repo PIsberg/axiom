@@ -1538,7 +1538,7 @@ fn run_cache_validate(
             };
             let short = node
                 .symbol_path
-                .rsplit("::")
+                .rsplit([':', '#', '.'])
                 .next()
                 .unwrap_or(&node.symbol_path)
                 .to_string();
@@ -1683,7 +1683,7 @@ fn mutate_and_run(
     // blaming one symbol for breaking a test that a different symbol covered.
     let short = node
         .symbol_path
-        .rsplit("::")
+        .rsplit([':', '#', '.'])
         .next()
         .unwrap_or(&node.symbol_path)
         .to_string();
