@@ -598,7 +598,9 @@ impl AxiomMcpServer {
                         "version": "0.1.0"
                     },
                     "capabilities": {
-                        "tools": {}
+                        "tools": {},
+                        "resources": { "subscribe": false, "listChanged": false },
+                        "prompts": { "listChanged": false }
                     },
                     // The loop these tools are for, in the field MCP provides so
                     // a client can put it in front of the model without the
@@ -609,6 +611,156 @@ impl AxiomMcpServer {
                 })),
                 error: None,
             },
+
+            "resources/list" => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(json!({
+                    "resources": [
+                        {
+                            "uri": "axiom://symbols",
+                            "name": "Axiom Workspace Symbols",
+                            "description": "All indexed AST symbols in the codebase CAS",
+                            "mimeType": "application/json"
+                        },
+                        {
+                            "uri": "axiom://ledger",
+                            "name": "Axiom Attestation Ledger",
+                            "description": "Cryptographic provenance attestation ledger",
+                            "mimeType": "application/json"
+                        }
+                    ],
+                    "resourceTemplates": [
+                        {
+                            "uriTemplate": "axiom://symbols/{symbol_path}",
+                            "name": "AST Symbol",
+                            "description": "AST metadata, signature, and dependency graph for a symbol",
+                            "mimeType": "application/json"
+                        },
+                        {
+                            "uriTemplate": "axiom://blast-radius/{symbol_path}",
+                            "name": "Blast Radius",
+                            "description": "Pruned test targets and reachability graph for a symbol",
+                            "mimeType": "application/json"
+                        }
+                    ]
+                })),
+                error: None,
+            },
+
+            "resources/read" => {
+                let params = req.params.unwrap_or(Value::Null);
+                let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+                let read_res = self.handle_resource_read(uri);
+                match read_res {
+                    Ok(val) => JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: Some(json!({
+                            "contents": [
+                                {
+                                    "uri": uri,
+                                    "mimeType": "application/json",
+                                    "text": serde_json::to_string_pretty(&val).unwrap_or_default()
+                                }
+                            ]
+                        })),
+                        error: None,
+                    },
+                    Err(e) => JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: None,
+                        error: Some(json!({
+                            "code": -32602,
+                            "message": e
+                        })),
+                    },
+                }
+            }
+
+            "prompts/list" => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(json!({
+                    "prompts": [
+                        {
+                            "name": "axiom_review_patch",
+                            "description": "Review a proposed code patch against AST blast radius and security rules",
+                            "arguments": [
+                                {
+                                    "name": "symbol_path",
+                                    "description": "Symbol path being reviewed",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        {
+                            "name": "axiom_targeted_refactor",
+                            "description": "Safely refactor a code symbol using blast radius test selection and atomic mutations",
+                            "arguments": [
+                                {
+                                    "name": "target_symbol",
+                                    "description": "The symbol to refactor",
+                                    "required": true
+                                },
+                                {
+                                    "name": "goal",
+                                    "description": "Refactoring objective",
+                                    "required": true
+                                }
+                            ]
+                        },
+                        {
+                            "name": "axiom_attest_task",
+                            "description": "Attest a task completion with cryptographic Merkle proof",
+                            "arguments": [
+                                {
+                                    "name": "prompt",
+                                    "description": "The user task prompt",
+                                    "required": true
+                                },
+                                {
+                                    "name": "symbol_path",
+                                    "description": "The modified symbol",
+                                    "required": true
+                                },
+                                {
+                                    "name": "ctop_task_id",
+                                    "description": "CTOP task ID",
+                                    "required": false
+                                }
+                            ]
+                        }
+                    ]
+                })),
+                error: None,
+            },
+
+            "prompts/get" => {
+                let params = req.params.unwrap_or(Value::Null);
+                let prompt_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+
+                let prompt_res = self.handle_prompt_get(prompt_name, &args);
+                match prompt_res {
+                    Ok(val) => JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: Some(val),
+                        error: None,
+                    },
+                    Err(e) => JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: None,
+                        error: Some(json!({
+                            "code": -32602,
+                            "message": e
+                        })),
+                    },
+                }
+            }
 
             "tools/list" => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
@@ -777,6 +929,120 @@ impl AxiomMcpServer {
                     "message": format!("Method '{}' not found", req.method)
                 })),
             },
+        }
+    }
+
+    fn handle_resource_read(&self, uri: &str) -> Result<Value, String> {
+        if uri == "axiom://symbols" {
+            let symbols = self.ast_index.symbol_paths();
+            return Ok(json!({
+                "total": symbols.len(),
+                "symbols": symbols
+            }));
+        }
+
+        if let Some(symbol) = uri.strip_prefix("axiom://symbols/") {
+            if let Some(node) = self.ast_index.get_symbol(symbol) {
+                return Ok(json!(node));
+            }
+            let candidates = self.ast_index.candidates_for(symbol);
+            if candidates.len() > 1 {
+                return Err(format!("Symbol '{symbol}' is ambiguous; matches: {:?}", candidates));
+            }
+            return Err(format!("Symbol '{symbol}' not found in AST index"));
+        }
+
+        if uri == "axiom://ledger" {
+            let ledger_path = self.ledger_path();
+            let records = load_attestations_from(&ledger_path).map_err(|e| e.to_string())?;
+            return Ok(json!({
+                "count": records.len(),
+                "attestations": records
+            }));
+        }
+
+        if let Some(seal) = uri.strip_prefix("axiom://ledger/") {
+            let ledger_path = self.ledger_path();
+            let records = load_attestations_from(&ledger_path).map_err(|e| e.to_string())?;
+            if let Some(record) = records.iter().find(|r| r.seal == seal) {
+                return Ok(json!(record));
+            }
+            return Err(format!("Seal '{seal}' not found in attestation ledger"));
+        }
+
+        if let Some(symbol) = uri.strip_prefix("axiom://blast-radius/") {
+            let radius = self.ast_index.compute_blast_radius(symbol, 1);
+            match radius {
+                Some(r) => return Ok(json!(r)),
+                None => return Err(format!("Blast radius could not be computed for '{symbol}'")),
+            }
+        }
+
+        Err(format!("Resource URI '{uri}' is not supported"))
+    }
+
+    fn handle_prompt_get(&self, name: &str, args: &Value) -> Result<Value, String> {
+        match name {
+            "axiom_review_patch" => {
+                let symbol_path = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(json!({
+                    "description": "Review a proposed code patch against AST blast radius and security rules",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": {
+                                "type": "text",
+                                "text": format!(
+                                    "Please review changes affecting symbol '{}'. Query its AST signature and blast radius to verify impacted tests and sandbox safety before attesting.",
+                                    symbol_path
+                                )
+                            }
+                        }
+                    ]
+                }))
+            }
+
+            "axiom_targeted_refactor" => {
+                let target_symbol = args.get("target_symbol").and_then(|v| v.as_str()).unwrap_or("");
+                let goal = args.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(json!({
+                    "description": "Safely refactor a code symbol using blast radius test selection and atomic mutations",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": {
+                                "type": "text",
+                                "text": format!(
+                                    "Refactor symbol '{}' to accomplish: {}.\nStep 1: axiom_query_symbol\nStep 2: axiom_get_blast_radius\nStep 3: axiom_apply_mutation\nStep 4: axiom_eval_patch / axiom_run_tests\nStep 5: axiom_attest_commit",
+                                    target_symbol, goal
+                                )
+                            }
+                        }
+                    ]
+                }))
+            }
+
+            "axiom_attest_task" => {
+                let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol_path = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(json!({
+                    "description": "Attest a task completion with cryptographic Merkle proof",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": {
+                                "type": "text",
+                                "text": format!(
+                                    "Attest task completion for prompt '{}' on symbol '{}'. Ensure execution verification passes.",
+                                    prompt, symbol_path
+                                )
+                            }
+                        }
+                    ]
+                }))
+            }
+
+            _ => Err(format!("Prompt '{}' not found", name)),
         }
     }
 
