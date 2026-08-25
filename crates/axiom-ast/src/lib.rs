@@ -1074,7 +1074,7 @@ impl AstIndex {
 
                     // OOP Interface & Class Hierarchy Propagation:
                     // If key is an interface or base class, traverse all derived subclasses/implementors
-                    for impl_cls in self.get_implementors(*key) {
+                    for impl_cls in self.get_implementors(key) {
                         if visited.insert(impl_cls.clone()) {
                             queue.push_back((impl_cls, depth + 1));
                         }
@@ -2590,7 +2590,7 @@ impl AstIndex {
                         if let Some(bases_str) = trimmed.split('(').nth(1).and_then(|s| s.split(')').next()) {
                             for base in bases_str.split(',') {
                                 let base_clean = base.trim();
-                                let base_name = base_clean.split('.').last().unwrap_or(base_clean).trim();
+                                let base_name = base_clean.split('.').next_back().unwrap_or(base_clean).trim();
                                 if Self::is_valid_identifier(base_name) {
                                     self.register_inheritance(&symbol, base_name);
                                     self.register_inheritance(&name, base_name);

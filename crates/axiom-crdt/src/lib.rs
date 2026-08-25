@@ -389,28 +389,28 @@ pub fn merge_statements_3way(base: &str, local: &str, remote: &str) -> (String, 
     let mut local_has_base = vec![false; base_lines.len()];
     let mut prev_l = 0;
     for &(b_i, l_i) in &matches_l {
-        for l in prev_l..l_i {
-            local_before[b_i].push(local_lines[l].to_string());
+        for line in &local_lines[prev_l..l_i] {
+            local_before[b_i].push((*line).to_string());
         }
         local_has_base[b_i] = true;
         prev_l = l_i + 1;
     }
-    for l in prev_l..local_lines.len() {
-        local_before[base_lines.len()].push(local_lines[l].to_string());
+    for line in &local_lines[prev_l..] {
+        local_before[base_lines.len()].push((*line).to_string());
     }
 
     let mut remote_before: Vec<Vec<String>> = vec![Vec::new(); base_lines.len() + 1];
     let mut remote_has_base = vec![false; base_lines.len()];
     let mut prev_r = 0;
     for &(b_i, r_i) in &matches_r {
-        for r in prev_r..r_i {
-            remote_before[b_i].push(remote_lines[r].to_string());
+        for line in &remote_lines[prev_r..r_i] {
+            remote_before[b_i].push((*line).to_string());
         }
         remote_has_base[b_i] = true;
         prev_r = r_i + 1;
     }
-    for r in prev_r..remote_lines.len() {
-        remote_before[base_lines.len()].push(remote_lines[r].to_string());
+    for line in &remote_lines[prev_r..] {
+        remote_before[base_lines.len()].push((*line).to_string());
     }
 
     let mut result = Vec::new();
