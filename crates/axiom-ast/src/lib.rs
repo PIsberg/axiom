@@ -2997,19 +2997,34 @@ impl ZoektIndex {
             all_ids()
         } else if query_bytes.len() >= 3 {
             let mut candidate_set: Option<HashSet<u32>> = None;
+            let mut missing_trigram = false;
             for i in 0..query_bytes.len() - 2 {
                 let tri = [query_bytes[i], query_bytes[i + 1], query_bytes[i + 2]];
-                if let Some(set) = self.trigrams.get(&tri) {
-                    if let Some(ref mut c) = candidate_set {
-                        *c = c.intersection(set).copied().collect();
-                    } else {
-                        candidate_set = Some(set.clone());
+                match self.trigrams.get(&tri) {
+                    Some(set) => {
+                        if let Some(ref mut c) = candidate_set {
+                            c.retain(|id| set.contains(id));
+                            if c.is_empty() {
+                                missing_trigram = true;
+                                break;
+                            }
+                        } else {
+                            candidate_set = Some(set.clone());
+                        }
+                    }
+                    None => {
+                        missing_trigram = true;
+                        break;
                     }
                 }
             }
-            match candidate_set {
-                Some(c) => c.into_iter().collect(),
-                None => all_ids(),
+            if missing_trigram {
+                Vec::new()
+            } else {
+                match candidate_set {
+                    Some(c) => c.into_iter().collect(),
+                    None => all_ids(),
+                }
             }
         } else {
             all_ids()
@@ -3797,5 +3812,21 @@ mod stripping {
             src.split('\n').count(),
             "stripping this crate's own source moved a line"
         );
+    }
+
+    #[test]
+    fn zoekt_trigram_prunes_missing_trigrams_without_scanning() {
+        let mut zoekt = super::ZoektIndex::new();
+        zoekt.add_document("file1.rs", "fn compute_magic_number() -> i32 { 42 }\n");
+        zoekt.add_document("file2.rs", "fn other_function() -> bool { true }\n");
+
+        // Literal query with absent trigram should return empty results instantly
+        let results = zoekt.search("nonexistent_symbol_xyz", None, 10);
+        assert!(results.is_empty());
+
+        // Literal query present in file1
+        let results = zoekt.search("compute_magic_number", None, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, "file1.rs");
     }
 }
