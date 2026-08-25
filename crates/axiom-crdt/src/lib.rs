@@ -186,11 +186,32 @@ impl TreeCrdt {
             } => {
                 if let Some(existing) = nodes.get_mut(&node_id) {
                     if timestamp > existing.last_updated {
+                        let old_parent = existing.parent_id.clone();
+                        existing.symbol = symbol;
+                        existing.kind = kind;
                         existing.content = content;
                         existing.last_updated = timestamp;
                         existing.deleted = false;
+                        if old_parent != parent_id {
+                            existing.parent_id = parent_id.clone();
+                            if let Some(old_p) = nodes.get_mut(&old_parent) {
+                                old_p.children.retain(|c| c != &node_id);
+                            }
+                            if let Some(p) = nodes.get_mut(&parent_id) {
+                                if !p.children.contains(&node_id) {
+                                    p.children.push(node_id);
+                                }
+                            }
+                        }
                     }
                 } else {
+                    let mut children = Vec::new();
+                    for (id, n) in nodes.iter() {
+                        if n.parent_id == node_id && !children.contains(id) {
+                            children.push(id.clone());
+                        }
+                    }
+                    children.sort();
                     nodes.insert(
                         node_id.clone(),
                         CrdtNode {
@@ -201,7 +222,7 @@ impl TreeCrdt {
                             content,
                             last_updated: timestamp,
                             deleted: false,
-                            children: Vec::new(),
+                            children,
                         },
                     );
                     if let Some(p) = nodes.get_mut(&parent_id) {

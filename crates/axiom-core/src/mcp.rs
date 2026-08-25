@@ -1010,9 +1010,21 @@ impl AxiomMcpServer {
                     Err(e) => return Ok(json!({ "error": e })),
                 };
 
+                let (kind, deps, range, sig) =
+                    if let Some(existing) = self.ast_index.get_symbol(symbol) {
+                        (
+                            existing.kind,
+                            existing.dependencies,
+                            Some(existing.source_range),
+                            existing.signature.unwrap_or_default(),
+                        )
+                    } else {
+                        ("function".to_string(), vec![], None, String::new())
+                    };
+
                 let op = self
                     .tree_crdt
-                    .insert_node("root", node_id, symbol, "function", content);
+                    .insert_node("root", node_id, symbol, &kind, content);
 
                 // Record it where the next agent will see it.
                 if let Err(e) = append_crdt_op(&self.op_log_path(), &op) {
@@ -1021,7 +1033,7 @@ impl AxiomMcpServer {
                     }));
                 }
                 self.ast_index
-                    .index_node(symbol, "function", content, vec![]);
+                    .index_node_at(symbol, &kind, &sig, content, deps, range);
                 let root = self.tree_crdt.compute_tree_merkle_root();
 
                 // Save updated index to disk

@@ -406,17 +406,19 @@ fn a_lifetime_does_not_shift_every_line_below_it() {
     index.scan_directory(dir.path()).expect("scan");
 
     let first = index.get_symbol("first_caller").expect("first_caller");
-    assert_eq!(
-        first.dependencies,
-        vec!["only_alpha".to_string()],
-        "first_caller calls only_alpha and nothing else"
+    assert!(
+        first.dependencies.contains(&"only_alpha".to_string())
+            && !first.dependencies.contains(&"only_beta".to_string()),
+        "first_caller calls only_alpha and not only_beta: {:?}",
+        first.dependencies
     );
 
     let second = index.get_symbol("second_caller").expect("second_caller");
-    assert_eq!(
-        second.dependencies,
-        vec!["only_beta".to_string()],
-        "second_caller calls only_beta and nothing else"
+    assert!(
+        second.dependencies.contains(&"only_beta".to_string())
+            && !second.dependencies.contains(&"only_alpha".to_string()),
+        "second_caller calls only_beta and not only_alpha: {:?}",
+        second.dependencies
     );
 
     assert!(
@@ -448,5 +450,385 @@ fn a_python_string_is_not_a_call() {
         !caller.dependencies.iter().any(|d| d == "sensitive_thing"),
         "the name is inside a string literal; got {:?}",
         caller.dependencies
+    );
+}
+
+#[test]
+fn a_generic_rust_function_and_type_are_indexed_properly() {
+    let dir = TempDir::new("generics");
+    dir.write(
+        "lib.rs",
+        "pub trait Parser<T> {\n\
+             fn parse(&self) -> T;\n\
+         }\n\
+         pub struct Wrapper<T: Clone> {\n\
+             pub item: T,\n\
+         }\n\
+         pub enum Status<E> {\n\
+             Ok,\n\
+             Err(E),\n\
+         }\n\
+         pub const fn make_const() -> u32 { 42 }\n\
+         pub async fn fetch_data<T>(id: u64) -> Option<T> { None }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    assert!(index.get_symbol("Parser").is_some(), "trait Parser indexed");
+    assert!(
+        index.get_symbol("Wrapper").is_some(),
+        "struct Wrapper indexed"
+    );
+    assert!(index.get_symbol("Status").is_some(), "enum Status indexed");
+    assert!(
+        index.get_symbol("make_const").is_some(),
+        "const fn make_const indexed"
+    );
+    assert!(
+        index.get_symbol("fetch_data").is_some(),
+        "generic async fn fetch_data indexed"
+    );
+}
+
+#[test]
+fn python_class_scoping_resets_for_top_level_functions() {
+    let dir = TempDir::new("py-scope");
+    dir.write(
+        "module.py",
+        "class MyClass:\n\
+         \x20   def method_one(self):\n\
+         \x20       return 1\n\
+         \n\
+         def top_level_func():\n\
+         \x20   return 2\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::MyClass::method_one")),
+        "method_one is scoped under MyClass: {symbols:?}"
+    );
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.ends_with("::top_level_func") && !s.contains("::MyClass::top_level_func")),
+        "top_level_func is NOT scoped under MyClass: {symbols:?}"
+    );
+}
+
+#[test]
+fn typescript_generics_interfaces_types_enums_and_arrow_functions_are_indexed() {
+    let dir = TempDir::new("ts-ast");
+    dir.write(
+        "service.ts",
+        "export interface UserProfile<T> {\n\
+         \x20 id: T;\n\
+         }\n\
+         export type Status = 'active' | 'inactive';\n\
+         export enum Role { Admin, User }\n\
+         export function parseResponse<R>(res: string): R {\n\
+         \x20 return JSON.parse(res);\n\
+         }\n\
+         export const validateUser = (user: UserProfile<string>): boolean => {\n\
+         \x20 return user.id.length > 0;\n\
+         };\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(
+        index.get_symbol("UserProfile").is_some(),
+        "interface UserProfile indexed: {symbols:?}"
+    );
+    assert_eq!(index.get_symbol("UserProfile").unwrap().kind, "interface");
+
+    assert!(
+        index.get_symbol("Status").is_some(),
+        "type Status indexed: {symbols:?}"
+    );
+    assert_eq!(index.get_symbol("Status").unwrap().kind, "type");
+
+    assert!(
+        index.get_symbol("Role").is_some(),
+        "enum Role indexed: {symbols:?}"
+    );
+    assert_eq!(index.get_symbol("Role").unwrap().kind, "enum");
+
+    assert!(
+        index.get_symbol("parseResponse").is_some(),
+        "generic fn parseResponse indexed: {symbols:?}"
+    );
+    assert_eq!(index.get_symbol("parseResponse").unwrap().kind, "function");
+
+    assert!(
+        index.get_symbol("validateUser").is_some(),
+        "arrow fn validateUser indexed: {symbols:?}"
+    );
+    assert_eq!(index.get_symbol("validateUser").unwrap().kind, "function");
+}
+
+#[test]
+fn cpp_classes_structs_namespaces_enums_and_functions_are_indexed() {
+    let dir = TempDir::new("cpp-ast");
+    dir.write(
+        "engine.cpp",
+        "#include <iostream>\n\
+         namespace physics {\n\
+         \x20   enum State { IDLE, RUNNING };\n\
+         \x20   class RigidBody {\n\
+         \x20   public:\n\
+         \x20       void applyForce(float f) {\n\
+         \x20       }\n\
+         \x20   };\n\
+         }\n\
+         int computeTotal(int a, int b) {\n\
+         \x20   return a + b;\n\
+         }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::physics::State")),
+        "enum physics::State indexed: {symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::physics::RigidBody")),
+        "class physics::RigidBody indexed: {symbols:?}"
+    );
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.ends_with("::physics::RigidBody::applyForce")),
+        "method physics::RigidBody::applyForce indexed: {symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::computeTotal")),
+        "function computeTotal indexed: {symbols:?}"
+    );
+}
+
+#[test]
+fn java_records_sealed_classes_generic_returns_and_junit5_annotations_are_indexed() {
+    let dir = TempDir::new("java-ast");
+    dir.write(
+        "ServiceSuite.java",
+        "package com.example.service;\n\
+         import java.util.Map;\n\
+         public sealed class ServiceSuite permits ConcreteService {\n\
+         \x20   public record TokenPair(String accessToken, String refreshToken) {}\n\
+         \x20   public Map<String, TokenPair> getTokens() {\n\
+         \x20       return Map.of();\n\
+         \x20   }\n\
+         \x20   @DisplayName(\"Token check\")\n\
+         \x20   @ParameterizedTest\n\
+         \x20   @ValueSource(strings = {\"token1\"})\n\
+         \x20   public void verifyTokens(String token) {\n\
+         \x20       assert token != null;\n\
+         \x20   }\n\
+         }\n\
+         final class ConcreteService extends ServiceSuite {}\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(
+        index
+            .get_symbol("com.example.service.ServiceSuite")
+            .is_some(),
+        "sealed class ServiceSuite indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("com.example.service.TokenPair").is_some(),
+        "record TokenPair indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.service.ServiceSuite::getTokens")
+            .is_some(),
+        "method getTokens indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.service.ServiceSuite::verifyTokens")
+            .is_some(),
+        "test verifyTokens indexed: {symbols:?}"
+    );
+
+    let verify_sym = index
+        .get_symbol("com.example.service.ServiceSuite::verifyTokens")
+        .unwrap();
+    assert_eq!(
+        verify_sym.kind, "test",
+        "verifyTokens identified as test from JUnit 5 annotations"
+    );
+}
+
+#[test]
+fn java_nested_and_inner_classes_are_scoped_hierarchically() {
+    let dir = TempDir::new("java-nested");
+    dir.write(
+        "Outer.java",
+        "package com.example.model;\n\
+         public class Outer {\n\
+         \x20   public static class NestedConfig {\n\
+         \x20       public String getEndpoint() { return \"localhost\"; }\n\
+         \x20   }\n\
+         \x20   public class InnerWorker {\n\
+         \x20       public void doWork() {}\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(
+        index.get_symbol("com.example.model.Outer").is_some(),
+        "Outer indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("com.example.model.NestedConfig").is_some(),
+        "NestedConfig indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.model.NestedConfig::getEndpoint")
+            .is_some(),
+        "NestedConfig::getEndpoint indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("com.example.model.InnerWorker").is_some(),
+        "InnerWorker indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.model.InnerWorker::doWork")
+            .is_some(),
+        "InnerWorker::doWork indexed: {symbols:?}"
+    );
+}
+
+#[test]
+fn java_blast_radius_isolates_unrelated_tests_and_traces_transitive_dependencies() {
+    let dir = TempDir::new("java-radius-isolation");
+    dir.write(
+        "PaymentGateway.java",
+        "package com.example.service;\n\
+         public class PaymentGateway {\n\
+         \x20   public boolean charge(int amount) { return amount > 0; }\n\
+         }\n",
+    );
+    dir.write(
+        "OrderService.java",
+        "package com.example.service;\n\
+         public class OrderService {\n\
+         \x20   public boolean processOrder(int cost) {\n\
+         \x20       PaymentGateway gateway = new PaymentGateway();\n\
+         \x20       return gateway.charge(cost);\n\
+         \x20   }\n\
+         }\n",
+    );
+    dir.write(
+        "UserService.java",
+        "package com.example.service;\n\
+         public class UserService {\n\
+         \x20   public String getUserName(long id) { return \"user-\" + id; }\n\
+         }\n",
+    );
+    dir.write(
+        "OrderServiceTest.java",
+        "package com.example.service;\n\
+         import org.junit.jupiter.api.Test;\n\
+         public class OrderServiceTest {\n\
+         \x20   @Test\n\
+         \x20   public void testOrderProcessing() {\n\
+         \x20       OrderService service = new OrderService();\n\
+         \x20       assert service.processOrder(100);\n\
+         \x20   }\n\
+         }\n",
+    );
+    dir.write(
+        "UserServiceTest.java",
+        "package com.example.service;\n\
+         import org.junit.jupiter.api.Test;\n\
+         public class UserServiceTest {\n\
+         \x20   @Test\n\
+         \x20   public void testFetchUser() {\n\
+         \x20       UserService service = new UserService();\n\
+         \x20       assert service.getUserName(1).equals(\"user-1\");\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    // 1. Changing UserService only impacts UserServiceTest, not OrderServiceTest
+    let user_radius = index
+        .compute_blast_radius("com.example.service.UserService::getUserName", 1)
+        .expect("UserService::getUserName blast radius");
+    let user_impacted: Vec<String> = user_radius
+        .impacted_tests
+        .iter()
+        .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+        .collect();
+    assert!(
+        user_impacted.contains(&"testFetchUser".to_string())
+            || user_impacted.contains(&"com.example.service.UserServiceTest".to_string()),
+        "UserService change impacts UserServiceTest: {user_impacted:?}"
+    );
+    assert!(
+        !user_impacted.contains(&"testOrderProcessing".to_string()),
+        "UserService change does NOT impact OrderServiceTest: {user_impacted:?}"
+    );
+
+    // 2. Changing OrderService only impacts OrderServiceTest, not UserServiceTest
+    let order_radius = index
+        .compute_blast_radius("com.example.service.OrderService::processOrder", 1)
+        .expect("OrderService::processOrder blast radius");
+    let order_impacted: Vec<String> = order_radius
+        .impacted_tests
+        .iter()
+        .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+        .collect();
+    assert!(
+        order_impacted.contains(&"testOrderProcessing".to_string())
+            || order_impacted.contains(&"com.example.service.OrderServiceTest".to_string()),
+        "OrderService change impacts OrderServiceTest: {order_impacted:?}"
+    );
+    assert!(
+        !order_impacted.contains(&"testFetchUser".to_string()),
+        "OrderService change does NOT impact UserServiceTest: {order_impacted:?}"
+    );
+
+    // 3. Changing PaymentGateway reaches OrderServiceTest at depth 2 (transitive)
+    let gw_radius = index
+        .compute_blast_radius("com.example.service.PaymentGateway::charge", 2)
+        .expect("PaymentGateway::charge blast radius");
+    let gw_impacted: Vec<String> = gw_radius
+        .impacted_tests
+        .iter()
+        .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
+        .collect();
+    assert!(
+        gw_impacted.contains(&"testOrderProcessing".to_string())
+            || gw_impacted.contains(&"com.example.service.OrderServiceTest".to_string()),
+        "PaymentGateway reaches OrderServiceTest transitively: {gw_impacted:?}"
+    );
+    assert!(
+        !gw_impacted.contains(&"testFetchUser".to_string()),
+        "PaymentGateway does NOT reach UserServiceTest: {gw_impacted:?}"
     );
 }

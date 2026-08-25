@@ -112,3 +112,16 @@ async fn the_rustc_tier_names_the_engine_that_ran() {
         "a count has to say what it counts"
     );
 }
+
+#[tokio::test]
+async fn a_rust_test_function_in_snippet_is_executed_and_can_fail() {
+    if !rustc_is_installed() {
+        return;
+    }
+    let report = eval("fn test_failure() { assert!(1 + 1 == 3); }").await;
+    assert_eq!(report.status, CtopStatus::Failed, "{report:?}");
+    assert_eq!(report.engine, "tier1_native_rustc");
+
+    let report_pass = eval("fn test_success() { assert!(1 + 1 == 2); }").await;
+    assert_eq!(report_pass.status, CtopStatus::Passed, "{report_pass:?}");
+}

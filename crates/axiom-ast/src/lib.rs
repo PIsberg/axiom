@@ -865,6 +865,25 @@ impl AstIndex {
         hasher.finalize().to_hex().to_string()
     }
 
+    pub const SKIP_DIRS: &[&str] = &[
+        "target",
+        "node_modules",
+        "build",
+        "dist",
+        "vendor",
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".gradle",
+    ];
+
+    pub const SOURCE_EXTS: &[&str] = &[
+        "java", "rs", "py", "js", "ts", "jsx", "tsx", "mjs", "cjs", "go", "kt", "scala", "c",
+        "cpp", "cc", "cxx", "h", "hpp", "json", "toml",
+    ];
+
     fn fingerprint_dir(dir: &Path, out: &mut Vec<String>) {
         let read = match std::fs::read_dir(dir) {
             Ok(r) => r,
@@ -874,32 +893,12 @@ impl AstIndex {
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with('.')
-                    || name == "target"
-                    || name == "node_modules"
-                    || name == "build"
-                    || name == "dist"
-                {
+                if name.starts_with('.') || Self::SKIP_DIRS.contains(&name) {
                     continue;
                 }
                 Self::fingerprint_dir(&path, out);
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if !matches!(
-                    ext,
-                    "java"
-                        | "rs"
-                        | "py"
-                        | "js"
-                        | "ts"
-                        | "go"
-                        | "kt"
-                        | "scala"
-                        | "c"
-                        | "cpp"
-                        | "h"
-                        | "json"
-                        | "toml"
-                ) {
+                if !Self::SOURCE_EXTS.contains(&ext) {
                     continue;
                 }
                 let meta = match entry.metadata() {
@@ -963,6 +962,8 @@ impl AstIndex {
         }
 
         let mut tests_by_depth: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut tests_recorded: HashSet<String> = HashSet::new();
+        let mut impacted_set: HashSet<String> = HashSet::new();
 
         // Walk further than is reported. `impacted_tests` stays at `max_depth`,
         // because widening it costs precision: measured on a 2,219-test suite,
@@ -981,11 +982,10 @@ impl AstIndex {
             if let Some(node) = nodes.get(&curr) {
                 if node.kind == "test" {
                     let d = depth.max(1);
-                    let already = tests_by_depth.values().any(|v| v.contains(&curr));
-                    if !already {
+                    if tests_recorded.insert(curr.clone()) {
                         tests_by_depth.entry(d).or_default().push(curr.clone());
                     }
-                    if d <= max_depth && !impacted_tests.contains(&curr) {
+                    if d <= max_depth && impacted_set.insert(curr.clone()) {
                         impacted_tests.push(curr.clone());
                     }
                 }
@@ -1032,9 +1032,11 @@ impl AstIndex {
                         if let Some(syms) = file_syms.get(file_path) {
                             for sym in syms {
                                 if let Some(node) = nodes.get(sym) {
-                                    if node.kind == "test" && !impacted_tests.contains(sym) {
+                                    if node.kind == "test" && impacted_set.insert(sym.clone()) {
                                         impacted_tests.push(sym.clone());
-                                        tests_by_depth.entry(1).or_default().push(sym.clone());
+                                        if tests_recorded.insert(sym.clone()) {
+                                            tests_by_depth.entry(1).or_default().push(sym.clone());
+                                        }
                                     }
                                 }
                             }
@@ -1045,21 +1047,29 @@ impl AstIndex {
         }
 
         // Expand any impacted test classes to include their individual test methods
-        let mut method_expansions = Vec::new();
-        for test_sym in &impacted_tests {
-            let prefix = format!("{}::", test_sym);
+        let test_classes: Vec<String> = impacted_tests
+            .iter()
+            .filter(|s| !s.contains("::"))
+            .cloned()
+            .collect();
+
+        if !test_classes.is_empty() {
+            let mut method_expansions = Vec::new();
             for (sym, node) in nodes.iter() {
-                if node.kind == "test"
-                    && sym.starts_with(&prefix)
-                    && !impacted_tests.contains(sym)
-                    && !method_expansions.contains(sym)
-                {
-                    method_expansions.push(sym.clone());
-                    tests_by_depth.entry(1).or_default().push(sym.clone());
+                if node.kind == "test" && sym.contains("::") {
+                    let class_prefix = sym.split("::").next().unwrap_or("");
+                    if test_classes.iter().any(|c| c == class_prefix)
+                        && impacted_set.insert(sym.clone())
+                    {
+                        method_expansions.push(sym.clone());
+                        if tests_recorded.insert(sym.clone()) {
+                            tests_by_depth.entry(1).or_default().push(sym.clone());
+                        }
+                    }
                 }
             }
+            impacted_tests.extend(method_expansions);
         }
-        impacted_tests.extend(method_expansions);
 
         // Fallback: a test whose own name carries the symbol's, for the case
         // where nothing in the graph reaches it.
@@ -1087,7 +1097,7 @@ impl AstIndex {
                             .dependencies
                             .iter()
                             .any(|d| d == simple_name || d == &canonical_symbol))
-                    && !impacted_tests.contains(sym)
+                    && impacted_set.insert(sym.clone())
                 {
                     impacted_tests.push(sym.clone());
                     tests_by_depth.entry(1).or_default().push(sym.clone());
@@ -1200,10 +1210,17 @@ impl AstIndex {
     fn key_under_root(root: &Path, path: &Path) -> String {
         match path.strip_prefix(root) {
             Ok(rest) => rest.to_string_lossy().replace('\\', "/"),
-            // Not below the root, which the walk should make impossible; fall
-            // back to the file's own absolute spelling rather than inventing a
-            // key. Rare enough that a non-portable key here is acceptable.
-            Err(_) => Self::canonical_key(path),
+            Err(_) => {
+                let root_str = root.to_string_lossy().replace('\\', "/");
+                let path_str = path.to_string_lossy().replace('\\', "/");
+                let root_norm = root_str.trim_start_matches("//?/").trim_end_matches('/');
+                let path_norm = path_str.trim_start_matches("//?/");
+                if let Some(rest) = path_norm.strip_prefix(root_norm) {
+                    rest.trim_start_matches('/').to_string()
+                } else {
+                    Self::canonical_key(path)
+                }
+            }
         }
     }
 
@@ -1253,7 +1270,7 @@ impl AstIndex {
     }
 
     /// Forget files recorded under this root by an earlier scan that this one did
-    /// not see and that are no longer on disk.
+    /// not see and that are no longer on disk, or obsolete non-portable keys.
     ///
     /// Scoped to the root on purpose. A scan is a statement about the tree it was
     /// pointed at and says nothing about anything else, so records from other
@@ -1274,6 +1291,12 @@ impl AstIndex {
             if visited.contains(&file_path) {
                 continue;
             }
+            // If the key is an absolute path, it is a non-portable key
+            // that must be purged when rescanning.
+            if Path::new(&file_path).is_absolute() || file_path.contains(':') {
+                self.forget_file(&file_path);
+                continue;
+            }
             // Resolve against the root this file was scanned under, not the
             // current scan's: a scan of one subtree must not judge a file from a
             // different subtree missing just because it is not under the tree
@@ -1282,12 +1305,8 @@ impl AstIndex {
                 .get(&file_path)
                 .map(|p| p.as_path())
                 .unwrap_or(abs_root);
-            let on_disk = if Path::new(&file_path).is_absolute() {
-                PathBuf::from(&file_path)
-            } else {
-                root.join(&file_path)
-            };
-            if !on_disk.exists() {
+            let on_disk = root.join(&file_path);
+            if root == abs_root || !on_disk.exists() {
                 self.forget_file(&file_path);
             }
         }
@@ -1463,46 +1482,29 @@ impl AstIndex {
                 // not the codebase under study. Indexing them buries the real
                 // symbols and fills the trigram store with vendored source.
                 // Hidden directories are skipped too, `.git` among them.
-                const SKIP: &[&str] = &[
-                    "target",
-                    "node_modules",
-                    "build",
-                    "dist",
-                    "vendor",
-                    "venv",
-                    ".venv",
-                    "__pycache__",
-                    ".mypy_cache",
-                    ".pytest_cache",
-                    ".gradle",
-                ];
-                if !dir_name.starts_with('.') && !SKIP.contains(&dir_name) {
+                if !dir_name.starts_with('.') && !Self::SKIP_DIRS.contains(&dir_name) {
                     self.walk_dir(&path, root, files, visited)?;
                 }
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    match ext {
-                        "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c"
-                        | "cpp" | "h" | "json" | "toml" => {
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                let rel = Self::key_under_root(root, &path);
-                                visited.insert(rel.clone());
+                    if Self::SOURCE_EXTS.contains(&ext) {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let rel = Self::key_under_root(root, &path);
+                            visited.insert(rel.clone());
 
-                                // Drop what this file contributed last time before
-                                // re-reading it, so a renamed or removed symbol does
-                                // not survive alongside its replacement.
-                                self.forget_file(&rel);
+                            // Drop what this file contributed last time before
+                            // re-reading it, so a renamed or removed symbol does
+                            // not survive alongside its replacement.
+                            self.forget_file(&rel);
 
-                                // Index into Zoekt Trigram store
-                                self.zoekt_index
-                                    .write()
-                                    .unwrap()
-                                    .add_document(&rel, &content);
+                            // Index into Zoekt Trigram store
+                            self.zoekt_index
+                                .write()
+                                .unwrap()
+                                .add_document(&rel, &content);
 
-                                files.push((rel, ext.to_string(), content));
-                            }
+                            files.push((rel, ext.to_string(), content));
                         }
-                        _ => {}
                     }
                 }
             }
@@ -1540,7 +1542,10 @@ impl AstIndex {
             return;
         }
 
-        let clean = Self::strip_comments_and_strings(content, matches!(ext, "py" | "js" | "ts"));
+        let clean = Self::strip_comments_and_strings(
+            content,
+            matches!(ext, "py" | "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs"),
+        );
         let mut refs: Vec<(usize, String)> = Vec::new();
 
         for (line_no, line) in clean.lines().enumerate() {
@@ -1583,8 +1588,13 @@ impl AstIndex {
             "java" | "kt" | "scala" => self.parse_java_content(file_path, content, nodes_count),
             "rs" => self.parse_rust_content(file_path, content, nodes_count),
             "py" => self.parse_python_content(file_path, content, nodes_count),
-            "ts" | "js" => self.parse_ts_js_content(file_path, content, nodes_count),
+            "ts" | "js" | "tsx" | "jsx" | "mjs" | "cjs" => {
+                self.parse_ts_js_content(file_path, content, nodes_count)
+            }
             "go" => self.parse_go_content(file_path, content, nodes_count),
+            "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" => {
+                self.parse_c_cpp_content(file_path, content, nodes_count)
+            }
             _ => {}
         }
     }
@@ -1947,6 +1957,8 @@ impl AstIndex {
                     || trimmed.starts_with("abstract ")
                     || trimmed.starts_with("final ")
                     || trimmed.starts_with("static ")
+                    || trimmed.starts_with("sealed ")
+                    || trimmed.starts_with("non-sealed ")
                     || trimmed.starts_with("@interface ")
                     || type_keywords
                         .iter()
@@ -1957,6 +1969,9 @@ impl AstIndex {
                     if pos + 1 < tokens.len() {
                         let raw_name = tokens[pos + 1]
                             .split('<')
+                            .next()
+                            .unwrap_or("")
+                            .split('(')
                             .next()
                             .unwrap_or("")
                             .replace('{', "");
@@ -2019,6 +2034,8 @@ impl AstIndex {
                 || trimmed.starts_with("@Test")
                 || trimmed.starts_with("@Override")
                 || trimmed.starts_with("@ParameterizedTest")
+                || trimmed.starts_with("@RepeatedTest")
+                || trimmed.starts_with("@TestFactory")
                 || trimmed.starts_with("@BeforeEach")
                 || trimmed.starts_with("@AfterEach")
                 || trimmed.starts_with("void ")
@@ -2040,8 +2057,30 @@ impl AstIndex {
                 // the parameters happen to close on.
                 let decl_start = i;
                 let mut full_sig = trimmed.to_string();
-                let is_annotated_test = full_sig.contains("@Test")
-                    || (i > 0 && lines[i - 1].trim().starts_with("@Test"));
+                let mut is_annotated_test = full_sig.contains("@Test")
+                    || full_sig.contains("@ParameterizedTest")
+                    || full_sig.contains("@RepeatedTest")
+                    || full_sig.contains("@TestFactory");
+
+                if !is_annotated_test {
+                    let mut prev_idx = decl_start;
+                    while prev_idx > 0 {
+                        prev_idx -= 1;
+                        let prev_line = lines[prev_idx].trim();
+                        if prev_line.starts_with('@') {
+                            if prev_line.starts_with("@Test")
+                                || prev_line.starts_with("@ParameterizedTest")
+                                || prev_line.starts_with("@RepeatedTest")
+                                || prev_line.starts_with("@TestFactory")
+                            {
+                                is_annotated_test = true;
+                                break;
+                            }
+                        } else if !prev_line.is_empty() {
+                            break;
+                        }
+                    }
+                }
 
                 // A wrapped parameter list once dropped a method entirely, so
                 // the signature is joined until the list closes.
@@ -2091,6 +2130,9 @@ impl AstIndex {
                         let raw_ret = sig_tokens[sig_tokens.len() - 2];
                         let ret_clean = raw_ret
                             .split('<')
+                            .next_back()
+                            .unwrap_or(raw_ret)
+                            .split(',')
                             .next_back()
                             .unwrap_or(raw_ret)
                             .replace('>', "")
@@ -2220,38 +2262,11 @@ impl AstIndex {
                 || trimmed.starts_with("*/"))
             {
                 if let Some(owner) = Self::rust_owner_opened_by(decl) {
-                    owner_stack.push((owner, depth + opens.max(1)));
-                } else if decl.starts_with("use ") {
-                    uses.push(decl.replace("use ", "").replace(';', "").trim().to_string());
-                } else if decl.contains("fn ")
-                    && (decl.starts_with("fn ")
-                        || decl.starts_with("pub ")
-                        || decl.starts_with("async ")
-                        || decl.starts_with("pub async ")
-                        || decl.starts_with("pub(crate) "))
-                {
-                    let name = decl
-                        .split('(')
-                        .next()
-                        .unwrap_or("")
-                        .split("fn ")
-                        .last()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-
-                    if Self::is_valid_identifier(&name) {
-                        // The whole stack, not its top. `mod alpha { impl X { fn y } }`
-                        // is `file.rs::alpha::X::y`, and two modules declaring
-                        // the same function are two keys rather than one node
-                        // overwriting the other.
-                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &name);
-                        let is_test = name.starts_with("test_") || decl.contains("#[test]");
-                        let kind = if is_test { "test" } else { "function" };
-
+                    if decl.contains("trait ") {
+                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &owner);
                         self.index_node_at(
                             &symbol,
-                            kind,
+                            "trait",
                             trimmed,
                             &Self::body_of(&raw, &counted, line_no),
                             uses.clone(),
@@ -2259,31 +2274,74 @@ impl AstIndex {
                         );
                         *nodes_count += 1;
                     }
-                } else if decl.starts_with("struct ")
-                    || decl.starts_with("pub struct ")
-                    || decl.starts_with("pub(crate) struct ")
-                    || decl.starts_with("enum ")
-                    || decl.starts_with("pub enum ")
-                {
-                    let name = decl
-                        .split_whitespace()
-                        .nth(if decl.starts_with("pub ") { 2 } else { 1 })
+                    owner_stack.push((owner, depth + opens.max(1)));
+                } else if decl.starts_with("use ") {
+                    uses.push(decl.replace("use ", "").replace(';', "").trim().to_string());
+                } else if decl.contains("fn ") {
+                    let before_paren = decl
+                        .split('(')
+                        .next()
                         .unwrap_or("")
-                        .replace(['{', ';'], "")
-                        .trim()
-                        .to_string();
+                        .split('{')
+                        .next()
+                        .unwrap_or("");
+                    let before_gen = before_paren.split('<').next().unwrap_or("");
+                    let words: Vec<&str> = before_gen.split_whitespace().collect();
+                    if words.len() >= 2 && words[words.len() - 2] == "fn" {
+                        let name = words[words.len() - 1].trim();
+                        if Self::is_valid_identifier(name) {
+                            let symbol = Self::rust_symbol_in(file_path, &owner_stack, name);
+                            let is_test = name.starts_with("test_") || decl.contains("#[test]");
+                            let kind = if is_test { "test" } else { "function" };
 
-                    if Self::is_valid_identifier(&name) {
-                        let symbol = Self::rust_symbol_in(file_path, &owner_stack, &name);
-                        self.index_node_at(
-                            &symbol,
-                            "struct",
-                            trimmed,
-                            &Self::body_of(&raw, &counted, line_no),
-                            uses.clone(),
-                            Some((line_no, line_no)),
-                        );
-                        *nodes_count += 1;
+                            self.index_node_at(
+                                &symbol,
+                                kind,
+                                trimmed,
+                                &Self::body_of(&raw, &counted, line_no),
+                                uses.clone(),
+                                Some((line_no, line_no)),
+                            );
+                            *nodes_count += 1;
+                        }
+                    }
+                } else if decl.contains("struct ")
+                    || decl.contains("enum ")
+                    || decl.contains("trait ")
+                {
+                    let before_body = decl
+                        .split('{')
+                        .next()
+                        .unwrap_or("")
+                        .split(';')
+                        .next()
+                        .unwrap_or("");
+                    let before_gen = before_body.split('<').next().unwrap_or("");
+                    let words: Vec<&str> = before_gen.split_whitespace().collect();
+                    if words.len() >= 2 {
+                        let prev = words[words.len() - 2];
+                        if prev == "struct" || prev == "enum" || prev == "trait" {
+                            let name = words[words.len() - 1].trim();
+                            if Self::is_valid_identifier(name) {
+                                let kind = if prev == "trait" {
+                                    "trait"
+                                } else if prev == "enum" {
+                                    "enum"
+                                } else {
+                                    "struct"
+                                };
+                                let symbol = Self::rust_symbol_in(file_path, &owner_stack, name);
+                                self.index_node_at(
+                                    &symbol,
+                                    kind,
+                                    trimmed,
+                                    &Self::body_of(&raw, &counted, line_no),
+                                    uses.clone(),
+                                    Some((line_no, line_no)),
+                                );
+                                *nodes_count += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -2411,6 +2469,11 @@ impl AstIndex {
                 continue;
             }
 
+            let is_indented = line.starts_with(' ') || line.starts_with('\t');
+            if !is_indented && !trimmed.starts_with("class ") {
+                current_class.clear();
+            }
+
             if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
                 imports.push(trimmed.to_string());
             } else if trimmed.starts_with("class ") {
@@ -2450,8 +2513,8 @@ impl AstIndex {
                     .trim()
                     .to_string();
 
-                if !name.is_empty() {
-                    let symbol = if !current_class.is_empty() {
+                if Self::is_valid_identifier(&name) {
+                    let symbol = if is_indented && !current_class.is_empty() {
                         format!("{}::{}::{}", file_path, current_class, name)
                     } else {
                         format!("{}::{}", file_path, name)
@@ -2494,6 +2557,7 @@ impl AstIndex {
             } else if decl.contains("function ")
                 || decl.starts_with("export function ")
                 || decl.starts_with("export async function ")
+                || decl.starts_with("async function ")
             {
                 let name = decl
                     .split('(')
@@ -2502,10 +2566,13 @@ impl AstIndex {
                     .split("function ")
                     .last()
                     .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
                     .trim()
                     .to_string();
 
-                if !name.is_empty() {
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
                     let symbol = format!("{}::{}", file_path, name);
                     let is_test = name.starts_with("test")
                         || file_path.contains("test")
@@ -2533,15 +2600,145 @@ impl AstIndex {
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
-                    .replace("{", "")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .replace('{', "")
                     .trim()
                     .to_string();
 
-                if !name.is_empty() {
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
                     let symbol = format!("{}::{}", file_path, name);
                     self.index_node_at(
                         &symbol,
                         "class",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if decl.starts_with("interface ")
+                || decl.starts_with("export interface ")
+                || decl.starts_with("export default interface ")
+            {
+                let name = decl
+                    .split("interface ")
+                    .last()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .replace('{', "")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    self.index_node_at(
+                        &symbol,
+                        "interface",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if decl.starts_with("type ") || decl.starts_with("export type ") {
+                let name = decl
+                    .split("type ")
+                    .last()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    self.index_node_at(
+                        &symbol,
+                        "type",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if decl.starts_with("enum ")
+                || decl.starts_with("export enum ")
+                || decl.starts_with("const enum ")
+                || decl.starts_with("export const enum ")
+            {
+                let name = decl
+                    .split("enum ")
+                    .last()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .replace('{', "")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    self.index_node_at(
+                        &symbol,
+                        "enum",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if (decl.starts_with("const ")
+                || decl.starts_with("export const ")
+                || decl.starts_with("let ")
+                || decl.starts_with("export let "))
+                && (decl.contains("=>")
+                    || decl.contains("= function")
+                    || decl.contains("= async function"))
+            {
+                let after_kw = if decl.contains("const ") {
+                    decl.split("const ").last().unwrap_or("")
+                } else {
+                    decl.split("let ").last().unwrap_or("")
+                };
+                let name = after_kw
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    let is_test = name.starts_with("test")
+                        || file_path.contains("test")
+                        || file_path.contains("spec");
+                    let kind = if is_test { "test" } else { "function" };
+
+                    self.index_node_at(
+                        &symbol,
+                        kind,
                         trimmed,
                         &Self::body_of(&raw, &stripped, line_no),
                         imports.clone(),
@@ -2562,23 +2759,39 @@ impl AstIndex {
     fn go_receiver_and_name(after_func: &str) -> (Option<String>, String) {
         let rest = after_func.trim_start();
         let Some(inner) = rest.strip_prefix('(') else {
-            let name = rest.split('(').next().unwrap_or("").trim().to_string();
+            let name = rest
+                .split('(')
+                .next()
+                .unwrap_or("")
+                .split('[')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             return (None, name);
         };
 
         let Some(end) = inner.find(')') else {
             return (None, String::new());
         };
-        // `a *Alpha` or `Alpha`: the type is the last word, and a pointer
+        // `a *Alpha` or `Alpha` or `s *Stack[T]`: the type is the last word, and a pointer
         // receiver is the same type as a value one.
-        let receiver = inner[..end]
+        let raw_receiver = inner[..end]
             .split_whitespace()
             .next_back()
             .unwrap_or("")
-            .trim_start_matches('*')
+            .trim_start_matches('*');
+        let receiver = raw_receiver
+            .split('[')
+            .next()
+            .unwrap_or("")
+            .trim()
             .to_string();
         let name = inner[end + 1..]
             .split('(')
+            .next()
+            .unwrap_or("")
+            .split('[')
             .next()
             .unwrap_or("")
             .trim()
@@ -2629,18 +2842,24 @@ impl AstIndex {
                 // alias, `type Meters float64`, is a declaration too and is
                 // indexed as one rather than being dropped for lacking a
                 // keyword.
-                let mut words = after_type.split_whitespace();
-                let Some(name) = words.next() else {
-                    continue;
-                };
-                let name = name.trim_end_matches('{').trim();
+                let name = after_type
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('[')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('{')
+                    .trim();
                 if !Self::is_valid_identifier(name) {
                     continue;
                 }
-                let kind = match words.next() {
-                    Some(w) if w.starts_with("interface") => "interface",
-                    Some(w) if w.starts_with("struct") => "struct",
-                    _ => "type",
+                let kind = if after_type.contains("interface") {
+                    "interface"
+                } else if after_type.contains("struct") {
+                    "struct"
+                } else {
+                    "type"
                 };
                 let symbol = format!("{file_path}::{name}");
                 self.index_node_at(
@@ -2687,6 +2906,170 @@ impl AstIndex {
         }
 
         names
+    }
+
+    fn parse_c_cpp_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
+        let clean = Self::strip_comments_and_strings(content, false);
+        let stripped: Vec<&str> = clean.lines().collect();
+        let raw: Vec<&str> = content.lines().collect();
+
+        let mut includes = Vec::new();
+        let mut scope_stack: Vec<(String, usize)> = Vec::new();
+        let mut depth = 0usize;
+
+        for (line_no, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            let decl = stripped.get(line_no).copied().unwrap_or("").trim();
+            let opens = decl.matches('{').count();
+            let closes = decl.matches('}').count();
+
+            if decl.starts_with("#include ") {
+                includes.push(trimmed.to_string());
+            } else if !decl.starts_with('#')
+                && !decl.starts_with("using ")
+                && !decl.starts_with("typedef ")
+            {
+                if decl.starts_with("namespace ") {
+                    let name = decl
+                        .split("namespace ")
+                        .last()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .replace('{', "")
+                        .trim()
+                        .to_string();
+                    if !name.is_empty() && Self::is_valid_identifier(&name) {
+                        scope_stack.push((name, depth + opens.max(1)));
+                    }
+                } else if decl.contains("class ")
+                    || decl.contains("struct ")
+                    || decl.contains("enum ")
+                {
+                    let kind = if decl.contains("class ") {
+                        "class"
+                    } else if decl.contains("enum ") {
+                        "enum"
+                    } else {
+                        "struct"
+                    };
+
+                    let after_kw = if decl.contains("class ") {
+                        decl.split("class ").last().unwrap_or("")
+                    } else if decl.contains("enum ") {
+                        decl.split("enum ").last().unwrap_or("")
+                    } else {
+                        decl.split("struct ").last().unwrap_or("")
+                    };
+
+                    let name = after_kw
+                        .split(':')
+                        .next()
+                        .unwrap_or("")
+                        .split('{')
+                        .next()
+                        .unwrap_or("")
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .split('<')
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+
+                    if !name.is_empty() && Self::is_valid_identifier(&name) {
+                        let prefix = scope_stack
+                            .iter()
+                            .map(|(s, _)| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        let symbol = if prefix.is_empty() {
+                            format!("{}::{}", file_path, name)
+                        } else {
+                            format!("{}::{}::{}", file_path, prefix, name)
+                        };
+
+                        self.index_node_at(
+                            &symbol,
+                            kind,
+                            trimmed,
+                            &Self::body_of(&raw, &stripped, line_no),
+                            includes.clone(),
+                            Some((line_no, line_no)),
+                        );
+                        *nodes_count += 1;
+
+                        if opens > closes && (kind == "class" || kind == "struct") {
+                            scope_stack.push((name, depth + opens.max(1)));
+                        }
+                    }
+                } else if decl.contains('(')
+                    && (opens > 0 || decl.ends_with(';') || decl.contains("->"))
+                {
+                    let before_paren = decl.split('(').next().unwrap_or("").trim();
+                    let before_gen = before_paren.split('<').next().unwrap_or("").trim();
+                    let last_token = before_gen
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("")
+                        .trim_start_matches('*')
+                        .trim_start_matches('&');
+
+                    let is_reserved = matches!(
+                        last_token,
+                        "if" | "while" | "for" | "switch" | "catch" | "return" | "sizeof"
+                    );
+
+                    if !is_reserved && !last_token.is_empty() {
+                        let name_parts: Vec<&str> = last_token.split("::").collect();
+                        let all_valid = name_parts.iter().all(|p| Self::is_valid_identifier(p));
+
+                        if all_valid {
+                            let prefix = scope_stack
+                                .iter()
+                                .map(|(s, _)| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join("::");
+                            let symbol = if prefix.is_empty() {
+                                format!("{}::{}", file_path, last_token)
+                            } else {
+                                format!("{}::{}::{}", file_path, prefix, last_token)
+                            };
+
+                            let is_test = last_token.starts_with("test_")
+                                || last_token.starts_with("Test")
+                                || file_path.contains("test");
+                            let kind = if is_test { "test" } else { "function" };
+
+                            self.index_node_at(
+                                &symbol,
+                                kind,
+                                trimmed,
+                                &Self::body_of(&raw, &stripped, line_no),
+                                includes.clone(),
+                                Some((line_no, line_no)),
+                            );
+                            *nodes_count += 1;
+                        }
+                    }
+                }
+            }
+
+            depth += opens;
+            depth = depth.saturating_sub(closes);
+            while let Some((_, closes_at)) = scope_stack.last() {
+                if depth < *closes_at {
+                    scope_stack.pop();
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Parse an index file.
@@ -2874,7 +3257,7 @@ impl AstIndex {
         // workspace root. Files that have since moved or been deleted are
         // skipped, which costs their text search rather than the whole load.
         let mut zoekt = ZoektIndex::new();
-        for file_path in payload.file_call_names.keys() {
+        for file_path in payload.file_to_symbols.keys() {
             let on_disk = match (&scan_root, Path::new(file_path).is_absolute()) {
                 (Some(root), false) => root.join(file_path),
                 _ => PathBuf::from(file_path),
@@ -2997,19 +3380,34 @@ impl ZoektIndex {
             all_ids()
         } else if query_bytes.len() >= 3 {
             let mut candidate_set: Option<HashSet<u32>> = None;
+            let mut missing_trigram = false;
             for i in 0..query_bytes.len() - 2 {
                 let tri = [query_bytes[i], query_bytes[i + 1], query_bytes[i + 2]];
-                if let Some(set) = self.trigrams.get(&tri) {
-                    if let Some(ref mut c) = candidate_set {
-                        *c = c.intersection(set).copied().collect();
-                    } else {
-                        candidate_set = Some(set.clone());
+                match self.trigrams.get(&tri) {
+                    Some(set) => {
+                        if let Some(ref mut c) = candidate_set {
+                            c.retain(|id| set.contains(id));
+                            if c.is_empty() {
+                                missing_trigram = true;
+                                break;
+                            }
+                        } else {
+                            candidate_set = Some(set.clone());
+                        }
+                    }
+                    None => {
+                        missing_trigram = true;
+                        break;
                     }
                 }
             }
-            match candidate_set {
-                Some(c) => c.into_iter().collect(),
-                None => all_ids(),
+            if missing_trigram {
+                Vec::new()
+            } else {
+                match candidate_set {
+                    Some(c) => c.into_iter().collect(),
+                    None => all_ids(),
+                }
             }
         } else {
             all_ids()
@@ -3797,5 +4195,21 @@ mod stripping {
             src.split('\n').count(),
             "stripping this crate's own source moved a line"
         );
+    }
+
+    #[test]
+    fn zoekt_trigram_prunes_missing_trigrams_without_scanning() {
+        let mut zoekt = super::ZoektIndex::new();
+        zoekt.add_document("file1.rs", "fn compute_magic_number() -> i32 { 42 }\n");
+        zoekt.add_document("file2.rs", "fn other_function() -> bool { true }\n");
+
+        // Literal query with absent trigram should return empty results instantly
+        let results = zoekt.search("nonexistent_symbol_xyz", None, 10);
+        assert!(results.is_empty());
+
+        // Literal query present in file1
+        let results = zoekt.search("compute_magic_number", None, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, "file1.rs");
     }
 }

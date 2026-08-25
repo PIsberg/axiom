@@ -240,3 +240,42 @@ fn scip_edges_are_resolved_not_matched() {
         radius.impacted_tests
     );
 }
+
+#[test]
+fn scip_ingest_reads_text_from_disk_when_doc_text_is_omitted() {
+    let dir = std::env::temp_dir().join(format!(
+        "axiom_scip_disk_{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file_path = dir.join("Gate.java");
+    std::fs::write(
+        &file_path,
+        "public class Gate { boolean isOpen() { return true; } }",
+    )
+    .unwrap();
+
+    let sym_name = sym("com/example/Gate#isOpen().");
+    let mut doc = Document::new();
+    doc.relative_path = "Gate.java".to_string();
+    doc.text = String::new(); // Omitted in SCIP index
+    doc.occurrences = vec![occ(sym_name.clone(), 0, DEF, 0)];
+    doc.symbols = vec![info(sym_name, Kind::Method, "boolean isOpen()")];
+
+    let mut index = Index::new();
+    index.documents = vec![doc];
+
+    let ast = AstIndex::new();
+    let summary = ast.ingest_scip_index(&index, &dir).expect("ingest");
+    assert_eq!(summary.files_scanned, 1);
+
+    // Zoekt can search text loaded from disk for SCIP files
+    let matches = ast.search_symbols_and_text("isOpen", 10);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].file_path, "Gate.java");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -65,11 +65,18 @@ impl Drop for Restore {
 /// tell that case apart and throw it away. These are chosen to keep the shape of
 /// the code and flip its meaning.
 const SWAPS: &[(&str, &str)] = &[
-    (" > ", " < "),
     (" >= ", " <= "),
+    (" <= ", " >= "),
+    (" > ", " < "),
+    (" < ", " > "),
     (" == ", " != "),
+    (" != ", " == "),
     (" && ", " || "),
+    (" || ", " && "),
     ("true", "false"),
+    ("false", "true"),
+    ("True", "False"),
+    ("False", "True"),
 ];
 
 /// Where a symbol's own lines are, found in the file rather than taken from
@@ -93,24 +100,40 @@ fn symbol_lines(lines: &[&str], short_name: &str) -> Option<(usize, usize)> {
         return None;
     }
 
-    // Found by shape, so that a file edited since the scan is still handled
-    // by what it says now rather than by what the index remembers.
-    let openers = [
-        format!("fn {short_name}("),
-        format!("def {short_name}("),
-        format!("func {short_name}("),
-        format!("function {short_name}("),
+    let decl_keywords = [
+        format!("fn {short_name}"),
+        format!("def {short_name}"),
+        format!("func {short_name}"),
+        format!("fun {short_name}"),
+        format!("function {short_name}"),
         format!("class {short_name}"),
+        format!("struct {short_name}"),
         format!("object {short_name}"),
         format!("trait {short_name}"),
-        format!("{short_name}("),
+        format!("interface {short_name}"),
+        format!("enum {short_name}"),
     ];
     let start = lines.iter().position(|l| {
         let t = l.trim_start();
         if t.starts_with("//") || t.starts_with('#') || t.starts_with('*') {
             return false;
         }
-        openers.iter().any(|o| t.contains(o.as_str()))
+        if decl_keywords.iter().any(|kw| t.contains(kw)) {
+            return true;
+        }
+        // Method or constructor declaration fallback (e.g. Java "public int name(" or "ClassName(")
+        if t.contains(&format!("{short_name}(")) || t.contains(&format!("{short_name}<")) {
+            let is_call_site = t.starts_with("let ")
+                || t.starts_with("return ")
+                || t.starts_with("if ")
+                || t.starts_with("while ")
+                || t.starts_with("match ")
+                || t.starts_with("for ")
+                || t.starts_with("assert")
+                || t.contains(&format!(".{short_name}("));
+            return !is_call_site;
+        }
+        false
     })?;
 
     let decl = lines[start];
@@ -227,6 +250,25 @@ mod tests {
             mutated.contains("return True"),
             "the next function must be untouched: {mutated}"
         );
+    }
+
+    #[test]
+    fn a_generic_symbol_is_found_and_call_site_is_ignored() {
+        let source = "fn caller() {\n    let x = is_open(10);\n}\n\npub fn is_open<T: Ord>(val: T) -> bool {\n    val > 0\n}\n";
+        let (mutated, _) = mutate_lines(source, "is_open").expect("is_open has one");
+        assert!(mutated.contains("val < 0"), "{mutated}");
+        assert!(mutated.contains("let x = is_open(10);"), "{mutated}");
+    }
+
+    #[test]
+    fn reverse_comparisons_and_python_booleans_are_swapped() {
+        let rs_source = "pub fn check(x: i32) -> bool {\n    x <= 10 && false\n}\n";
+        let (mutated_rs, _) = mutate_lines(rs_source, "check").expect("check has one");
+        assert!(mutated_rs.contains("x >= 10"), "{mutated_rs}");
+
+        let py_source = "def is_ready():\n    return True\n";
+        let (mutated_py, _) = mutate_lines(py_source, "is_ready").expect("is_ready has one");
+        assert!(mutated_py.contains("return False"), "{mutated_py}");
     }
 }
 
