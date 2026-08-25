@@ -865,6 +865,25 @@ impl AstIndex {
         hasher.finalize().to_hex().to_string()
     }
 
+    pub const SKIP_DIRS: &[&str] = &[
+        "target",
+        "node_modules",
+        "build",
+        "dist",
+        "vendor",
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".gradle",
+    ];
+
+    pub const SOURCE_EXTS: &[&str] = &[
+        "java", "rs", "py", "js", "ts", "jsx", "tsx", "mjs", "cjs", "go", "kt", "scala", "c",
+        "cpp", "h", "json", "toml",
+    ];
+
     fn fingerprint_dir(dir: &Path, out: &mut Vec<String>) {
         let read = match std::fs::read_dir(dir) {
             Ok(r) => r,
@@ -874,32 +893,12 @@ impl AstIndex {
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with('.')
-                    || name == "target"
-                    || name == "node_modules"
-                    || name == "build"
-                    || name == "dist"
-                {
+                if name.starts_with('.') || Self::SKIP_DIRS.contains(&name) {
                     continue;
                 }
                 Self::fingerprint_dir(&path, out);
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if !matches!(
-                    ext,
-                    "java"
-                        | "rs"
-                        | "py"
-                        | "js"
-                        | "ts"
-                        | "go"
-                        | "kt"
-                        | "scala"
-                        | "c"
-                        | "cpp"
-                        | "h"
-                        | "json"
-                        | "toml"
-                ) {
+                if !Self::SOURCE_EXTS.contains(&ext) {
                     continue;
                 }
                 let meta = match entry.metadata() {
@@ -1472,46 +1471,29 @@ impl AstIndex {
                 // not the codebase under study. Indexing them buries the real
                 // symbols and fills the trigram store with vendored source.
                 // Hidden directories are skipped too, `.git` among them.
-                const SKIP: &[&str] = &[
-                    "target",
-                    "node_modules",
-                    "build",
-                    "dist",
-                    "vendor",
-                    "venv",
-                    ".venv",
-                    "__pycache__",
-                    ".mypy_cache",
-                    ".pytest_cache",
-                    ".gradle",
-                ];
-                if !dir_name.starts_with('.') && !SKIP.contains(&dir_name) {
+                if !dir_name.starts_with('.') && !Self::SKIP_DIRS.contains(&dir_name) {
                     self.walk_dir(&path, root, files, visited)?;
                 }
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    match ext {
-                        "java" | "rs" | "py" | "js" | "ts" | "go" | "kt" | "scala" | "c"
-                        | "cpp" | "h" | "json" | "toml" => {
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                let rel = Self::key_under_root(root, &path);
-                                visited.insert(rel.clone());
+                    if Self::SOURCE_EXTS.contains(&ext) {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let rel = Self::key_under_root(root, &path);
+                            visited.insert(rel.clone());
 
-                                // Drop what this file contributed last time before
-                                // re-reading it, so a renamed or removed symbol does
-                                // not survive alongside its replacement.
-                                self.forget_file(&rel);
+                            // Drop what this file contributed last time before
+                            // re-reading it, so a renamed or removed symbol does
+                            // not survive alongside its replacement.
+                            self.forget_file(&rel);
 
-                                // Index into Zoekt Trigram store
-                                self.zoekt_index
-                                    .write()
-                                    .unwrap()
-                                    .add_document(&rel, &content);
+                            // Index into Zoekt Trigram store
+                            self.zoekt_index
+                                .write()
+                                .unwrap()
+                                .add_document(&rel, &content);
 
-                                files.push((rel, ext.to_string(), content));
-                            }
+                            files.push((rel, ext.to_string(), content));
                         }
-                        _ => {}
                     }
                 }
             }
@@ -1549,7 +1531,10 @@ impl AstIndex {
             return;
         }
 
-        let clean = Self::strip_comments_and_strings(content, matches!(ext, "py" | "js" | "ts"));
+        let clean = Self::strip_comments_and_strings(
+            content,
+            matches!(ext, "py" | "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs"),
+        );
         let mut refs: Vec<(usize, String)> = Vec::new();
 
         for (line_no, line) in clean.lines().enumerate() {
@@ -1592,7 +1577,9 @@ impl AstIndex {
             "java" | "kt" | "scala" => self.parse_java_content(file_path, content, nodes_count),
             "rs" => self.parse_rust_content(file_path, content, nodes_count),
             "py" => self.parse_python_content(file_path, content, nodes_count),
-            "ts" | "js" => self.parse_ts_js_content(file_path, content, nodes_count),
+            "ts" | "js" | "tsx" | "jsx" | "mjs" | "cjs" => {
+                self.parse_ts_js_content(file_path, content, nodes_count)
+            }
             "go" => self.parse_go_content(file_path, content, nodes_count),
             _ => {}
         }
