@@ -1,4 +1,4 @@
-use axiom_crdt::{TreeCrdt, SwarmRelay, merge_statements_3way};
+use axiom_crdt::{SwarmRelay, TreeCrdt, merge_statements_3way};
 
 #[test]
 fn test_statement_level_3way_merge_non_conflicting() {
@@ -28,7 +28,10 @@ fn test_statement_level_3way_merge_non_conflicting() {
 }"#;
 
     let (merged, has_conflicts) = merge_statements_3way(base, local, remote);
-    assert!(!has_conflicts, "Should merge non-overlapping statements without conflicts");
+    assert!(
+        !has_conflicts,
+        "Should merge non-overlapping statements without conflicts"
+    );
     assert!(merged.contains("metrics::increment(\"orders_processed\");"));
     assert!(merged.contains("send_confirmation_email(&order)?;"));
     assert!(merged.contains("validate_order(&order)?;"));
@@ -42,7 +45,10 @@ fn test_statement_level_3way_merge_conflicting() {
     let remote = "let timeout_secs = 90;";
 
     let (merged, has_conflicts) = merge_statements_3way(base, local, remote);
-    assert!(has_conflicts, "Conflicting edits to the same statement must flag conflict");
+    assert!(
+        has_conflicts,
+        "Conflicting edits to the same statement must flag conflict"
+    );
     assert!(merged.contains("<<<<<<< LOCAL"));
     assert!(merged.contains("let timeout_secs = 60;"));
     assert!(merged.contains("======="));
@@ -78,10 +84,22 @@ async fn test_swarm_relay_broadcast_and_convergence() {
     let agent1 = TreeCrdt::new(1);
     let agent2 = TreeCrdt::new(2);
 
-    let op1 = agent1.insert_node("root", "user_service", "service::User", "class", "class User {}");
+    let op1 = agent1.insert_node(
+        "root",
+        "user_service",
+        "service::User",
+        "class",
+        "class User {}",
+    );
     relay.broadcast(op1.clone());
 
-    let op2 = agent2.insert_node("root", "auth_service", "service::Auth", "class", "class Auth {}");
+    let op2 = agent2.insert_node(
+        "root",
+        "auth_service",
+        "service::Auth",
+        "class",
+        "class Auth {}",
+    );
     relay.broadcast(op2.clone());
 
     // Verify broadcast reception
@@ -101,7 +119,10 @@ async fn test_swarm_relay_broadcast_and_convergence() {
 
     let root1 = agent1.compute_tree_merkle_root();
     let root2 = agent2.compute_tree_merkle_root();
-    assert_eq!(root1, root2, "All agents synchronized via SwarmRelay must produce identical Merkle roots");
+    assert_eq!(
+        root1, root2,
+        "All agents synchronized via SwarmRelay must produce identical Merkle roots"
+    );
     assert_eq!(agent1.active_nodes_count(), 3); // root + user_service + auth_service
     assert_eq!(agent2.active_nodes_count(), 3);
 }

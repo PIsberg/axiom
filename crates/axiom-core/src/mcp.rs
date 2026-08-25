@@ -947,7 +947,10 @@ impl AxiomMcpServer {
             }
             let candidates = self.ast_index.candidates_for(symbol);
             if candidates.len() > 1 {
-                return Err(format!("Symbol '{symbol}' is ambiguous; matches: {:?}", candidates));
+                return Err(format!(
+                    "Symbol '{symbol}' is ambiguous; matches: {:?}",
+                    candidates
+                ));
             }
             return Err(format!("Symbol '{symbol}' not found in AST index"));
         }
@@ -984,7 +987,10 @@ impl AxiomMcpServer {
     fn handle_prompt_get(&self, name: &str, args: &Value) -> Result<Value, String> {
         match name {
             "axiom_review_patch" => {
-                let symbol_path = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol_path = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 Ok(json!({
                     "description": "Review a proposed code patch against AST blast radius and security rules",
                     "messages": [
@@ -1003,7 +1009,10 @@ impl AxiomMcpServer {
             }
 
             "axiom_targeted_refactor" => {
-                let target_symbol = args.get("target_symbol").and_then(|v| v.as_str()).unwrap_or("");
+                let target_symbol = args
+                    .get("target_symbol")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let goal = args.get("goal").and_then(|v| v.as_str()).unwrap_or("");
                 Ok(json!({
                     "description": "Safely refactor a code symbol using blast radius test selection and atomic mutations",
@@ -1024,7 +1033,10 @@ impl AxiomMcpServer {
 
             "axiom_attest_task" => {
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                let symbol_path = args.get("symbol_path").and_then(|v| v.as_str()).unwrap_or("");
+                let symbol_path = args
+                    .get("symbol_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 Ok(json!({
                     "description": "Attest a task completion with cryptographic Merkle proof",
                     "messages": [

@@ -1452,7 +1452,10 @@ async fn main() -> Result<()> {
             let ledger_path = server.ledger_path();
             let records = axiom_core::mcp::load_attestations_from(&ledger_path)?;
             let filtered: Vec<_> = if let Some(sym) = &symbol {
-                records.into_iter().filter(|r| r.symbol_path == *sym).collect()
+                records
+                    .into_iter()
+                    .filter(|r| r.symbol_path == *sym)
+                    .collect()
             } else {
                 records
             };
@@ -1462,7 +1465,11 @@ async fn main() -> Result<()> {
 
             if let Some(out_path) = out {
                 std::fs::write(&out_path, json)?;
-                println!("Exported {} SLSA provenance statement(s) to {}", statements.len(), out_path);
+                println!(
+                    "Exported {} SLSA provenance statement(s) to {}",
+                    statements.len(),
+                    out_path
+                );
             } else {
                 println!("{}", json);
             }
@@ -1486,16 +1493,26 @@ async fn main() -> Result<()> {
                     std::fs::set_permissions(&hook_path, perms)?;
                 }
 
-                println!("Installed Axiom Git pre-commit hook at {}", hook_path.display());
+                println!(
+                    "Installed Axiom Git pre-commit hook at {}",
+                    hook_path.display()
+                );
             }
 
             if verify {
                 let ledger_path = server.ledger_path();
-                let records = axiom_core::mcp::load_attestations_from(&ledger_path).unwrap_or_default();
+                let records =
+                    axiom_core::mcp::load_attestations_from(&ledger_path).unwrap_or_default();
                 if records.is_empty() {
-                    eprintln!("Warning: Attestation ledger at {} is empty.", ledger_path.display());
+                    eprintln!(
+                        "Warning: Attestation ledger at {} is empty.",
+                        ledger_path.display()
+                    );
                 } else {
-                    println!("Verified {} cryptographic attestation seal(s) in ledger.", records.len());
+                    println!(
+                        "Verified {} cryptographic attestation seal(s) in ledger.",
+                        records.len()
+                    );
                 }
                 println!("Git pre-commit verification passed.");
             }

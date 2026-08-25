@@ -75,15 +75,27 @@ public class SqlUserRepositoryTest {
 }
 "#;
 
-    dir.write("src/main/java/com/example/repo/UserRepository.java", repo_interface);
-    dir.write("src/main/java/com/example/repo/SqlUserRepository.java", repo_impl);
-    dir.write("src/test/java/com/example/repo/SqlUserRepositoryTest.java", repo_test);
+    dir.write(
+        "src/main/java/com/example/repo/UserRepository.java",
+        repo_interface,
+    );
+    dir.write(
+        "src/main/java/com/example/repo/SqlUserRepository.java",
+        repo_impl,
+    );
+    dir.write(
+        "src/test/java/com/example/repo/SqlUserRepositoryTest.java",
+        repo_test,
+    );
 
     let index = scan(&dir);
 
     // Verify inheritance was registered
     let impls = index.get_implementors("UserRepository");
-    assert!(impls.contains(&"SqlUserRepository".to_string()) || impls.contains(&"com.example.repo.SqlUserRepository".to_string()));
+    assert!(
+        impls.contains(&"SqlUserRepository".to_string())
+            || impls.contains(&"com.example.repo.SqlUserRepository".to_string())
+    );
 
     let supertypes = index.get_supertypes("SqlUserRepository");
     assert!(supertypes.contains(&"UserRepository".to_string()));
@@ -93,7 +105,9 @@ public class SqlUserRepositoryTest {
     assert!(radius.is_some(), "blast radius should not be None");
     let r = radius.unwrap();
     assert!(
-        r.impacted_tests.iter().any(|t| t.contains("SqlUserRepositoryTest")),
+        r.impacted_tests
+            .iter()
+            .any(|t| t.contains("SqlUserRepositoryTest")),
         "Blast radius of UserRepository must include SqlUserRepositoryTest, got: {:?}",
         r.impacted_tests
     );
@@ -135,14 +149,23 @@ export function testJwtAuth() {
     let index = scan(&dir);
 
     let impls = index.get_implementors("IAuthService");
-    assert!(impls.contains(&"JwtAuthService".to_string()) || impls.iter().any(|s| s.contains("JwtAuthService")));
+    assert!(
+        impls.contains(&"JwtAuthService".to_string())
+            || impls.iter().any(|s| s.contains("JwtAuthService"))
+    );
 
-    let sym = index.symbol_paths().into_iter().find(|s| s.contains("IAuthService")).expect("IAuthService symbol not found");
+    let sym = index
+        .symbol_paths()
+        .into_iter()
+        .find(|s| s.contains("IAuthService"))
+        .expect("IAuthService symbol not found");
     let radius = index.compute_blast_radius(&sym, 3);
     assert!(radius.is_some());
     let r = radius.unwrap();
     assert!(
-        r.impacted_tests.iter().any(|t| t.contains("testJwtAuth") || t.contains("jwt.test")),
+        r.impacted_tests
+            .iter()
+            .any(|t| t.contains("testJwtAuth") || t.contains("jwt.test")),
         "Blast radius of IAuthService must include jwt test, got: {:?}",
         r.impacted_tests
     );
@@ -187,12 +210,18 @@ fn test_v8_start() {
     let impls = index.get_implementors("Engine");
     assert!(impls.contains(&"V8Engine".to_string()));
 
-    let sym = index.symbol_paths().into_iter().find(|s| s.contains("Engine") && !s.contains("V8")).expect("Engine trait symbol not found");
+    let sym = index
+        .symbol_paths()
+        .into_iter()
+        .find(|s| s.contains("Engine") && !s.contains("V8"))
+        .expect("Engine trait symbol not found");
     let radius = index.compute_blast_radius(&sym, 3);
     assert!(radius.is_some());
     let r = radius.unwrap();
     assert!(
-        r.impacted_tests.iter().any(|t| t.contains("test_v8_start") || t.contains("v8_test")),
+        r.impacted_tests
+            .iter()
+            .any(|t| t.contains("test_v8_start") || t.contains("v8_test")),
         "Blast radius of Engine trait must include v8 test, got: {:?}",
         r.impacted_tests
     );
@@ -234,9 +263,15 @@ void test_usb_reset() {
     let index = scan(&dir);
 
     let impls = index.get_implementors("BaseDevice");
-    assert!(impls.contains(&"UsbDevice".to_string()) || impls.iter().any(|s| s.contains("UsbDevice")));
+    assert!(
+        impls.contains(&"UsbDevice".to_string()) || impls.iter().any(|s| s.contains("UsbDevice"))
+    );
 
-    let sym = index.symbol_paths().into_iter().find(|s| s.contains("BaseDevice")).expect("BaseDevice symbol not found");
+    let sym = index
+        .symbol_paths()
+        .into_iter()
+        .find(|s| s.contains("BaseDevice"))
+        .expect("BaseDevice symbol not found");
     let radius = index.compute_blast_radius(&sym, 3);
     assert!(radius.is_some());
     let r = radius.unwrap();
@@ -256,7 +291,9 @@ fn test_persistence_preserves_hierarchy() {
     index.register_inheritance("Dog", "Animal");
     index.register_inheritance("Cat", "Animal");
 
-    index.save_to_disk(&index_file).expect("save should succeed");
+    index
+        .save_to_disk(&index_file)
+        .expect("save should succeed");
 
     let loaded = AstIndex::load_from_disk(&index_file).expect("load should succeed");
     let mut impls = loaded.get_implementors("Animal");

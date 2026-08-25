@@ -416,7 +416,8 @@ pub fn merge_statements_3way(base: &str, local: &str, remote: &str) -> (String, 
     let mut result = Vec::new();
     let mut has_conflicts = false;
 
-    let base_had_no_matches = !local_has_base.iter().any(|&b| b) && !remote_has_base.iter().any(|&b| b);
+    let base_had_no_matches =
+        !local_has_base.iter().any(|&b| b) && !remote_has_base.iter().any(|&b| b);
 
     for k in 0..base_lines.len() {
         let ins_l = &local_before[k];

@@ -27,13 +27,30 @@ fn test_slsa_provenance_statement_structure() {
     assert_eq!(subject[0]["digest"]["seal"], att.seal);
 
     let pred = &slsa["predicate"];
-    assert_eq!(pred["buildDefinition"]["buildType"], "https://axiom.dev/provenance/v1");
-    assert_eq!(pred["buildDefinition"]["externalParameters"]["agentIdentity"], "antigravity-agent");
-    assert_eq!(pred["buildDefinition"]["externalParameters"]["symbolPath"], "auth::service::validate_token");
-    assert_eq!(pred["runDetails"]["builder"]["id"], "https://axiom.dev/verifier/v1");
+    assert_eq!(
+        pred["buildDefinition"]["buildType"],
+        "https://axiom.dev/provenance/v1"
+    );
+    assert_eq!(
+        pred["buildDefinition"]["externalParameters"]["agentIdentity"],
+        "antigravity-agent"
+    );
+    assert_eq!(
+        pred["buildDefinition"]["externalParameters"]["symbolPath"],
+        "auth::service::validate_token"
+    );
+    assert_eq!(
+        pred["runDetails"]["builder"]["id"],
+        "https://axiom.dev/verifier/v1"
+    );
     assert_eq!(pred["runDetails"]["metadata"]["invocationId"], att.seal);
 
-    let byproducts = pred["runDetails"]["byproducts"].as_array().expect("byproducts");
+    let byproducts = pred["runDetails"]["byproducts"]
+        .as_array()
+        .expect("byproducts");
     assert_eq!(byproducts[0]["verifiedBy"], "sandbox");
-    assert_eq!(byproducts[0]["verificationDetail"], "cargo test --package auth");
+    assert_eq!(
+        byproducts[0]["verificationDetail"],
+        "cargo test --package auth"
+    );
 }

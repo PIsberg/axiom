@@ -2079,9 +2079,15 @@ impl AstIndex {
                             // Extract OOP inheritance & interface implementations
                             let mut in_ext_or_impl = false;
                             for &token in &tokens[pos + 2..] {
-                                let clean = token.trim_matches(|c: char| c == '{' || c == ',' || c == ';' || c == '(' || c == ')');
+                                let clean = token.trim_matches(|c: char| {
+                                    c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
+                                });
                                 let base = clean.split('<').next().unwrap_or(clean).trim();
-                                if token == "extends" || token == "implements" || token == "with" || token == ":" {
+                                if token == "extends"
+                                    || token == "implements"
+                                    || token == "with"
+                                    || token == ":"
+                                {
                                     in_ext_or_impl = true;
                                 } else if in_ext_or_impl && Self::is_valid_identifier(base) {
                                     self.register_inheritance(&full_symbol, base);
@@ -2358,16 +2364,24 @@ impl AstIndex {
                             Some((line_no, line_no)),
                         );
                         *nodes_count += 1;
-                    } else if (decl.starts_with("impl ") || decl.contains(" impl ")) && decl.contains(" for ") {
+                    } else if (decl.starts_with("impl ") || decl.contains(" impl "))
+                        && decl.contains(" for ")
+                    {
                         let after_impl = decl.split("impl ").last().unwrap_or("");
                         let after_gen = Self::skip_angle_group(after_impl.trim_start());
                         let parts: Vec<&str> = after_gen.split(" for ").collect();
                         if parts.len() == 2 {
                             let tr = parts[0].split('<').next().unwrap_or(parts[0]).trim();
                             let tr_name = tr.rsplit("::").next().unwrap_or(tr).trim();
-                            let st = parts[1].split(|c: char| c == '<' || c == '{' || c.is_whitespace()).next().unwrap_or("").trim();
+                            let st = parts[1]
+                                .split(|c: char| c == '<' || c == '{' || c.is_whitespace())
+                                .next()
+                                .unwrap_or("")
+                                .trim();
                             let st_name = st.rsplit("::").next().unwrap_or(st).trim();
-                            if Self::is_valid_identifier(tr_name) && Self::is_valid_identifier(st_name) {
+                            if Self::is_valid_identifier(tr_name)
+                                && Self::is_valid_identifier(st_name)
+                            {
                                 self.register_inheritance(st_name, tr_name);
                             }
                         }
@@ -2587,10 +2601,16 @@ impl AstIndex {
                     current_class = name.clone();
                     let symbol = format!("{}::{}", file_path, name);
                     if trimmed.contains('(') && trimmed.contains(')') {
-                        if let Some(bases_str) = trimmed.split('(').nth(1).and_then(|s| s.split(')').next()) {
+                        if let Some(bases_str) =
+                            trimmed.split('(').nth(1).and_then(|s| s.split(')').next())
+                        {
                             for base in bases_str.split(',') {
                                 let base_clean = base.trim();
-                                let base_name = base_clean.split('.').next_back().unwrap_or(base_clean).trim();
+                                let base_name = base_clean
+                                    .split('.')
+                                    .next_back()
+                                    .unwrap_or(base_clean)
+                                    .trim();
                                 if Self::is_valid_identifier(base_name) {
                                     self.register_inheritance(&symbol, base_name);
                                     self.register_inheritance(&name, base_name);
@@ -2722,7 +2742,9 @@ impl AstIndex {
                     let tokens: Vec<&str> = decl.split_whitespace().collect();
                     let mut in_ext_or_impl = false;
                     for &t in &tokens {
-                        let clean = t.trim_matches(|c: char| c == '{' || c == ',' || c == ';' || c == '(' || c == ')');
+                        let clean = t.trim_matches(|c: char| {
+                            c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
+                        });
                         let base = clean.split('<').next().unwrap_or(clean).trim();
                         if t == "extends" || t == "implements" {
                             in_ext_or_impl = true;
@@ -2765,7 +2787,9 @@ impl AstIndex {
                     let tokens: Vec<&str> = decl.split_whitespace().collect();
                     let mut in_ext = false;
                     for &t in &tokens {
-                        let clean = t.trim_matches(|c: char| c == '{' || c == ',' || c == ';' || c == '(' || c == ')');
+                        let clean = t.trim_matches(|c: char| {
+                            c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
+                        });
                         let base = clean.split('<').next().unwrap_or(clean).trim();
                         if t == "extends" {
                             in_ext = true;
@@ -3141,12 +3165,26 @@ impl AstIndex {
 
                         if after_kw.contains(':') {
                             if let Some(bases_part) = after_kw.split(':').nth(1) {
-                                let bases_clean = bases_part.split('{').next().unwrap_or(bases_part).split(';').next().unwrap_or(bases_part);
+                                let bases_clean = bases_part
+                                    .split('{')
+                                    .next()
+                                    .unwrap_or(bases_part)
+                                    .split(';')
+                                    .next()
+                                    .unwrap_or(bases_part);
                                 for base_entry in bases_clean.split(',') {
-                                    let base_words: Vec<&str> = base_entry.split_whitespace().collect();
+                                    let base_words: Vec<&str> =
+                                        base_entry.split_whitespace().collect();
                                     for w in base_words {
-                                        let clean_w = w.trim_matches(|c: char| c == '{' || c == ';' || c == ',' || c == '<' || c == '>');
-                                        if clean_w != "public" && clean_w != "protected" && clean_w != "private" && clean_w != "virtual" && Self::is_valid_identifier(clean_w) {
+                                        let clean_w = w.trim_matches(|c: char| {
+                                            c == '{' || c == ';' || c == ',' || c == '<' || c == '>'
+                                        });
+                                        if clean_w != "public"
+                                            && clean_w != "protected"
+                                            && clean_w != "private"
+                                            && clean_w != "virtual"
+                                            && Self::is_valid_identifier(clean_w)
+                                        {
                                             self.register_inheritance(&symbol, clean_w);
                                             self.register_inheritance(&name, clean_w);
                                         }

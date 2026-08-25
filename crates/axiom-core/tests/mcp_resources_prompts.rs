@@ -92,7 +92,11 @@ async fn test_mcp_prompts_list_and_get() {
     let result = res.result.unwrap();
     let prompts = result["prompts"].as_array().expect("prompts array");
     assert!(prompts.iter().any(|p| p["name"] == "axiom_review_patch"));
-    assert!(prompts.iter().any(|p| p["name"] == "axiom_targeted_refactor"));
+    assert!(
+        prompts
+            .iter()
+            .any(|p| p["name"] == "axiom_targeted_refactor")
+    );
     assert!(prompts.iter().any(|p| p["name"] == "axiom_attest_task"));
 
     // 2. prompts/get axiom_targeted_refactor

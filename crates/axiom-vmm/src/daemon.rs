@@ -5,7 +5,7 @@
 //! pre-warmed, recycled worker instances and warm execution sandboxes with strict
 //! memory, isolation, and deadline confines.
 
-use crate::native::{evaluate, temp_work_dir, NativeLanguage, DEFAULT_TIMEOUT};
+use crate::native::{DEFAULT_TIMEOUT, NativeLanguage, evaluate, temp_work_dir};
 use axiom_proto::CtopReport;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -58,8 +58,14 @@ struct WorkerInstance {
 
 impl WorkerInstance {
     fn new(language: &str) -> Self {
-        let id = format!("worker_{}_{:x}", language, Instant::now().elapsed().as_nanos());
-        let work_dir = temp_work_dir(language).ok().map(|td| td.path().to_path_buf());
+        let id = format!(
+            "worker_{}_{:x}",
+            language,
+            Instant::now().elapsed().as_nanos()
+        );
+        let work_dir = temp_work_dir(language)
+            .ok()
+            .map(|td| td.path().to_path_buf());
         Self {
             id,
             language: language.to_string(),
@@ -124,7 +130,9 @@ impl DaemonPool {
         let mut worker = {
             let mut map = self.workers.lock().unwrap();
             let queue = map.entry(lang_key.clone()).or_default();
-            queue.pop_front().unwrap_or_else(|| WorkerInstance::new(&lang_key))
+            queue
+                .pop_front()
+                .unwrap_or_else(|| WorkerInstance::new(&lang_key))
         };
 
         // 2. Perform execution
