@@ -1739,7 +1739,14 @@ fn mutate_and_run(
         {
             missed_by_closure.push(name.clone());
         }
-        if !matching.iter().any(|k| selected.contains(*k)) {
+        if !matching.iter().any(|k| {
+            selected.contains(*k)
+                || selected.iter().any(|s| {
+                    s == *k
+                        || s.ends_with(&format!("::{}", name))
+                        || k.starts_with(&format!("{}::", s))
+                })
+        }) {
             missed_by_blast_radius.push(name.clone());
         }
     }
