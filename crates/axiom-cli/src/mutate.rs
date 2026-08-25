@@ -65,11 +65,18 @@ impl Drop for Restore {
 /// tell that case apart and throw it away. These are chosen to keep the shape of
 /// the code and flip its meaning.
 const SWAPS: &[(&str, &str)] = &[
-    (" > ", " < "),
     (" >= ", " <= "),
+    (" <= ", " >= "),
+    (" > ", " < "),
+    (" < ", " > "),
     (" == ", " != "),
+    (" != ", " == "),
     (" && ", " || "),
+    (" || ", " && "),
     ("true", "false"),
+    ("false", "true"),
+    ("True", "False"),
+    ("False", "True"),
 ];
 
 /// Where a symbol's own lines are, found in the file rather than taken from
@@ -251,6 +258,17 @@ mod tests {
         let (mutated, _) = mutate_lines(source, "is_open").expect("is_open has one");
         assert!(mutated.contains("val < 0"), "{mutated}");
         assert!(mutated.contains("let x = is_open(10);"), "{mutated}");
+    }
+
+    #[test]
+    fn reverse_comparisons_and_python_booleans_are_swapped() {
+        let rs_source = "pub fn check(x: i32) -> bool {\n    x <= 10 && false\n}\n";
+        let (mutated_rs, _) = mutate_lines(rs_source, "check").expect("check has one");
+        assert!(mutated_rs.contains("x >= 10"), "{mutated_rs}");
+
+        let py_source = "def is_ready():\n    return True\n";
+        let (mutated_py, _) = mutate_lines(py_source, "is_ready").expect("is_ready has one");
+        assert!(mutated_py.contains("return False"), "{mutated_py}");
     }
 }
 
