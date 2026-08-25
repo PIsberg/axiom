@@ -1946,6 +1946,8 @@ impl AstIndex {
                     || trimmed.starts_with("abstract ")
                     || trimmed.starts_with("final ")
                     || trimmed.starts_with("static ")
+                    || trimmed.starts_with("sealed ")
+                    || trimmed.starts_with("non-sealed ")
                     || trimmed.starts_with("@interface ")
                     || type_keywords
                         .iter()
@@ -1956,6 +1958,9 @@ impl AstIndex {
                     if pos + 1 < tokens.len() {
                         let raw_name = tokens[pos + 1]
                             .split('<')
+                            .next()
+                            .unwrap_or("")
+                            .split('(')
                             .next()
                             .unwrap_or("")
                             .replace('{', "");
@@ -2018,6 +2023,8 @@ impl AstIndex {
                 || trimmed.starts_with("@Test")
                 || trimmed.starts_with("@Override")
                 || trimmed.starts_with("@ParameterizedTest")
+                || trimmed.starts_with("@RepeatedTest")
+                || trimmed.starts_with("@TestFactory")
                 || trimmed.starts_with("@BeforeEach")
                 || trimmed.starts_with("@AfterEach")
                 || trimmed.starts_with("void ")
@@ -2039,8 +2046,30 @@ impl AstIndex {
                 // the parameters happen to close on.
                 let decl_start = i;
                 let mut full_sig = trimmed.to_string();
-                let is_annotated_test = full_sig.contains("@Test")
-                    || (i > 0 && lines[i - 1].trim().starts_with("@Test"));
+                let mut is_annotated_test = full_sig.contains("@Test")
+                    || full_sig.contains("@ParameterizedTest")
+                    || full_sig.contains("@RepeatedTest")
+                    || full_sig.contains("@TestFactory");
+
+                if !is_annotated_test {
+                    let mut prev_idx = decl_start;
+                    while prev_idx > 0 {
+                        prev_idx -= 1;
+                        let prev_line = lines[prev_idx].trim();
+                        if prev_line.starts_with('@') {
+                            if prev_line.starts_with("@Test")
+                                || prev_line.starts_with("@ParameterizedTest")
+                                || prev_line.starts_with("@RepeatedTest")
+                                || prev_line.starts_with("@TestFactory")
+                            {
+                                is_annotated_test = true;
+                                break;
+                            }
+                        } else if !prev_line.is_empty() {
+                            break;
+                        }
+                    }
+                }
 
                 // A wrapped parameter list once dropped a method entirely, so
                 // the signature is joined until the list closes.
@@ -2090,6 +2119,9 @@ impl AstIndex {
                         let raw_ret = sig_tokens[sig_tokens.len() - 2];
                         let ret_clean = raw_ret
                             .split('<')
+                            .next_back()
+                            .unwrap_or(raw_ret)
+                            .split(',')
                             .next_back()
                             .unwrap_or(raw_ret)
                             .replace('>', "")

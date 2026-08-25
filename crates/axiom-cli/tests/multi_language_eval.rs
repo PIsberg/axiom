@@ -217,6 +217,22 @@ async fn a_java_assertion_is_checked_with_assertions_enabled() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_java_snippet_with_imports_is_wrapped_and_evaluated_cleanly() -> Result<()> {
+    let (server, root) = polyglot_workspace()?;
+
+    let snippet = "import java.util.List;\nimport java.util.ArrayList;\nList<String> items = new ArrayList<>();\nitems.add(\"test\");\nassert items.size() == 1;\n";
+    let passing = eval(&server, "Gate", snippet).await;
+
+    if toolchain_for("java").is_some() {
+        assert_eq!(status(&passing), "PASSED", "Java snippet with imports wraps and passes: {passing:?}");
+        assert_eq!(engine(&passing), "tier2_native_java");
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_javascript_symbol_is_evaluated_by_node() -> Result<()> {
     let (server, root) = polyglot_workspace()?;
 

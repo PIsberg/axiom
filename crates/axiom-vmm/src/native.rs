@@ -92,7 +92,26 @@ fn javascript_wrap(snippet: &str) -> String {
 }
 
 fn go_wrap(snippet: &str) -> String {
-    format!("package main\n\nfunc main() {{\n{snippet}\n}}\n")
+    let mut imports = Vec::new();
+    let mut body = Vec::new();
+
+    for line in snippet.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import ") {
+            imports.push(line);
+        } else {
+            body.push(line);
+        }
+    }
+
+    let imports_str = if imports.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", imports.join("\n"))
+    };
+    let body_str = body.join("\n");
+
+    format!("package main\n\n{imports_str}func main() {{\n{body_str}\n}}\n")
 }
 
 fn kotlin_wrap(snippet: &str) -> String {
@@ -107,19 +126,52 @@ fn kotlin_wrap(snippet: &str) -> String {
 }
 
 fn scala_wrap(snippet: &str) -> String {
+    let mut imports = Vec::new();
+    let mut body = Vec::new();
+
+    for line in snippet.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+            imports.push(line);
+        } else {
+            body.push(line);
+        }
+    }
+
+    let imports_str = if imports.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", imports.join("\n"))
+    };
+    let body_str = body.join("\n");
+
     format!(
-        "object AxiomEval {{
-  def main(args: Array[String]): Unit = {{
-{snippet}
-  }}
-}}
-"
+        "{imports_str}object AxiomEval {{\n  def main(args: Array[String]): Unit = {{\n{body_str}\n  }}\n}}\n"
     )
 }
 
 fn java_wrap(snippet: &str) -> String {
+    let mut imports = Vec::new();
+    let mut body = Vec::new();
+
+    for line in snippet.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+            imports.push(line);
+        } else {
+            body.push(line);
+        }
+    }
+
+    let imports_str = if imports.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", imports.join("\n"))
+    };
+    let body_str = body.join("\n");
+
     format!(
-        "public class AxiomEval {{\n    public static void main(String[] args) throws Exception {{\n{snippet}\n    }}\n}}\n"
+        "{imports_str}public class AxiomEval {{\n    public static void main(String[] args) throws Exception {{\n{body_str}\n    }}\n}}\n"
     )
 }
 

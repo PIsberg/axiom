@@ -575,3 +575,38 @@ fn cpp_classes_structs_namespaces_enums_and_functions_are_indexed() {
     assert!(symbols.iter().any(|s| s.ends_with("::physics::RigidBody::applyForce")), "method physics::RigidBody::applyForce indexed: {symbols:?}");
     assert!(symbols.iter().any(|s| s.ends_with("::computeTotal")), "function computeTotal indexed: {symbols:?}");
 }
+
+#[test]
+fn java_records_sealed_classes_generic_returns_and_junit5_annotations_are_indexed() {
+    let dir = TempDir::new("java-ast");
+    dir.write(
+        "ServiceSuite.java",
+        "package com.example.service;\n\
+         import java.util.Map;\n\
+         public sealed class ServiceSuite permits ConcreteService {\n\
+         \x20   public record TokenPair(String accessToken, String refreshToken) {}\n\
+         \x20   public Map<String, TokenPair> getTokens() {\n\
+         \x20       return Map.of();\n\
+         \x20   }\n\
+         \x20   @DisplayName(\"Token check\")\n\
+         \x20   @ParameterizedTest\n\
+         \x20   @ValueSource(strings = {\"token1\"})\n\
+         \x20   public void verifyTokens(String token) {\n\
+         \x20       assert token != null;\n\
+         \x20   }\n\
+         }\n\
+         final class ConcreteService extends ServiceSuite {}\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(index.get_symbol("com.example.service.ServiceSuite").is_some(), "sealed class ServiceSuite indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.service.TokenPair").is_some(), "record TokenPair indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.service.ServiceSuite::getTokens").is_some(), "method getTokens indexed: {symbols:?}");
+    assert!(index.get_symbol("com.example.service.ServiceSuite::verifyTokens").is_some(), "test verifyTokens indexed: {symbols:?}");
+
+    let verify_sym = index.get_symbol("com.example.service.ServiceSuite::verifyTokens").unwrap();
+    assert_eq!(verify_sym.kind, "test", "verifyTokens identified as test from JUnit 5 annotations");
+}
