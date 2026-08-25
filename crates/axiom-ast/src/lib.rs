@@ -2874,7 +2874,7 @@ impl AstIndex {
         // workspace root. Files that have since moved or been deleted are
         // skipped, which costs their text search rather than the whole load.
         let mut zoekt = ZoektIndex::new();
-        for file_path in payload.file_call_names.keys() {
+        for file_path in payload.file_to_symbols.keys() {
             let on_disk = match (&scan_root, Path::new(file_path).is_absolute()) {
                 (Some(root), false) => root.join(file_path),
                 _ => PathBuf::from(file_path),
