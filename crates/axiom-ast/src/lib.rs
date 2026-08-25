@@ -317,6 +317,10 @@ struct PersistedIndex {
     file_call_names: HashMap<String, Vec<String>>,
     #[serde(default)]
     file_to_symbols: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    type_hierarchy: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    interface_implementors: HashMap<String, Vec<String>>,
 }
 
 /// Merkle AST Content-Addressable Store (CAS), Symbol Graph & Zoekt Trigram Index
@@ -336,6 +340,10 @@ pub struct AstIndex {
     file_call_names: RwLock<HashMap<String, Vec<String>>>,
     /// File path to indexed symbols mapping
     file_to_symbols: RwLock<HashMap<String, Vec<String>>>,
+    /// Type inheritance hierarchy (child type -> parent types / interfaces)
+    type_hierarchy: RwLock<HashMap<String, Vec<String>>>,
+    /// Interface & superclass implementors (parent type -> implementing child types)
+    interface_implementors: RwLock<HashMap<String, Vec<String>>>,
     /// Symbols and files this process has deliberately forgotten since it loaded.
     ///
     /// Saving has to merge rather than overwrite, or a scan running beside
@@ -410,6 +418,8 @@ impl AstIndex {
             method_return_types: RwLock::new(HashMap::new()),
             file_call_names: RwLock::new(HashMap::new()),
             file_to_symbols: RwLock::new(HashMap::new()),
+            type_hierarchy: RwLock::new(HashMap::new()),
+            interface_implementors: RwLock::new(HashMap::new()),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             scan_root: RwLock::new(None),
@@ -429,6 +439,57 @@ impl AstIndex {
         deps: Vec<String>,
     ) -> AstNode {
         self.index_node_at(symbol, kind, content, "", deps, None)
+    }
+
+    /// Register an OOP inheritance or interface implementation relationship.
+    pub fn register_inheritance(&self, child: &str, parent: &str) {
+        if child.is_empty() || parent.is_empty() || child == parent {
+            return;
+        }
+        let mut hier = self.type_hierarchy.write().unwrap();
+        let parents = hier.entry(child.to_string()).or_default();
+        if !parents.iter().any(|p| p == parent) {
+            parents.push(parent.to_string());
+        }
+        drop(hier);
+
+        let mut impls = self.interface_implementors.write().unwrap();
+        let children = impls.entry(parent.to_string()).or_default();
+        if !children.iter().any(|c| c == child) {
+            children.push(child.to_string());
+        }
+    }
+
+    /// Look up all implementing or derived subclasses for a given interface or base class.
+    pub fn get_implementors(&self, type_name: &str) -> Vec<String> {
+        let mut results = HashSet::new();
+        let impls = self.interface_implementors.read().unwrap();
+        let simple = Self::simple_name_of(type_name);
+
+        for key in [type_name, simple] {
+            if let Some(children) = impls.get(key) {
+                for c in children {
+                    results.insert(c.clone());
+                }
+            }
+        }
+        results.into_iter().collect()
+    }
+
+    /// Look up all superclasses or interfaces that a given type implements or extends.
+    pub fn get_supertypes(&self, type_name: &str) -> Vec<String> {
+        let mut results = HashSet::new();
+        let hier = self.type_hierarchy.read().unwrap();
+        let simple = Self::simple_name_of(type_name);
+
+        for key in [type_name, simple] {
+            if let Some(parents) = hier.get(key) {
+                for p in parents {
+                    results.insert(p.clone());
+                }
+            }
+        }
+        results.into_iter().collect()
     }
 
     /// Insert a node, recording the lines its declaration spans.
@@ -1008,6 +1069,14 @@ impl AstIndex {
                             if visited.insert(caller.clone()) {
                                 queue.push_back((caller.clone(), depth + 1));
                             }
+                        }
+                    }
+
+                    // OOP Interface & Class Hierarchy Propagation:
+                    // If key is an interface or base class, traverse all derived subclasses/implementors
+                    for impl_cls in self.get_implementors(key) {
+                        if visited.insert(impl_cls.clone()) {
+                            queue.push_back((impl_cls, depth + 1));
                         }
                     }
                 }
@@ -2007,6 +2076,28 @@ impl AstIndex {
                                 }
                             }
 
+                            // Extract OOP inheritance & interface implementations
+                            let mut in_ext_or_impl = false;
+                            for &token in &tokens[pos + 2..] {
+                                let clean = token.trim_matches(|c: char| {
+                                    c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
+                                });
+                                let base = clean.split('<').next().unwrap_or(clean).trim();
+                                if token == "extends"
+                                    || token == "implements"
+                                    || token == "with"
+                                    || token == ":"
+                                {
+                                    in_ext_or_impl = true;
+                                } else if in_ext_or_impl && Self::is_valid_identifier(base) {
+                                    self.register_inheritance(&full_symbol, base);
+                                    self.register_inheritance(class_name, base);
+                                    if !node_deps.contains(&base.to_string()) {
+                                        node_deps.push(base.to_string());
+                                    }
+                                }
+                            }
+
                             self.index_node_at(
                                 &full_symbol,
                                 kind,
@@ -2273,6 +2364,27 @@ impl AstIndex {
                             Some((line_no, line_no)),
                         );
                         *nodes_count += 1;
+                    } else if (decl.starts_with("impl ") || decl.contains(" impl "))
+                        && decl.contains(" for ")
+                    {
+                        let after_impl = decl.split("impl ").last().unwrap_or("");
+                        let after_gen = Self::skip_angle_group(after_impl.trim_start());
+                        let parts: Vec<&str> = after_gen.split(" for ").collect();
+                        if parts.len() == 2 {
+                            let tr = parts[0].split('<').next().unwrap_or(parts[0]).trim();
+                            let tr_name = tr.rsplit("::").next().unwrap_or(tr).trim();
+                            let st = parts[1]
+                                .split(|c: char| c == '<' || c == '{' || c.is_whitespace())
+                                .next()
+                                .unwrap_or("")
+                                .trim();
+                            let st_name = st.rsplit("::").next().unwrap_or(st).trim();
+                            if Self::is_valid_identifier(tr_name)
+                                && Self::is_valid_identifier(st_name)
+                            {
+                                self.register_inheritance(st_name, tr_name);
+                            }
+                        }
                     }
                     owner_stack.push((owner, depth + opens.max(1)));
                 } else if decl.starts_with("use ") {
@@ -2488,6 +2600,24 @@ impl AstIndex {
                 if Self::is_valid_identifier(&name) {
                     current_class = name.clone();
                     let symbol = format!("{}::{}", file_path, name);
+                    if trimmed.contains('(') && trimmed.contains(')') {
+                        if let Some(bases_str) =
+                            trimmed.split('(').nth(1).and_then(|s| s.split(')').next())
+                        {
+                            for base in bases_str.split(',') {
+                                let base_clean = base.trim();
+                                let base_name = base_clean
+                                    .split('.')
+                                    .next_back()
+                                    .unwrap_or(base_clean)
+                                    .trim();
+                                if Self::is_valid_identifier(base_name) {
+                                    self.register_inheritance(&symbol, base_name);
+                                    self.register_inheritance(&name, base_name);
+                                }
+                            }
+                        }
+                    }
                     let kind = if name.contains("Test") {
                         "test"
                     } else {
@@ -2609,6 +2739,21 @@ impl AstIndex {
 
                 if !name.is_empty() && Self::is_valid_identifier(&name) {
                     let symbol = format!("{}::{}", file_path, name);
+                    let tokens: Vec<&str> = decl.split_whitespace().collect();
+                    let mut in_ext_or_impl = false;
+                    for &t in &tokens {
+                        let clean = t.trim_matches(|c: char| {
+                            c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
+                        });
+                        let base = clean.split('<').next().unwrap_or(clean).trim();
+                        if t == "extends" || t == "implements" {
+                            in_ext_or_impl = true;
+                        } else if in_ext_or_impl && Self::is_valid_identifier(base) {
+                            self.register_inheritance(&symbol, base);
+                            self.register_inheritance(&name, base);
+                        }
+                    }
+
                     self.index_node_at(
                         &symbol,
                         "class",
@@ -2639,6 +2784,21 @@ impl AstIndex {
 
                 if !name.is_empty() && Self::is_valid_identifier(&name) {
                     let symbol = format!("{}::{}", file_path, name);
+                    let tokens: Vec<&str> = decl.split_whitespace().collect();
+                    let mut in_ext = false;
+                    for &t in &tokens {
+                        let clean = t.trim_matches(|c: char| {
+                            c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
+                        });
+                        let base = clean.split('<').next().unwrap_or(clean).trim();
+                        if t == "extends" {
+                            in_ext = true;
+                        } else if in_ext && Self::is_valid_identifier(base) {
+                            self.register_inheritance(&symbol, base);
+                            self.register_inheritance(&name, base);
+                        }
+                    }
+
                     self.index_node_at(
                         &symbol,
                         "interface",
@@ -3003,6 +3163,36 @@ impl AstIndex {
                             format!("{}::{}::{}", file_path, prefix, name)
                         };
 
+                        if after_kw.contains(':') {
+                            if let Some(bases_part) = after_kw.split(':').nth(1) {
+                                let bases_clean = bases_part
+                                    .split('{')
+                                    .next()
+                                    .unwrap_or(bases_part)
+                                    .split(';')
+                                    .next()
+                                    .unwrap_or(bases_part);
+                                for base_entry in bases_clean.split(',') {
+                                    let base_words: Vec<&str> =
+                                        base_entry.split_whitespace().collect();
+                                    for w in base_words {
+                                        let clean_w = w.trim_matches(|c: char| {
+                                            c == '{' || c == ';' || c == ',' || c == '<' || c == '>'
+                                        });
+                                        if clean_w != "public"
+                                            && clean_w != "protected"
+                                            && clean_w != "private"
+                                            && clean_w != "virtual"
+                                            && Self::is_valid_identifier(clean_w)
+                                        {
+                                            self.register_inheritance(&symbol, clean_w);
+                                            self.register_inheritance(&name, clean_w);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         self.index_node_at(
                             &symbol,
                             kind,
@@ -3114,6 +3304,8 @@ impl AstIndex {
                     method_return_types: HashMap::new(),
                     file_call_names: HashMap::new(),
                     file_to_symbols: HashMap::new(),
+                    type_hierarchy: HashMap::new(),
+                    interface_implementors: HashMap::new(),
                 })
             }
         }
@@ -3154,6 +3346,8 @@ impl AstIndex {
                 method_return_types: HashMap::new(),
                 file_call_names: HashMap::new(),
                 file_to_symbols: HashMap::new(),
+                type_hierarchy: HashMap::new(),
+                interface_implementors: HashMap::new(),
             },
         };
 
@@ -3191,6 +3385,8 @@ impl AstIndex {
             method_return_types: HashMap::new(),
             file_call_names: HashMap::new(),
             file_to_symbols: HashMap::new(),
+            type_hierarchy: HashMap::new(),
+            interface_implementors: HashMap::new(),
         });
 
         for symbol in self.forgotten_symbols.read().unwrap().iter() {
@@ -3212,6 +3408,12 @@ impl AstIndex {
         payload
             .file_to_symbols
             .extend(self.file_to_symbols.read().unwrap().clone());
+        payload
+            .type_hierarchy
+            .extend(self.type_hierarchy.read().unwrap().clone());
+        payload
+            .interface_implementors
+            .extend(self.interface_implementors.read().unwrap().clone());
 
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -3302,6 +3504,16 @@ impl AstIndex {
             }
         }
 
+        let mut interface_implementors = payload.interface_implementors.clone();
+        for (child, parents) in &payload.type_hierarchy {
+            for parent in parents {
+                let list = interface_implementors.entry(parent.clone()).or_default();
+                if !list.iter().any(|c| c == child) {
+                    list.push(child.clone());
+                }
+            }
+        }
+
         Ok(Self {
             nodes: RwLock::new(payload.nodes),
             reverse_deps: RwLock::new(reverse_deps),
@@ -3310,6 +3522,8 @@ impl AstIndex {
             method_return_types: RwLock::new(payload.method_return_types),
             file_call_names: RwLock::new(payload.file_call_names),
             file_to_symbols: RwLock::new(payload.file_to_symbols),
+            type_hierarchy: RwLock::new(payload.type_hierarchy),
+            interface_implementors: RwLock::new(interface_implementors),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             scan_root: RwLock::new(scan_root),

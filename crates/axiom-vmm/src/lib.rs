@@ -9,6 +9,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 // same signatures; the alias keeps the call sites below reading as they did.
 use wasmtime_wasi::p1::{self as preview1, WasiP1Ctx};
 
+pub mod daemon;
 pub mod native;
 
 /// Sandboxed execution backend trait
