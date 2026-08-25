@@ -508,3 +508,41 @@ fn python_class_scoping_resets_for_top_level_functions() {
         "top_level_func is NOT scoped under MyClass: {symbols:?}"
     );
 }
+
+#[test]
+fn typescript_generics_interfaces_types_enums_and_arrow_functions_are_indexed() {
+    let dir = TempDir::new("ts-ast");
+    dir.write(
+        "service.ts",
+        "export interface UserProfile<T> {\n\
+         \x20 id: T;\n\
+         }\n\
+         export type Status = 'active' | 'inactive';\n\
+         export enum Role { Admin, User }\n\
+         export function parseResponse<R>(res: string): R {\n\
+         \x20 return JSON.parse(res);\n\
+         }\n\
+         export const validateUser = (user: UserProfile<string>): boolean => {\n\
+         \x20 return user.id.length > 0;\n\
+         };\n",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let symbols = index.symbol_paths();
+    assert!(index.get_symbol("UserProfile").is_some(), "interface UserProfile indexed: {symbols:?}");
+    assert_eq!(index.get_symbol("UserProfile").unwrap().kind, "interface");
+
+    assert!(index.get_symbol("Status").is_some(), "type Status indexed: {symbols:?}");
+    assert_eq!(index.get_symbol("Status").unwrap().kind, "type");
+
+    assert!(index.get_symbol("Role").is_some(), "enum Role indexed: {symbols:?}");
+    assert_eq!(index.get_symbol("Role").unwrap().kind, "enum");
+
+    assert!(index.get_symbol("parseResponse").is_some(), "generic fn parseResponse indexed: {symbols:?}");
+    assert_eq!(index.get_symbol("parseResponse").unwrap().kind, "function");
+
+    assert!(index.get_symbol("validateUser").is_some(), "arrow fn validateUser indexed: {symbols:?}");
+    assert_eq!(index.get_symbol("validateUser").unwrap().kind, "function");
+}

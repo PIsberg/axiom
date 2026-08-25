@@ -2490,6 +2490,7 @@ impl AstIndex {
             } else if decl.contains("function ")
                 || decl.starts_with("export function ")
                 || decl.starts_with("export async function ")
+                || decl.starts_with("async function ")
             {
                 let name = decl
                     .split('(')
@@ -2498,10 +2499,13 @@ impl AstIndex {
                     .split("function ")
                     .last()
                     .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
                     .trim()
                     .to_string();
 
-                if !name.is_empty() {
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
                     let symbol = format!("{}::{}", file_path, name);
                     let is_test = name.starts_with("test")
                         || file_path.contains("test")
@@ -2529,15 +2533,145 @@ impl AstIndex {
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
-                    .replace("{", "")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .replace('{', "")
                     .trim()
                     .to_string();
 
-                if !name.is_empty() {
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
                     let symbol = format!("{}::{}", file_path, name);
                     self.index_node_at(
                         &symbol,
                         "class",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if decl.starts_with("interface ")
+                || decl.starts_with("export interface ")
+                || decl.starts_with("export default interface ")
+            {
+                let name = decl
+                    .split("interface ")
+                    .last()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .replace('{', "")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    self.index_node_at(
+                        &symbol,
+                        "interface",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if decl.starts_with("type ")
+                || decl.starts_with("export type ")
+            {
+                let name = decl
+                    .split("type ")
+                    .last()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    self.index_node_at(
+                        &symbol,
+                        "type",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if decl.starts_with("enum ")
+                || decl.starts_with("export enum ")
+                || decl.starts_with("const enum ")
+                || decl.starts_with("export const enum ")
+            {
+                let name = decl
+                    .split("enum ")
+                    .last()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .replace('{', "")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    self.index_node_at(
+                        &symbol,
+                        "enum",
+                        trimmed,
+                        &Self::body_of(&raw, &stripped, line_no),
+                        imports.clone(),
+                        Some((line_no, line_no)),
+                    );
+                    *nodes_count += 1;
+                }
+            } else if (decl.starts_with("const ")
+                || decl.starts_with("export const ")
+                || decl.starts_with("let ")
+                || decl.starts_with("export let "))
+                && (decl.contains("=>") || decl.contains("= function") || decl.contains("= async function"))
+            {
+                let after_kw = if decl.contains("const ") {
+                    decl.split("const ").last().unwrap_or("")
+                } else {
+                    decl.split("let ").last().unwrap_or("")
+                };
+                let name = after_kw
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+
+                if !name.is_empty() && Self::is_valid_identifier(&name) {
+                    let symbol = format!("{}::{}", file_path, name);
+                    let is_test = name.starts_with("test")
+                        || file_path.contains("test")
+                        || file_path.contains("spec");
+                    let kind = if is_test { "test" } else { "function" };
+
+                    self.index_node_at(
+                        &symbol,
+                        kind,
                         trimmed,
                         &Self::body_of(&raw, &stripped, line_no),
                         imports.clone(),
