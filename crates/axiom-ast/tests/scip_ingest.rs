@@ -252,7 +252,11 @@ fn scip_ingest_reads_text_from_disk_when_doc_text_is_omitted() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let file_path = dir.join("Gate.java");
-    std::fs::write(&file_path, "public class Gate { boolean isOpen() { return true; } }").unwrap();
+    std::fs::write(
+        &file_path,
+        "public class Gate { boolean isOpen() { return true; } }",
+    )
+    .unwrap();
 
     let sym_name = sym("com/example/Gate#isOpen().");
     let mut doc = Document::new();

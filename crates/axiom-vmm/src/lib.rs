@@ -452,7 +452,10 @@ impl SandboxEngine for WasiEngine {
             let mut calls = Vec::new();
             for line in code_snippet.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") || trimmed.starts_with("async fn ") {
+                if trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("async fn ")
+                {
                     let after_fn = trimmed.split("fn ").last().unwrap_or("");
                     if let Some(name) = after_fn.split('(').next() {
                         let name = name.trim();

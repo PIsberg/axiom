@@ -476,10 +476,19 @@ fn a_generic_rust_function_and_type_are_indexed_properly() {
     index.scan_directory(dir.path()).expect("scan");
 
     assert!(index.get_symbol("Parser").is_some(), "trait Parser indexed");
-    assert!(index.get_symbol("Wrapper").is_some(), "struct Wrapper indexed");
+    assert!(
+        index.get_symbol("Wrapper").is_some(),
+        "struct Wrapper indexed"
+    );
     assert!(index.get_symbol("Status").is_some(), "enum Status indexed");
-    assert!(index.get_symbol("make_const").is_some(), "const fn make_const indexed");
-    assert!(index.get_symbol("fetch_data").is_some(), "generic async fn fetch_data indexed");
+    assert!(
+        index.get_symbol("make_const").is_some(),
+        "const fn make_const indexed"
+    );
+    assert!(
+        index.get_symbol("fetch_data").is_some(),
+        "generic async fn fetch_data indexed"
+    );
 }
 
 #[test]
@@ -504,7 +513,9 @@ fn python_class_scoping_resets_for_top_level_functions() {
         "method_one is scoped under MyClass: {symbols:?}"
     );
     assert!(
-        symbols.iter().any(|s| s.ends_with("::top_level_func") && !s.contains("::MyClass::top_level_func")),
+        symbols
+            .iter()
+            .any(|s| s.ends_with("::top_level_func") && !s.contains("::MyClass::top_level_func")),
         "top_level_func is NOT scoped under MyClass: {symbols:?}"
     );
 }
@@ -531,19 +542,34 @@ fn typescript_generics_interfaces_types_enums_and_arrow_functions_are_indexed() 
     index.scan_directory(dir.path()).expect("scan");
 
     let symbols = index.symbol_paths();
-    assert!(index.get_symbol("UserProfile").is_some(), "interface UserProfile indexed: {symbols:?}");
+    assert!(
+        index.get_symbol("UserProfile").is_some(),
+        "interface UserProfile indexed: {symbols:?}"
+    );
     assert_eq!(index.get_symbol("UserProfile").unwrap().kind, "interface");
 
-    assert!(index.get_symbol("Status").is_some(), "type Status indexed: {symbols:?}");
+    assert!(
+        index.get_symbol("Status").is_some(),
+        "type Status indexed: {symbols:?}"
+    );
     assert_eq!(index.get_symbol("Status").unwrap().kind, "type");
 
-    assert!(index.get_symbol("Role").is_some(), "enum Role indexed: {symbols:?}");
+    assert!(
+        index.get_symbol("Role").is_some(),
+        "enum Role indexed: {symbols:?}"
+    );
     assert_eq!(index.get_symbol("Role").unwrap().kind, "enum");
 
-    assert!(index.get_symbol("parseResponse").is_some(), "generic fn parseResponse indexed: {symbols:?}");
+    assert!(
+        index.get_symbol("parseResponse").is_some(),
+        "generic fn parseResponse indexed: {symbols:?}"
+    );
     assert_eq!(index.get_symbol("parseResponse").unwrap().kind, "function");
 
-    assert!(index.get_symbol("validateUser").is_some(), "arrow fn validateUser indexed: {symbols:?}");
+    assert!(
+        index.get_symbol("validateUser").is_some(),
+        "arrow fn validateUser indexed: {symbols:?}"
+    );
     assert_eq!(index.get_symbol("validateUser").unwrap().kind, "function");
 }
 
@@ -570,10 +596,24 @@ fn cpp_classes_structs_namespaces_enums_and_functions_are_indexed() {
     index.scan_directory(dir.path()).expect("scan");
 
     let symbols = index.symbol_paths();
-    assert!(symbols.iter().any(|s| s.ends_with("::physics::State")), "enum physics::State indexed: {symbols:?}");
-    assert!(symbols.iter().any(|s| s.ends_with("::physics::RigidBody")), "class physics::RigidBody indexed: {symbols:?}");
-    assert!(symbols.iter().any(|s| s.ends_with("::physics::RigidBody::applyForce")), "method physics::RigidBody::applyForce indexed: {symbols:?}");
-    assert!(symbols.iter().any(|s| s.ends_with("::computeTotal")), "function computeTotal indexed: {symbols:?}");
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::physics::State")),
+        "enum physics::State indexed: {symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::physics::RigidBody")),
+        "class physics::RigidBody indexed: {symbols:?}"
+    );
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.ends_with("::physics::RigidBody::applyForce")),
+        "method physics::RigidBody::applyForce indexed: {symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::computeTotal")),
+        "function computeTotal indexed: {symbols:?}"
+    );
 }
 
 #[test]
@@ -602,13 +642,36 @@ fn java_records_sealed_classes_generic_returns_and_junit5_annotations_are_indexe
     index.scan_directory(dir.path()).expect("scan");
 
     let symbols = index.symbol_paths();
-    assert!(index.get_symbol("com.example.service.ServiceSuite").is_some(), "sealed class ServiceSuite indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.service.TokenPair").is_some(), "record TokenPair indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.service.ServiceSuite::getTokens").is_some(), "method getTokens indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.service.ServiceSuite::verifyTokens").is_some(), "test verifyTokens indexed: {symbols:?}");
+    assert!(
+        index
+            .get_symbol("com.example.service.ServiceSuite")
+            .is_some(),
+        "sealed class ServiceSuite indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("com.example.service.TokenPair").is_some(),
+        "record TokenPair indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.service.ServiceSuite::getTokens")
+            .is_some(),
+        "method getTokens indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.service.ServiceSuite::verifyTokens")
+            .is_some(),
+        "test verifyTokens indexed: {symbols:?}"
+    );
 
-    let verify_sym = index.get_symbol("com.example.service.ServiceSuite::verifyTokens").unwrap();
-    assert_eq!(verify_sym.kind, "test", "verifyTokens identified as test from JUnit 5 annotations");
+    let verify_sym = index
+        .get_symbol("com.example.service.ServiceSuite::verifyTokens")
+        .unwrap();
+    assert_eq!(
+        verify_sym.kind, "test",
+        "verifyTokens identified as test from JUnit 5 annotations"
+    );
 }
 
 #[test]
@@ -631,11 +694,30 @@ fn java_nested_and_inner_classes_are_scoped_hierarchically() {
     index.scan_directory(dir.path()).expect("scan");
 
     let symbols = index.symbol_paths();
-    assert!(index.get_symbol("com.example.model.Outer").is_some(), "Outer indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.model.NestedConfig").is_some(), "NestedConfig indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.model.NestedConfig::getEndpoint").is_some(), "NestedConfig::getEndpoint indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.model.InnerWorker").is_some(), "InnerWorker indexed: {symbols:?}");
-    assert!(index.get_symbol("com.example.model.InnerWorker::doWork").is_some(), "InnerWorker::doWork indexed: {symbols:?}");
+    assert!(
+        index.get_symbol("com.example.model.Outer").is_some(),
+        "Outer indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("com.example.model.NestedConfig").is_some(),
+        "NestedConfig indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.model.NestedConfig::getEndpoint")
+            .is_some(),
+        "NestedConfig::getEndpoint indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("com.example.model.InnerWorker").is_some(),
+        "InnerWorker indexed: {symbols:?}"
+    );
+    assert!(
+        index
+            .get_symbol("com.example.model.InnerWorker::doWork")
+            .is_some(),
+        "InnerWorker::doWork indexed: {symbols:?}"
+    );
 }
 
 #[test]
@@ -702,8 +784,15 @@ fn java_blast_radius_isolates_unrelated_tests_and_traces_transitive_dependencies
         .iter()
         .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
         .collect();
-    assert!(user_impacted.contains(&"testFetchUser".to_string()) || user_impacted.contains(&"com.example.service.UserServiceTest".to_string()), "UserService change impacts UserServiceTest: {user_impacted:?}");
-    assert!(!user_impacted.contains(&"testOrderProcessing".to_string()), "UserService change does NOT impact OrderServiceTest: {user_impacted:?}");
+    assert!(
+        user_impacted.contains(&"testFetchUser".to_string())
+            || user_impacted.contains(&"com.example.service.UserServiceTest".to_string()),
+        "UserService change impacts UserServiceTest: {user_impacted:?}"
+    );
+    assert!(
+        !user_impacted.contains(&"testOrderProcessing".to_string()),
+        "UserService change does NOT impact OrderServiceTest: {user_impacted:?}"
+    );
 
     // 2. Changing OrderService only impacts OrderServiceTest, not UserServiceTest
     let order_radius = index
@@ -714,8 +803,15 @@ fn java_blast_radius_isolates_unrelated_tests_and_traces_transitive_dependencies
         .iter()
         .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
         .collect();
-    assert!(order_impacted.contains(&"testOrderProcessing".to_string()) || order_impacted.contains(&"com.example.service.OrderServiceTest".to_string()), "OrderService change impacts OrderServiceTest: {order_impacted:?}");
-    assert!(!order_impacted.contains(&"testFetchUser".to_string()), "OrderService change does NOT impact UserServiceTest: {order_impacted:?}");
+    assert!(
+        order_impacted.contains(&"testOrderProcessing".to_string())
+            || order_impacted.contains(&"com.example.service.OrderServiceTest".to_string()),
+        "OrderService change impacts OrderServiceTest: {order_impacted:?}"
+    );
+    assert!(
+        !order_impacted.contains(&"testFetchUser".to_string()),
+        "OrderService change does NOT impact UserServiceTest: {order_impacted:?}"
+    );
 
     // 3. Changing PaymentGateway reaches OrderServiceTest at depth 2 (transitive)
     let gw_radius = index
@@ -726,6 +822,13 @@ fn java_blast_radius_isolates_unrelated_tests_and_traces_transitive_dependencies
         .iter()
         .map(|t| t.rsplit("::").next().unwrap_or(t).to_string())
         .collect();
-    assert!(gw_impacted.contains(&"testOrderProcessing".to_string()) || gw_impacted.contains(&"com.example.service.OrderServiceTest".to_string()), "PaymentGateway reaches OrderServiceTest transitively: {gw_impacted:?}");
-    assert!(!gw_impacted.contains(&"testFetchUser".to_string()), "PaymentGateway does NOT reach UserServiceTest: {gw_impacted:?}");
+    assert!(
+        gw_impacted.contains(&"testOrderProcessing".to_string())
+            || gw_impacted.contains(&"com.example.service.OrderServiceTest".to_string()),
+        "PaymentGateway reaches OrderServiceTest transitively: {gw_impacted:?}"
+    );
+    assert!(
+        !gw_impacted.contains(&"testFetchUser".to_string()),
+        "PaymentGateway does NOT reach UserServiceTest: {gw_impacted:?}"
+    );
 }

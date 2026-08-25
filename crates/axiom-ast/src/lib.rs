@@ -2278,7 +2278,13 @@ impl AstIndex {
                 } else if decl.starts_with("use ") {
                     uses.push(decl.replace("use ", "").replace(';', "").trim().to_string());
                 } else if decl.contains("fn ") {
-                    let before_paren = decl.split('(').next().unwrap_or("").split('{').next().unwrap_or("");
+                    let before_paren = decl
+                        .split('(')
+                        .next()
+                        .unwrap_or("")
+                        .split('{')
+                        .next()
+                        .unwrap_or("");
                     let before_gen = before_paren.split('<').next().unwrap_or("");
                     let words: Vec<&str> = before_gen.split_whitespace().collect();
                     if words.len() >= 2 && words[words.len() - 2] == "fn" {
@@ -2299,8 +2305,17 @@ impl AstIndex {
                             *nodes_count += 1;
                         }
                     }
-                } else if decl.contains("struct ") || decl.contains("enum ") || decl.contains("trait ") {
-                    let before_body = decl.split('{').next().unwrap_or("").split(';').next().unwrap_or("");
+                } else if decl.contains("struct ")
+                    || decl.contains("enum ")
+                    || decl.contains("trait ")
+                {
+                    let before_body = decl
+                        .split('{')
+                        .next()
+                        .unwrap_or("")
+                        .split(';')
+                        .next()
+                        .unwrap_or("");
                     let before_gen = before_body.split('<').next().unwrap_or("");
                     let words: Vec<&str> = before_gen.split_whitespace().collect();
                     if words.len() >= 2 {
@@ -2308,7 +2323,13 @@ impl AstIndex {
                         if prev == "struct" || prev == "enum" || prev == "trait" {
                             let name = words[words.len() - 1].trim();
                             if Self::is_valid_identifier(name) {
-                                let kind = if prev == "trait" { "trait" } else if prev == "enum" { "enum" } else { "struct" };
+                                let kind = if prev == "trait" {
+                                    "trait"
+                                } else if prev == "enum" {
+                                    "enum"
+                                } else {
+                                    "struct"
+                                };
                                 let symbol = Self::rust_symbol_in(file_path, &owner_stack, name);
                                 self.index_node_at(
                                     &symbol,
@@ -2628,9 +2649,7 @@ impl AstIndex {
                     );
                     *nodes_count += 1;
                 }
-            } else if decl.starts_with("type ")
-                || decl.starts_with("export type ")
-            {
+            } else if decl.starts_with("type ") || decl.starts_with("export type ") {
                 let name = decl
                     .split("type ")
                     .last()
@@ -2691,7 +2710,9 @@ impl AstIndex {
                 || decl.starts_with("export const ")
                 || decl.starts_with("let ")
                 || decl.starts_with("export let "))
-                && (decl.contains("=>") || decl.contains("= function") || decl.contains("= async function"))
+                && (decl.contains("=>")
+                    || decl.contains("= function")
+                    || decl.contains("= async function"))
             {
                 let after_kw = if decl.contains("const ") {
                     decl.split("const ").last().unwrap_or("")
@@ -2904,7 +2925,10 @@ impl AstIndex {
 
             if decl.starts_with("#include ") {
                 includes.push(trimmed.to_string());
-            } else if !decl.starts_with('#') && !decl.starts_with("using ") && !decl.starts_with("typedef ") {
+            } else if !decl.starts_with('#')
+                && !decl.starts_with("using ")
+                && !decl.starts_with("typedef ")
+            {
                 if decl.starts_with("namespace ") {
                     let name = decl
                         .split("namespace ")
@@ -2984,7 +3008,9 @@ impl AstIndex {
                             scope_stack.push((name, depth + opens.max(1)));
                         }
                     }
-                } else if decl.contains('(') && (opens > 0 || decl.ends_with(';') || decl.contains("->")) {
+                } else if decl.contains('(')
+                    && (opens > 0 || decl.ends_with(';') || decl.contains("->"))
+                {
                     let before_paren = decl.split('(').next().unwrap_or("").trim();
                     let before_gen = before_paren.split('<').next().unwrap_or("").trim();
                     let last_token = before_gen

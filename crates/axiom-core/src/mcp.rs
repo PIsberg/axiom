@@ -1010,16 +1010,17 @@ impl AxiomMcpServer {
                     Err(e) => return Ok(json!({ "error": e })),
                 };
 
-                let (kind, deps, range, sig) = if let Some(existing) = self.ast_index.get_symbol(symbol) {
-                    (
-                        existing.kind,
-                        existing.dependencies,
-                        Some(existing.source_range),
-                        existing.signature.unwrap_or_default(),
-                    )
-                } else {
-                    ("function".to_string(), vec![], None, String::new())
-                };
+                let (kind, deps, range, sig) =
+                    if let Some(existing) = self.ast_index.get_symbol(symbol) {
+                        (
+                            existing.kind,
+                            existing.dependencies,
+                            Some(existing.source_range),
+                            existing.signature.unwrap_or_default(),
+                        )
+                    } else {
+                        ("function".to_string(), vec![], None, String::new())
+                    };
 
                 let op = self
                     .tree_crdt

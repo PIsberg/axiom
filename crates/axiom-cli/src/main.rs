@@ -718,9 +718,7 @@ async fn main() -> Result<()> {
             );
 
             // Step 5: record the provenance of the change
-            println!(
-                "\n🔹 [Step 5/5] Recording the provenance of the change..."
-            );
+            println!("\n🔹 [Step 5/5] Recording the provenance of the change...");
             let req5 = JsonRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: Some(serde_json::json!(5)),

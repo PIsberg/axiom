@@ -225,8 +225,20 @@ fn generic_go_functions_types_and_methods_are_indexed() {
     let index = scan(&dir);
     let symbols = index.symbol_paths();
 
-    assert!(index.get_symbol("Stack").is_some(), "generic struct Stack indexed: {symbols:?}");
-    assert!(index.get_symbol("Container").is_some(), "generic interface Container indexed: {symbols:?}");
-    assert!(symbols.iter().any(|s| s.ends_with("::Stack::Push")), "method on generic receiver indexed: {symbols:?}");
-    assert!(index.get_symbol("MapValues").is_some(), "generic free function MapValues indexed: {symbols:?}");
+    assert!(
+        index.get_symbol("Stack").is_some(),
+        "generic struct Stack indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("Container").is_some(),
+        "generic interface Container indexed: {symbols:?}"
+    );
+    assert!(
+        symbols.iter().any(|s| s.ends_with("::Stack::Push")),
+        "method on generic receiver indexed: {symbols:?}"
+    );
+    assert!(
+        index.get_symbol("MapValues").is_some(),
+        "generic free function MapValues indexed: {symbols:?}"
+    );
 }
