@@ -3,7 +3,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn test_mcp_initialize_advertises_resources_and_prompts() {
-    let server = AxiomMcpServer::new().unwrap();
+    let server = AxiomMcpServer::with_index(None).unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(1)),
@@ -21,7 +21,8 @@ async fn test_mcp_initialize_advertises_resources_and_prompts() {
 
 #[tokio::test]
 async fn test_mcp_resources_list_and_read() {
-    let server = AxiomMcpServer::new().unwrap();
+    let server = AxiomMcpServer::with_index(None).unwrap();
+    server.seed_demo_workspace();
 
     // 1. resources/list
     let req = JsonRpcRequest {
@@ -78,7 +79,7 @@ async fn test_mcp_resources_list_and_read() {
 
 #[tokio::test]
 async fn test_mcp_prompts_list_and_get() {
-    let server = AxiomMcpServer::new().unwrap();
+    let server = AxiomMcpServer::with_index(None).unwrap();
 
     // 1. prompts/list
     let req = JsonRpcRequest {
