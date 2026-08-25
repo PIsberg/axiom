@@ -449,8 +449,23 @@ impl SandboxEngine for WasiEngine {
         let source_code = if code_snippet.contains("fn main") {
             code_snippet.to_string()
         } else {
-            format!(
-                r#"
+            let mut calls = Vec::new();
+            for line in code_snippet.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") || trimmed.starts_with("async fn ") {
+                    let after_fn = trimmed.split("fn ").last().unwrap_or("");
+                    if let Some(name) = after_fn.split('(').next() {
+                        let name = name.trim();
+                        if after_fn.contains("()") && !name.is_empty() && name != "main" {
+                            calls.push(format!("    {}();", name));
+                        }
+                    }
+                }
+            }
+
+            if calls.is_empty() {
+                format!(
+                    r#"
 #![allow(unused_variables, unused_mut, dead_code, unused_imports)]
 fn validate_token(token: &str) -> bool {{
     token.len() > 10
@@ -460,8 +475,26 @@ fn main() {{
     {}
 }}
 "#,
-                code_snippet
-            )
+                    code_snippet
+                )
+            } else {
+                format!(
+                    r#"
+#![allow(unused_variables, unused_mut, dead_code, unused_imports)]
+fn validate_token(token: &str) -> bool {{
+    token.len() > 10
+}}
+
+{}
+
+fn main() {{
+{}
+}}
+"#,
+                    code_snippet,
+                    calls.join("\n")
+                )
+            }
         };
 
         if let Err(e) = std::fs::write(&src_file, &source_code) {
