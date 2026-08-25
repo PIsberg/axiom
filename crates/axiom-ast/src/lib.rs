@@ -1970,16 +1970,10 @@ impl AstIndex {
                             let decl_depth = current_brace_depth + open_c.max(1);
                             class_stack.push((class_name.to_string(), decl_depth));
 
-                            let scoped_class = class_stack
-                                .iter()
-                                .map(|(c, _)| c.as_str())
-                                .collect::<Vec<_>>()
-                                .join(".");
-
                             let full_symbol = if package.is_empty() {
-                                scoped_class
+                                class_name.to_string()
                             } else {
-                                format!("{}.{}", package, scoped_class)
+                                format!("{}.{}", package, class_name)
                             };
 
                             let kind = if is_test_file
@@ -2102,16 +2096,14 @@ impl AstIndex {
                     .unwrap_or("")
                     .trim();
 
-                let enclosing_class = if !class_stack.is_empty() {
-                    class_stack
-                        .iter()
-                        .map(|(c, _)| c.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".")
-                } else if scala_or_kotlin {
-                    file_stem.clone()
-                } else {
-                    String::new()
+                let enclosing_class = match class_stack.last().map(|(c, _)| c.as_str()) {
+                    Some(class) => class,
+                    // Only Kotlin and Scala reach the fallback: for Java an
+                    // empty owner still means the line was not a method, and
+                    // inventing one would resurrect the symbols this parser used
+                    // to produce from `new Foo(...)` and `catch` clauses.
+                    None if scala_or_kotlin => file_stem.as_str(),
+                    None => "",
                 };
                 let is_valid_name = Self::is_valid_identifier(method_name)
                     && !Self::is_java_keyword(method_name)
@@ -2119,7 +2111,7 @@ impl AstIndex {
                         .chars()
                         .next()
                         .is_some_and(|c| c.is_lowercase() || c == '_' || c == '$')
-                        || (class_stack.last().map(|(c, _)| c == method_name).unwrap_or(false)));
+                        || (!enclosing_class.is_empty() && enclosing_class == method_name));
 
                 if !enclosing_class.is_empty() && is_valid_name {
                     // Record return type for accessor resolution
