@@ -1097,7 +1097,11 @@ fn timed_out_report(
 /// Parse multi-language compiler errors/warnings into structured DiagnosticSpan items
 pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticSpan> {
     let mut diags = Vec::new();
-    let text = if !stderr.trim().is_empty() { stderr } else { stdout };
+    let text = if !stderr.trim().is_empty() {
+        stderr
+    } else {
+        stdout
+    };
 
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
@@ -1106,7 +1110,11 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
         // 1. Rustc format: error[E0425]: ... / warning: ...
         if trimmed.starts_with("error") || trimmed.starts_with("warning") {
             let is_warning = trimmed.starts_with("warning");
-            let severity = if is_warning { "warning".to_string() } else { "error".to_string() };
+            let severity = if is_warning {
+                "warning".to_string()
+            } else {
+                "error".to_string()
+            };
             let message = trimmed.to_string();
 
             let mut file = None;
@@ -1164,7 +1172,7 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
                         None
                     };
                     let mut msg = String::new();
-                    while let Some(nxt) = lines.next() {
+                    for nxt in lines.by_ref() {
                         let tn = nxt.trim();
                         if !tn.is_empty() && !tn.starts_with("File \"") {
                             msg = tn.to_string();
@@ -1192,7 +1200,11 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
             if let Ok(l) = parts[1].trim().parse::<usize>() {
                 if let Ok(c) = parts[2].trim().parse::<usize>() {
                     let rest = parts[3].trim();
-                    let sev = if rest.starts_with("warning") { "warning" } else { "error" };
+                    let sev = if rest.starts_with("warning") {
+                        "warning"
+                    } else {
+                        "error"
+                    };
                     diags.push(DiagnosticSpan {
                         file: Some(f.to_string()),
                         line: Some(l),
@@ -1204,7 +1216,11 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
                     continue;
                 } else {
                     let rest = format!("{}: {}", parts[2].trim(), parts[3].trim());
-                    let sev = if rest.contains("warning") { "warning" } else { "error" };
+                    let sev = if rest.contains("warning") {
+                        "warning"
+                    } else {
+                        "error"
+                    };
                     diags.push(DiagnosticSpan {
                         file: Some(f.to_string()),
                         line: Some(l),

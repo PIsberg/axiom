@@ -1058,11 +1058,15 @@ impl AstIndex {
                     let d = depth.max(1);
                     if tests_recorded.insert(curr.clone()) {
                         tests_by_depth.entry(d).or_default().push(curr.clone());
-                        causal_paths.entry(curr.clone()).or_insert_with(|| path.clone());
+                        causal_paths
+                            .entry(curr.clone())
+                            .or_insert_with(|| path.clone());
                     }
                     if d <= max_depth && impacted_set.insert(curr.clone()) {
                         impacted_tests.push(curr.clone());
-                        causal_paths.entry(curr.clone()).or_insert_with(|| path.clone());
+                        causal_paths
+                            .entry(curr.clone())
+                            .or_insert_with(|| path.clone());
                     }
                 }
             }
@@ -1122,7 +1126,9 @@ impl AstIndex {
                                 if let Some(node) = nodes.get(sym) {
                                     if node.kind == "test" && impacted_set.insert(sym.clone()) {
                                         impacted_tests.push(sym.clone());
-                                        causal_paths.entry(sym.clone()).or_insert_with(|| vec![canonical_symbol.clone(), sym.clone()]);
+                                        causal_paths.entry(sym.clone()).or_insert_with(|| {
+                                            vec![canonical_symbol.clone(), sym.clone()]
+                                        });
                                         if tests_recorded.insert(sym.clone()) {
                                             tests_by_depth.entry(1).or_default().push(sym.clone());
                                         }
@@ -1151,7 +1157,9 @@ impl AstIndex {
                         && impacted_set.insert(sym.clone())
                     {
                         method_expansions.push(sym.clone());
-                        let mut p = causal_paths.get(class_prefix).cloned().unwrap_or_else(|| vec![canonical_symbol.clone(), class_prefix.to_string()]);
+                        let mut p = causal_paths.get(class_prefix).cloned().unwrap_or_else(|| {
+                            vec![canonical_symbol.clone(), class_prefix.to_string()]
+                        });
                         p.push(sym.clone());
                         causal_paths.entry(sym.clone()).or_insert(p);
                         if tests_recorded.insert(sym.clone()) {
@@ -1185,7 +1193,9 @@ impl AstIndex {
                     && impacted_set.insert(sym.clone())
                 {
                     impacted_tests.push(sym.clone());
-                    causal_paths.entry(sym.clone()).or_insert_with(|| vec![canonical_symbol.clone(), sym.clone()]);
+                    causal_paths
+                        .entry(sym.clone())
+                        .or_insert_with(|| vec![canonical_symbol.clone(), sym.clone()]);
                     tests_by_depth.entry(1).or_default().push(sym.clone());
                 }
             }
@@ -1231,7 +1241,10 @@ impl AstIndex {
         let mut callers = Vec::new();
         let simple = Self::simple_name_of(&node.symbol_path);
         let keys = [node.symbol_path.as_str(), simple];
-        for k in keys.iter().take(if simple == node.symbol_path { 1 } else { 2 }) {
+        for k in keys
+            .iter()
+            .take(if simple == node.symbol_path { 1 } else { 2 })
+        {
             if let Some(c_set) = rev.get(*k) {
                 for c in c_set {
                     if !callers.contains(c) {
@@ -1246,7 +1259,10 @@ impl AstIndex {
 
         // Format the adaptive context slice
         let mut rendered = String::new();
-        rendered.push_str(&format!("// Symbol: {} [{}]\n", node.symbol_path, node.kind));
+        rendered.push_str(&format!(
+            "// Symbol: {} [{}]\n",
+            node.symbol_path, node.kind
+        ));
         if let Some(doc) = &node.docstring {
             for line in doc.lines() {
                 rendered.push_str(&format!("/// {}\n", line));
@@ -1278,7 +1294,10 @@ impl AstIndex {
         }
 
         if !callees.is_empty() {
-            rendered.push_str(&format!("\n// Dependencies / Callees ({}):\n", callees.len()));
+            rendered.push_str(&format!(
+                "\n// Dependencies / Callees ({}):\n",
+                callees.len()
+            ));
             for callee in &callees {
                 if (rendered.len() / 4) >= budget {
                     rendered.push_str("// ... [dependencies truncated for token budget]\n");

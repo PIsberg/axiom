@@ -295,11 +295,8 @@ async fn a_manifest_with_directory_traversal_is_purged() {
     assert!(manifest.is_file(), "manifest must exist");
 
     let malicious = vec![("../escaped.exe".to_string(), "anyhash".to_string())];
-    std::fs::write(
-        &manifest,
-        serde_json::to_string(&malicious).expect("json"),
-    )
-    .expect("write malicious manifest");
+    std::fs::write(&manifest, serde_json::to_string(&malicious).expect("json"))
+        .expect("write malicious manifest");
 
     let second = eval(&snippet).await;
     assert_eq!(
@@ -330,4 +327,3 @@ async fn non_compiled_languages_do_not_report_compile_cache() {
         "an interpreted language without a compile step must have no compile_cache field"
     );
 }
-

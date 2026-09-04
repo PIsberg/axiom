@@ -1052,7 +1052,9 @@ impl AxiomMcpServer {
                     return Ok(json!(slice));
                 }
             }
-            return Err(format!("Context slice could not be computed for '{symbol}'"));
+            return Err(format!(
+                "Context slice could not be computed for '{symbol}'"
+            ));
         }
 
         Err(format!("Resource URI '{uri}' is not supported"))
@@ -1174,7 +1176,8 @@ impl AxiomMcpServer {
                         if !implementors.is_empty() {
                             val["implementors"] = json!(implementors);
                         }
-                        if let Some(slice) = self.ast_index.get_symbol_slice(resolved, token_budget) {
+                        if let Some(slice) = self.ast_index.get_symbol_slice(resolved, token_budget)
+                        {
                             val["context_slice"] = json!(slice);
                         }
                         return Ok(val);
@@ -1455,9 +1458,13 @@ impl AxiomMcpServer {
                             ("function".to_string(), vec![], None, String::new())
                         };
 
-                    let op = self
-                        .tree_crdt
-                        .insert_node("root", &entry.node_id, symbol, &kind, &entry.content);
+                    let op = self.tree_crdt.insert_node(
+                        "root",
+                        &entry.node_id,
+                        symbol,
+                        &kind,
+                        &entry.content,
+                    );
 
                     if let Err(e) = append_crdt_op(&self.op_log_path(), &op) {
                         return Ok(json!({

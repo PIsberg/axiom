@@ -5,7 +5,12 @@ fn test_causal_paths_in_blast_radius() {
     let index = AstIndex::new();
 
     // A -> B -> Test
-    index.index_node("core::engine::compute", "function", "pub fn compute() {}", vec![]);
+    index.index_node(
+        "core::engine::compute",
+        "function",
+        "pub fn compute() {}",
+        vec![],
+    );
     index.index_node(
         "service::handler::process",
         "function",
@@ -23,7 +28,11 @@ fn test_causal_paths_in_blast_radius() {
         .compute_blast_radius("core::engine::compute", 3)
         .expect("blast radius computed");
 
-    assert!(radius.impacted_tests.contains(&"tests::test_service".to_string()));
+    assert!(
+        radius
+            .impacted_tests
+            .contains(&"tests::test_service".to_string())
+    );
     assert!(radius.causal_paths.contains_key("tests::test_service"));
 
     let path = &radius.causal_paths["tests::test_service"];
@@ -78,5 +87,9 @@ fn test_adaptive_symbol_context_slice() {
         .expect("tight slice exists");
 
     assert!(tight_slice.truncated);
-    assert!(tight_slice.rendered_slice.contains("truncated for token budget"));
+    assert!(
+        tight_slice
+            .rendered_slice
+            .contains("truncated for token budget")
+    );
 }

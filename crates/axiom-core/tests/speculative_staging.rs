@@ -20,7 +20,10 @@ async fn test_speculative_staging_lifecycle() {
         })),
     };
     let query_resp = server.handle_request(query_req).await;
-    let text = query_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let text = query_resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(val.get("context_slice").is_some());
 
@@ -40,7 +43,10 @@ async fn test_speculative_staging_lifecycle() {
         })),
     };
     let stage_resp = server.handle_request(stage_req).await;
-    let s_text = stage_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let s_text = stage_resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let s_val: serde_json::Value = serde_json::from_str(&s_text).unwrap();
     assert_eq!(s_val["status"], "STAGED");
     assert_eq!(s_val["speculative"], true);
@@ -62,7 +68,10 @@ async fn test_speculative_staging_lifecycle() {
         })),
     };
     let rollback_resp = server.handle_request(rollback_req).await;
-    let r_text = rollback_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let r_text = rollback_resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let r_val: serde_json::Value = serde_json::from_str(&r_text).unwrap();
     assert_eq!(r_val["status"], "ROLLED_BACK");
     assert_eq!(server.staged_mutations.read().unwrap().len(), 0);
@@ -98,7 +107,10 @@ async fn test_speculative_staging_lifecycle() {
         })),
     };
     let commit_resp = server.handle_request(commit_req).await;
-    let c_text = commit_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let c_text = commit_resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let c_val: serde_json::Value = serde_json::from_str(&c_text).unwrap();
     assert_eq!(c_val["status"], "COMMITTED");
     assert!(c_val.get("new_merkle_root").is_some());
@@ -123,7 +135,10 @@ async fn test_mcp_blast_radius_causal_paths() {
         })),
     };
     let resp = server.handle_request(req).await;
-    let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();
 
     assert!(val.get("causal_paths").is_some());
@@ -146,7 +161,10 @@ async fn test_mcp_context_slice_resource() {
     };
     let resp = server.handle_request(req).await;
     assert!(resp.error.is_none());
-    let text = resp.result.unwrap()["contents"][0]["text"].as_str().unwrap().to_string();
+    let text = resp.result.unwrap()["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(val["symbol"], "auth::service::validate_token");
     assert!(val.get("rendered_slice").is_some());
