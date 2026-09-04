@@ -211,6 +211,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axiom-proto",
+ "blake3",
  "libc",
  "serde_json",
  "tempfile",

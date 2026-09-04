@@ -75,6 +75,34 @@ async fn test_mcp_resources_list_and_read() {
     };
     let blast_res = server.handle_request(blast_req).await;
     assert!(blast_res.error.is_none());
+
+    // 5. resources/read short symbol candidate resolution
+    let short_sym_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(6)),
+        method: "resources/read".to_string(),
+        params: Some(json!({ "uri": "axiom://symbols/validate_token" })),
+    };
+    let short_sym_res = server.handle_request(short_sym_req).await;
+    assert!(short_sym_res.error.is_none());
+    let short_sym_result = short_sym_res.result.unwrap();
+    let short_contents = short_sym_result["contents"].as_array().unwrap();
+    assert!(
+        short_contents[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("validate_token")
+    );
+
+    // 6. resources/read blast-radius with depth query param
+    let depth_blast_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(7)),
+        method: "resources/read".to_string(),
+        params: Some(json!({ "uri": "axiom://blast-radius/validate_token?depth=2" })),
+    };
+    let depth_blast_res = server.handle_request(depth_blast_req).await;
+    assert!(depth_blast_res.error.is_none());
 }
 
 #[tokio::test]

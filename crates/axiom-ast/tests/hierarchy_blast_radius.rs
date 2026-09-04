@@ -27,6 +27,11 @@ impl TempDir {
         }
         std::fs::write(file, body).expect("write fixture");
     }
+
+    fn remove(&self, name: &str) {
+        let file = self.0.join(name);
+        let _ = std::fs::remove_file(file);
+    }
 }
 
 impl Drop for TempDir {
@@ -302,4 +307,121 @@ fn test_persistence_preserves_hierarchy() {
 
     let supertypes = loaded.get_supertypes("Dog");
     assert_eq!(supertypes, vec!["Animal".to_string()]);
+}
+
+#[test]
+fn test_qualified_and_generic_hierarchy_across_languages() {
+    let dir = TempDir::new("qual_generic_hier");
+
+    // Rust reference trait impl
+    let rust_code = r#"
+pub trait StreamHandler {
+    fn handle(&self);
+}
+
+pub struct TcpStream;
+
+impl<'a> StreamHandler for &'a TcpStream {
+    fn handle(&self) {}
+}
+
+#[test]
+fn test_tcp_stream() {
+    let s = TcpStream;
+    (&s).handle();
+}
+"#;
+
+    // Python generic inheritance
+    let py_code = r#"
+class BaseEntity:
+    pass
+
+class UserModel(Generic[T], BaseEntity):
+    pass
+
+def test_user_model():
+    m = UserModel()
+    assert m is not None
+"#;
+
+    // Java qualified implementation
+    let java_code = r#"
+package com.app;
+
+public class CustomService implements org.framework.api.IService {
+    public void execute() {}
+}
+
+public class CustomServiceTest {
+    @Test
+    public void testExec() {
+        CustomService s = new CustomService();
+        s.execute();
+    }
+}
+"#;
+
+    dir.write("src/stream.rs", rust_code);
+    dir.write("src/model.py", py_code);
+    dir.write("src/CustomService.java", java_code);
+
+    let index = scan(&dir);
+
+    // Verify Rust reference trait impl
+    let rust_impls = index.get_implementors("StreamHandler");
+    assert!(
+        rust_impls.contains(&"TcpStream".to_string()),
+        "Rust reference trait impl should register TcpStream for StreamHandler, got: {:?}",
+        rust_impls
+    );
+
+    // Verify Python generic base inheritance
+    let py_impls = index.get_implementors("BaseEntity");
+    assert!(
+        py_impls.contains(&"UserModel".to_string())
+            || py_impls.iter().any(|s| s.contains("UserModel")),
+        "Python generic inheritance should register UserModel for BaseEntity, got: {:?}",
+        py_impls
+    );
+
+    // Verify Java qualified interface implementation
+    let java_impls = index.get_implementors("IService");
+    assert!(
+        java_impls.contains(&"CustomService".to_string())
+            || java_impls.iter().any(|s| s.contains("CustomService")),
+        "Java qualified interface should register CustomService for IService, got: {:?}",
+        java_impls
+    );
+}
+
+#[test]
+fn test_rescan_purges_deleted_type_hierarchy() {
+    let dir = TempDir::new("rescan_purge_hier");
+
+    let java_service = r#"
+package com.app;
+
+public class SqlUserRepo implements UserRepository {
+    public void query() {}
+}
+"#;
+    dir.write("src/SqlUserRepo.java", java_service);
+
+    let index = scan(&dir);
+    let impls = index.get_implementors("UserRepository");
+    assert!(
+        !impls.is_empty(),
+        "Implementors should contain SqlUserRepo before deletion"
+    );
+
+    // Delete file and rescan
+    dir.remove("src/SqlUserRepo.java");
+    let rescan = scan(&dir);
+    let impls_after = rescan.get_implementors("UserRepository");
+    assert!(
+        impls_after.is_empty(),
+        "Implementors must be empty after deleting SqlUserRepo, got: {:?}",
+        impls_after
+    );
 }

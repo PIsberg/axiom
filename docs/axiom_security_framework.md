@@ -68,6 +68,16 @@ drained for a bounded grace after the child exits rather than to EOF, because a
 surviving grandchild holds them open, and `Finished.drained` records when output
 may be short for that reason. `crates/axiom-vmm/tests/process_tree.rs` pins it.
 
+**A cached artifact is checked before it runs.** The compile step of an
+evaluation is content-addressed: byte-identical source under the same toolchain
+restores the artifact built last time instead of compiling again. The entry
+records a BLAKE3 digest of every stored file, and each is re-read and checked
+before anything is written into the work directory, so an entry edited or
+truncated on disk is purged and the snippet recompiled rather than executed from
+the cache. Nothing in the cache is a verdict: a hit still runs the artifact.
+`AXIOM_EVAL_CACHE=off` disables it. `crates/axiom-vmm/tests/artifact_cache.rs`
+pins the fails-again and tampered cases.
+
 `axiom_run_tests` runs the project's own test command under the same confinement
 and the same process-tree kill, bounded by `AXIOM_TEST_TIMEOUT_SECS` (default
 600).

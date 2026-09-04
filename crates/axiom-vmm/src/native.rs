@@ -23,7 +23,8 @@
 //! started rather than only the process this tier spawned, see
 //! [`run_with_timeout`].
 
-use axiom_proto::{CtopReport, CtopStatus, FailedCheck};
+use crate::artifact_cache;
+use axiom_proto::{CtopReport, CtopStatus, DiagnosticSpan, FailedCheck};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -549,11 +550,25 @@ const PASSED_NAMES: &[&str] = &[
     "GOOS",
     "GOARCH",
     "GO111MODULE",
-    // Rust.
+    // Rust and MSVC toolchains.
     "CARGO_HOME",
     "RUSTUP_HOME",
     "RUSTUP_TOOLCHAIN",
     "RUST_BACKTRACE",
+    "LIB",
+    "LIBPATH",
+    "INCLUDE",
+    "VCINSTALLDIR",
+    "VCTOOLSVERSION",
+    "VCTOOLSINSTALLDIR",
+    "VCTOOLSREDISTDIR",
+    "WINDOWSSDKDIR",
+    "WINDOWSSDKVERSION",
+    "WINDOWSSDKBINPATH",
+    "WINDOWSLIBPATH",
+    "UNIVERSALCRTSDKDIR",
+    "UCRTVERSION",
+    "VSINSTALLDIR",
     // Node and Deno.
     "NODE_PATH",
     "NODE_OPTIONS",
@@ -589,6 +604,11 @@ const PASSED_PREFIXES: &[&str] = &[
     "M2_",
     "LC_",
     "XDG_",
+    "VC_",
+    "VS_",
+    "VSCMD_",
+    "VISUALSTUDIO_",
+    "WINDOWSSDK",
 ];
 
 /// Never passed, whatever `AXIOM_EVAL_ENV_PASS` says.
@@ -918,6 +938,51 @@ fn probe_usable(probe: &str, args: &[&str]) -> bool {
     usable
 }
 
+/// The version string `program` reports for `args`, memoized per process.
+///
+/// One helper feeds both the environment fingerprints and the artifact-cache
+/// key, so the two can never disagree about which toolchain produced an
+/// artifact. Runs under the snippet's confined environment for the same
+/// reason the probe does. An empty answer is reported as such rather than as
+/// an empty string, because a fingerprint of `node=` is one an upgrade never
+/// moves.
+pub(crate) fn program_version(program: &str, args: &[&str]) -> String {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(known) = cache.lock().unwrap().get(program) {
+        return known.clone();
+    }
+
+    let mut command = Command::new(resolve_program(program));
+    confine_environment(&mut command);
+    let version = command
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .map(|o| {
+            // Some report on stdout, some on stderr, and javac has moved
+            // between the two across releases. Both are read rather than
+            // picking one and getting an empty string on the wrong version.
+            let mut combined = String::from_utf8_lossy(&o.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&o.stderr));
+            combined.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .unwrap_or_default();
+    let version = if version.trim().is_empty() {
+        "<reported no version>".to_string()
+    } else {
+        version
+    };
+
+    cache
+        .lock()
+        .unwrap()
+        .insert(program.to_string(), version.clone());
+    version
+}
+
 fn pick_recipe(language: &NativeLanguage) -> Option<&'static Recipe> {
     // `recipes` is a `&'static [Recipe]` on a `&'static NativeLanguage`, but the
     // signature above takes a plain reference, so the lifetime is recovered by
@@ -937,6 +1002,14 @@ fn pick_recipe(language: &NativeLanguage) -> Option<&'static Recipe> {
 /// "the snippet failed" without inferring it from an error string.
 pub fn usable_toolchain(language: &NativeLanguage) -> Option<&'static str> {
     pick_recipe(language).map(|r| r.probe)
+}
+
+/// Fill the per-process probe and version caches for `language`, so the
+/// spawns they memoize land here rather than on the first evaluation's clock.
+pub(crate) fn prime(language: &NativeLanguage) {
+    if let Some(recipe) = pick_recipe(language) {
+        let _ = program_version(recipe.probe, recipe.version_args);
+    }
 }
 
 fn next_task_id(extension: &str) -> String {
@@ -969,12 +1042,15 @@ fn unavailable(
             actual: Some(actual.clone()),
             stack_trace_ast_nodes: vec![symbol_path.to_string()],
             hint: Some(hint),
+            diagnostics: Vec::new(),
         }],
         passed_checks_count: 0,
         passed_checks_basis: String::new(),
         stdout: String::new(),
         stderr: actual,
         memory_allocated_bytes: None,
+        compile_cache: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -1006,13 +1082,144 @@ fn timed_out_report(
                  passed. Raise AXIOM_EVAL_TIMEOUT_SECS if the work is genuinely slow."
                     .to_string(),
             ),
+            diagnostics: Vec::new(),
         }],
         passed_checks_count: 0,
         passed_checks_basis: String::new(),
         stdout: String::new(),
         stderr: format!("timed out after {}s", timeout.as_secs()),
         memory_allocated_bytes: None,
+        compile_cache: None,
+        diagnostics: Vec::new(),
     }
+}
+
+/// Parse multi-language compiler errors/warnings into structured DiagnosticSpan items
+pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticSpan> {
+    let mut diags = Vec::new();
+    let text = if !stderr.trim().is_empty() { stderr } else { stdout };
+
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+
+        // 1. Rustc format: error[E0425]: ... / warning: ...
+        if trimmed.starts_with("error") || trimmed.starts_with("warning") {
+            let is_warning = trimmed.starts_with("warning");
+            let severity = if is_warning { "warning".to_string() } else { "error".to_string() };
+            let message = trimmed.to_string();
+
+            let mut file = None;
+            let mut line_num = None;
+            let mut col_num = None;
+            let mut suggestion = None;
+
+            while let Some(&next_l) = lines.peek() {
+                let next_t = next_l.trim();
+                if next_t.starts_with("-->") {
+                    let loc = next_t.trim_start_matches("-->").trim();
+                    let parts: Vec<&str> = loc.split(':').collect();
+                    if parts.len() >= 3 {
+                        file = Some(parts[0].to_string());
+                        line_num = parts[1].parse::<usize>().ok();
+                        col_num = parts[2].parse::<usize>().ok();
+                    } else if parts.len() == 2 {
+                        file = Some(parts[0].to_string());
+                        line_num = parts[1].parse::<usize>().ok();
+                    }
+                    lines.next();
+                } else if next_t.starts_with("help:") {
+                    suggestion = Some(next_t.trim_start_matches("help:").trim().to_string());
+                    lines.next();
+                } else if next_t.starts_with("error") || next_t.starts_with("warning") {
+                    break;
+                } else {
+                    lines.next();
+                }
+            }
+
+            diags.push(DiagnosticSpan {
+                file,
+                line: line_num,
+                column: col_num,
+                message,
+                severity,
+                suggested_replacement: suggestion,
+            });
+            continue;
+        }
+
+        // 2. Python traceback: File "...", line X
+        if trimmed.starts_with("File \"") {
+            if let Some(rest) = trimmed.strip_prefix("File \"") {
+                if let Some(idx) = rest.find('"') {
+                    let f = &rest[..idx];
+                    let rem = &rest[idx + 1..];
+                    let line_num = if let Some(l_idx) = rem.find("line ") {
+                        rem[l_idx + 5..]
+                            .split(|c: char| !c.is_ascii_digit())
+                            .next()
+                            .and_then(|s| s.parse::<usize>().ok())
+                    } else {
+                        None
+                    };
+                    let mut msg = String::new();
+                    while let Some(nxt) = lines.next() {
+                        let tn = nxt.trim();
+                        if !tn.is_empty() && !tn.starts_with("File \"") {
+                            msg = tn.to_string();
+                        }
+                    }
+                    if !msg.is_empty() {
+                        diags.push(DiagnosticSpan {
+                            file: Some(f.to_string()),
+                            line: line_num,
+                            column: None,
+                            message: msg,
+                            severity: "error".to_string(),
+                            suggested_replacement: None,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Javac / Clang / GCC: file:line:col: error: ...
+        let parts: Vec<&str> = trimmed.splitn(4, ':').collect();
+        if parts.len() >= 4 {
+            let f = parts[0].trim();
+            if let Ok(l) = parts[1].trim().parse::<usize>() {
+                if let Ok(c) = parts[2].trim().parse::<usize>() {
+                    let rest = parts[3].trim();
+                    let sev = if rest.starts_with("warning") { "warning" } else { "error" };
+                    diags.push(DiagnosticSpan {
+                        file: Some(f.to_string()),
+                        line: Some(l),
+                        column: Some(c),
+                        message: rest.to_string(),
+                        severity: sev.to_string(),
+                        suggested_replacement: None,
+                    });
+                    continue;
+                } else {
+                    let rest = format!("{}: {}", parts[2].trim(), parts[3].trim());
+                    let sev = if rest.contains("warning") { "warning" } else { "error" };
+                    diags.push(DiagnosticSpan {
+                        file: Some(f.to_string()),
+                        line: Some(l),
+                        column: None,
+                        message: rest,
+                        severity: sev.to_string(),
+                        suggested_replacement: None,
+                    });
+                    continue;
+                }
+            }
+        }
+    }
+
+    diags
 }
 
 fn compilation_error(
@@ -1028,6 +1235,7 @@ fn compilation_error(
     } else {
         done.stderr.clone()
     };
+    let diags = parse_compiler_diagnostics(&done.stderr, &done.stdout);
     CtopReport {
         task_id,
         engine: engine.to_string(),
@@ -1041,12 +1249,15 @@ fn compilation_error(
             actual: Some(detail.clone()),
             stack_trace_ast_nodes: vec![symbol_path.to_string()],
             hint: Some(format!("Fix the error {program} reported.")),
+            diagnostics: diags.clone(),
         }],
         passed_checks_count: 0,
         passed_checks_basis: String::new(),
         stdout: done.stdout,
         stderr: detail,
         memory_allocated_bytes: None,
+        compile_cache: None,
+        diagnostics: diags,
     }
 }
 
@@ -1199,59 +1410,105 @@ pub fn evaluate(
         );
     }
 
-    if let Some(build) = recipe.build {
-        let (program, args) = build(&src_file, &work_dir);
-        let mut cmd = Command::new(resolve_program(&program));
-        cmd.args(&args).current_dir(&work_dir);
-        match run_with_timeout(cmd, timeout) {
-            Ok(done) if done.timed_out => {
-                let elapsed = ms(&start);
-                return timed_out_report(
-                    task_id,
-                    language.engine,
-                    symbol_path,
-                    elapsed,
-                    &program,
-                    timeout,
-                );
-            }
-            Ok(done) if !done.succeeded() => {
-                let elapsed = ms(&start);
-                // A build that could not fetch its own dependencies has not
-                // found anything wrong with the snippet, so it is not a
-                // compilation error any more than it is a failure.
-                if let Some(reason) = toolchain_failure_reason(&done.stdout, &done.stderr) {
+    // Everything that could change what the build step produces goes into
+    // the key; the run step's flags do not, because they do not shape the
+    // artifact. The build spec is rendered against placeholder paths so the
+    // key does not move with the temp directory's name.
+    let cache_key = if artifact_cache::enabled() {
+        recipe.build.map(|build| {
+            let (build_program, build_args) = build(Path::new("<src>"), Path::new("<work>"));
+            artifact_cache::key_of(&[
+                "native",
+                language.extension,
+                recipe.probe,
+                recipe.file_name,
+                &build_program,
+                &build_args.join("\u{1f}"),
+                &program_version(recipe.probe, recipe.version_args),
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                &source,
+            ])
+        })
+    } else {
+        None
+    };
+    let mut compile_cache: Option<String> = None;
+    let mut skip_build = false;
+    if let Some(key) = cache_key.as_deref() {
+        if artifact_cache::restore(key, &work_dir) {
+            skip_build = true;
+            compile_cache = Some("hit".to_string());
+        } else {
+            compile_cache = Some("miss".to_string());
+        }
+    }
+
+    if !skip_build {
+        if let Some(build) = recipe.build {
+            let (program, args) = build(&src_file, &work_dir);
+            let mut cmd = Command::new(resolve_program(&program));
+            cmd.args(&args).current_dir(&work_dir);
+            match run_with_timeout(cmd, timeout) {
+                Ok(done) if done.timed_out => {
+                    let elapsed = ms(&start);
+                    return timed_out_report(
+                        task_id,
+                        language.engine,
+                        symbol_path,
+                        elapsed,
+                        &program,
+                        timeout,
+                    );
+                }
+                Ok(done) if !done.succeeded() => {
+                    let elapsed = ms(&start);
+                    // A build that could not fetch its own dependencies has not
+                    // found anything wrong with the snippet, so it is not a
+                    // compilation error any more than it is a failure.
+                    if let Some(reason) = toolchain_failure_reason(&done.stdout, &done.stderr) {
+                        return unavailable(
+                            task_id,
+                            language.engine,
+                            symbol_path,
+                            elapsed,
+                            reason,
+                            format!(
+                                "{program} exited non-zero without compiling the snippet, so                              nothing is known about it. Retry once its dependencies can be                              fetched, or run the project's own tests and report the outcome                              with axiom_record_verification."
+                            ),
+                        );
+                    }
+                    let mut report = compilation_error(
+                        task_id,
+                        language.engine,
+                        symbol_path,
+                        elapsed,
+                        &program,
+                        done,
+                    );
+                    report.compile_cache = compile_cache;
+                    return report;
+                }
+                Ok(_) => {
+                    // The artifact was just built from `source` by the exact
+                    // toolchain the key names, so it is safe to reuse for the
+                    // same key. The source file itself is excluded: it is
+                    // rewritten fresh on every evaluation.
+                    if let Some(key) = cache_key.as_deref() {
+                        artifact_cache::store(key, &work_dir, &[recipe.file_name]);
+                    }
+                }
+                Err(e) => {
+                    let elapsed = ms(&start);
                     return unavailable(
                         task_id,
                         language.engine,
                         symbol_path,
                         elapsed,
-                        reason,
-                        format!(
-                            "{program} exited non-zero without compiling the snippet, so                              nothing is known about it. Retry once its dependencies can be                              fetched, or run the project's own tests and report the outcome                              with axiom_record_verification."
-                        ),
+                        format!("could not run {program}: {e}"),
+                        format!("Check that {program} is installed and executable."),
                     );
                 }
-                return compilation_error(
-                    task_id,
-                    language.engine,
-                    symbol_path,
-                    elapsed,
-                    &program,
-                    done,
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                let elapsed = ms(&start);
-                return unavailable(
-                    task_id,
-                    language.engine,
-                    symbol_path,
-                    elapsed,
-                    format!("could not run {program}: {e}"),
-                    format!("Check that {program} is installed and executable."),
-                );
             }
         }
     }
@@ -1277,7 +1534,7 @@ pub fn evaluate(
     drop(work);
 
     if done.timed_out {
-        return timed_out_report(
+        let mut report = timed_out_report(
             task_id,
             language.engine,
             symbol_path,
@@ -1285,6 +1542,8 @@ pub fn evaluate(
             &program,
             timeout,
         );
+        report.compile_cache = compile_cache;
+        return report;
     }
 
     if done.succeeded() {
@@ -1305,6 +1564,7 @@ pub fn evaluate(
         );
         report.stdout = done.stdout;
         report.stderr = done.stderr;
+        report.compile_cache = compile_cache;
         return report;
     }
 
@@ -1326,7 +1586,8 @@ pub fn evaluate(
     } else {
         done.stderr.clone()
     };
-    CtopReport::fail(
+    let diags = parse_compiler_diagnostics(&done.stderr, &done.stdout);
+    let mut report = CtopReport::fail(
         task_id,
         language.engine.to_string(),
         duration,
@@ -1344,10 +1605,14 @@ pub fn evaluate(
                 "The snippet ran under {program} and failed. The output above is the toolchain's \
                  own."
             )),
+            diagnostics: diags.clone(),
         }],
         done.stdout,
         detail,
-    )
+    );
+    report.diagnostics = diags;
+    report.compile_cache = compile_cache;
+    report
 }
 
 /// Every language this tier knows how to drive.
@@ -1379,31 +1644,12 @@ pub fn toolchain_fingerprints() -> Vec<String> {
         let Some(recipe) = pick_recipe(language) else {
             continue;
         };
-        let mut command = Command::new(resolve_program(recipe.probe));
-        confine_environment(&mut command);
-        let version = command
-            .args(recipe.version_args)
-            .stdin(Stdio::null())
-            .output()
-            .ok()
-            .map(|o| {
-                // Some report on stdout, some on stderr, and javac has moved
-                // between the two across releases. Both are hashed rather than
-                // picking one and getting an empty string on the wrong version.
-                let mut combined = String::from_utf8_lossy(&o.stdout).into_owned();
-                combined.push_str(&String::from_utf8_lossy(&o.stderr));
-                combined.split_whitespace().collect::<Vec<_>>().join(" ")
-            })
-            .unwrap_or_default();
         // An empty answer must not read as a version. A fingerprint of
         // `node=` is one that never changes, so an upgrade would leave every
-        // cached verdict standing; saying so is the difference between a key
-        // that covers node and one that only looks like it does.
-        let version = if version.trim().is_empty() {
-            "<reported no version>".to_string()
-        } else {
-            version
-        };
+        // cached verdict standing; `program_version` reports the emptiness
+        // instead, which is the difference between a key that covers node and
+        // one that only looks like it does.
+        let version = program_version(recipe.probe, recipe.version_args);
         out.push(format!("{}={}", recipe.probe, version));
     }
     out.sort();

@@ -2564,8 +2564,20 @@ async fn test_e2e_demo_seeding_works_in_a_populated_workspace() -> Result<()> {
         radius
             .impacted_tests
             .iter()
-            .any(|t| t.contains("test_auth_validation")),
+            .any(|t| t.contains("auth::test::test_validate_token")),
         "the seeded test must be reachable from the seeded symbol, got {:?}",
+        radius.impacted_tests
+    );
+    // The seed also carries a transitive chain: test_login_flow depends on
+    // login, which depends on validate_token. At depth 5 the walk must cross
+    // that intermediate hop, or the demo shows a single-edge lookup and calls
+    // it a blast radius.
+    assert!(
+        radius
+            .impacted_tests
+            .iter()
+            .any(|t| t.contains("auth::test::test_login_flow")),
+        "the transitively seeded test must be reachable through login, got {:?}",
         radius.impacted_tests
     );
 

@@ -9,8 +9,11 @@ use wasmtime_wasi::WasiCtxBuilder;
 // same signatures; the alias keeps the call sites below reading as they did.
 use wasmtime_wasi::p1::{self as preview1, WasiP1Ctx};
 
+pub mod artifact_cache;
 pub mod daemon;
 pub mod native;
+
+pub use native::parse_compiler_diagnostics;
 
 /// Sandboxed execution backend trait
 #[async_trait]
@@ -103,6 +106,7 @@ fn wat_verdict(
                     "The module trapped: check memory bounds, unreachable instructions and fuel"
                         .to_string(),
                 ),
+                diagnostics: Vec::new(),
             }],
             String::new(),
             trap.to_string(),
@@ -120,6 +124,7 @@ fn wat_verdict(
                 actual: Some("no such export, so nothing was executed".to_string()),
                 stack_trace_ast_nodes: vec![],
                 hint: Some("Export the entry point as `run`".to_string()),
+                diagnostics: Vec::new(),
             }],
             String::new(),
             "the module has no `run` export".to_string(),
@@ -148,12 +153,15 @@ fn unavailable_rustc(
             actual: Some(actual.clone()),
             stack_trace_ast_nodes: vec![symbol_path.to_string()],
             hint: Some("Install rustc and put it on PATH, or run the project's own tests and report the outcome with axiom_record_verification".to_string()),
+            diagnostics: Vec::new(),
         }],
         passed_checks_count: 0,
         passed_checks_basis: String::new(),
         stdout: String::new(),
         stderr: actual,
         memory_allocated_bytes: None,
+        compile_cache: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -185,12 +193,15 @@ impl SandboxEngine for WasiEngine {
                         actual: Some(e.to_string()),
                         stack_trace_ast_nodes: vec![],
                         hint: Some("Verify WASM bytecode structure and magic header".to_string()),
+                        diagnostics: Vec::new(),
                     }],
                     passed_checks_count: 0,
                     passed_checks_basis: String::new(),
                     stdout: String::new(),
                     stderr: e.to_string(),
                     memory_allocated_bytes: None,
+                    compile_cache: None,
+                    diagnostics: Vec::new(),
                 });
             }
         };
@@ -221,6 +232,7 @@ impl SandboxEngine for WasiEngine {
                         actual: Some(e.to_string()),
                         stack_trace_ast_nodes: vec![],
                         hint: Some("Check WASI import resolution".to_string()),
+                        diagnostics: Vec::new(),
                     }],
                     String::new(),
                     e.to_string(),
@@ -259,6 +271,7 @@ impl SandboxEngine for WasiEngine {
                             actual: Some(e.to_string()),
                             stack_trace_ast_nodes: vec![entrypoint.to_string()],
                             hint: Some("Check memory bounds or fuel limits".to_string()),
+                            diagnostics: Vec::new(),
                         }],
                         String::new(),
                         e.to_string(),
@@ -279,6 +292,7 @@ impl SandboxEngine for WasiEngine {
                         "Ensure function is marked #[no_mangle] or exported in WASM module"
                             .to_string(),
                     ),
+                    diagnostics: Vec::new(),
                 }],
                 String::new(),
                 format!("Symbol '{}' not found in WASI module", entrypoint),
@@ -336,6 +350,7 @@ impl SandboxEngine for WasiEngine {
                                     actual: Some(e.to_string()),
                                     stack_trace_ast_nodes: vec![],
                                     hint: Some("Check WASI import resolution".to_string()),
+                                    diagnostics: Vec::new(),
                                 }],
                                 String::new(),
                                 e.to_string(),
@@ -358,12 +373,15 @@ impl SandboxEngine for WasiEngine {
                             actual: Some(e.to_string()),
                             stack_trace_ast_nodes: vec![],
                             hint: Some("Fix WebAssembly text format syntax".to_string()),
+                            diagnostics: Vec::new(),
                         }],
                         passed_checks_count: 0,
                         passed_checks_basis: String::new(),
                         stdout: String::new(),
                         stderr: e.to_string(),
                         memory_allocated_bytes: None,
+                        compile_cache: None,
+                        diagnostics: Vec::new(),
                     });
                 }
             }
@@ -378,11 +396,11 @@ impl SandboxEngine for WasiEngine {
             let ext = ext.to_ascii_lowercase();
             if ext != "rs" {
                 return Ok(match native::language_for(&ext) {
-                    Some(lang) => native::evaluate(
+                    Some(lang) => crate::daemon::DaemonPool::global().evaluate(
                         lang,
-                        symbol_path,
                         code_snippet,
-                        native::configured_timeout(),
+                        symbol_path,
+                        Some(native::configured_timeout()),
                     ),
                     // Kotlin and Scala reach here: the indexer reads them with
                     // the Java parser, which does not make javac able to run
@@ -405,12 +423,15 @@ impl SandboxEngine for WasiEngine {
                                 "Run this symbol's own test suite instead and report the outcome                                  with axiom_record_verification; axiom_get_blast_radius will name                                  the tests to run."
                                     .to_string(),
                             ),
+                            diagnostics: Vec::new(),
                         }],
                         passed_checks_count: 0,
                         passed_checks_basis: String::new(),
                         stdout: String::new(),
                         stderr: format!("no evaluator for .{ext}"),
                         memory_allocated_bytes: None,
+                        compile_cache: None,
+                        diagnostics: Vec::new(),
                     },
                 });
             }
@@ -512,59 +533,92 @@ fn main() {{
 
         // Compile. run_with_timeout confines the environment and ends the
         // whole process tree on timeout, for rustc and for the binary alike.
+        //
+        // The compile step is content-addressed: the same wrapped source under
+        // the same rustc on the same platform produces the same binary, so a
+        // repeat evaluation restores it and pays only the run. The verdict is
+        // never cached: a hit still executes the binary, so a failing snippet
+        // fails again and a nondeterministic one can still change its answer.
         let timeout = native::configured_timeout();
-        let mut rustc = Command::new("rustc");
-        rustc
-            .arg(&src_file)
-            .arg("-o")
-            .arg(&bin_file)
-            .arg("--crate-type")
-            .arg("bin");
-        let c_out = match native::run_with_timeout(rustc, timeout) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(unavailable_rustc(
+        let cache_key = if artifact_cache::enabled() {
+            Some(artifact_cache::rustc_key(&source_code))
+        } else {
+            None
+        };
+        let mut compile_cache: Option<String> = None;
+        let mut have_binary = false;
+        if let Some(key) = cache_key.as_deref() {
+            if artifact_cache::restore(key, &temp_dir) && bin_file.exists() {
+                have_binary = true;
+                compile_cache = Some("hit".to_string());
+            } else {
+                compile_cache = Some("miss".to_string());
+            }
+        }
+        if !have_binary {
+            let mut rustc = Command::new("rustc");
+            rustc
+                .arg(&src_file)
+                .arg("-o")
+                .arg(&bin_file)
+                .arg("--crate-type")
+                .arg("bin");
+            let c_out = match native::run_with_timeout(rustc, timeout) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(unavailable_rustc(
+                        task_id,
+                        symbol_path,
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        format!("could not run rustc: {e}"),
+                    ));
+                }
+            };
+            if c_out.timed_out {
+                let dur = start.elapsed().as_secs_f64() * 1000.0;
+                return Ok(rustc_timeout(
                     task_id,
                     symbol_path,
-                    start.elapsed().as_secs_f64() * 1000.0,
-                    format!("could not run rustc: {e}"),
+                    dur,
+                    timeout,
+                    "rustc",
+                    c_out,
                 ));
             }
-        };
-        if c_out.timed_out {
-            let dur = start.elapsed().as_secs_f64() * 1000.0;
-            return Ok(rustc_timeout(
-                task_id,
-                symbol_path,
-                dur,
-                timeout,
-                "rustc",
-                c_out,
-            ));
-        }
-        if !c_out.succeeded() {
-            let stderr = c_out.stderr.clone();
-            let dur = start.elapsed().as_secs_f64() * 1000.0;
-            return Ok(CtopReport {
-                task_id,
-                engine: RUSTC_ENGINE.to_string(),
-                status: CtopStatus::CompilationError,
-                execution_duration_ms: dur,
-                blast_radius_nodes: 1,
-                failed_checks: vec![FailedCheck {
-                    symbol: symbol_path.to_string(),
-                    error_type: "RustcCompilationError".to_string(),
-                    expected: Some("Clean compilation".to_string()),
-                    actual: Some(stderr.clone()),
-                    stack_trace_ast_nodes: vec![symbol_path.to_string()],
-                    hint: Some("Fix syntax or type error reported by compiler".to_string()),
-                }],
-                passed_checks_count: 0,
-                passed_checks_basis: String::new(),
-                stdout: c_out.stdout,
-                stderr,
-                memory_allocated_bytes: None,
-            });
+            if !c_out.succeeded() {
+                let stderr = c_out.stderr.clone();
+                let dur = start.elapsed().as_secs_f64() * 1000.0;
+                let diags = native::parse_compiler_diagnostics(&stderr, &c_out.stdout);
+                return Ok(CtopReport {
+                    task_id,
+                    engine: RUSTC_ENGINE.to_string(),
+                    status: CtopStatus::CompilationError,
+                    execution_duration_ms: dur,
+                    blast_radius_nodes: 1,
+                    failed_checks: vec![FailedCheck {
+                        symbol: symbol_path.to_string(),
+                        error_type: "RustcCompilationError".to_string(),
+                        expected: Some("Clean compilation".to_string()),
+                        actual: Some(stderr.clone()),
+                        stack_trace_ast_nodes: vec![symbol_path.to_string()],
+                        hint: Some("Fix syntax or type error reported by compiler".to_string()),
+                        diagnostics: diags.clone(),
+                    }],
+                    passed_checks_count: 0,
+                    passed_checks_basis: String::new(),
+                    stdout: c_out.stdout,
+                    stderr,
+                    memory_allocated_bytes: None,
+                    compile_cache,
+                    diagnostics: diags,
+                });
+            }
+            // Built by the exact rustc the key names, from exactly this
+            // source; the source file itself is rewritten fresh every time
+            // and is excluded.
+            if let Some(key) = cache_key.as_deref() {
+                artifact_cache::store(key, &temp_dir, &["eval_main.rs"]);
+            }
         }
 
         // Run the binary as a process of its own.
@@ -583,14 +637,16 @@ fn main() {{
         drop(work);
 
         if r_out.timed_out {
-            return Ok(rustc_timeout(
+            let mut report = rustc_timeout(
                 task_id,
                 symbol_path,
                 dur,
                 timeout,
                 "the compiled snippet",
                 r_out,
-            ));
+            );
+            report.compile_cache = compile_cache;
+            return Ok(report);
         }
         if r_out.succeeded() {
             let mut report = CtopReport::pass(
@@ -602,10 +658,11 @@ fn main() {{
             );
             report.stdout = r_out.stdout;
             report.stderr = r_out.stderr;
+            report.compile_cache = compile_cache;
             return Ok(report);
         }
         let stderr = r_out.stderr.clone();
-        Ok(CtopReport::fail(
+        let mut report = CtopReport::fail(
             task_id,
             RUSTC_ENGINE.to_string(),
             dur,
@@ -620,10 +677,13 @@ fn main() {{
                 }),
                 stack_trace_ast_nodes: vec![symbol_path.to_string()],
                 hint: Some("The snippet ran under rustc's output and failed; the output above is the program's own".to_string()),
+                diagnostics: Vec::new(),
             }],
             r_out.stdout,
             stderr,
-        ))
+        );
+        report.compile_cache = compile_cache;
+        Ok(report)
     }
 }
 
@@ -660,11 +720,14 @@ fn rustc_timeout(
                 "The snippet did not terminate, so nothing is known about whether it would have passed. Raise AXIOM_EVAL_TIMEOUT_SECS if the work is genuinely slow."
                     .to_string(),
             ),
+            diagnostics: Vec::new(),
         }],
         passed_checks_count: 0,
         passed_checks_basis: String::new(),
         stdout: done.stdout,
         stderr: done.stderr,
         memory_allocated_bytes: None,
+        compile_cache: None,
+        diagnostics: Vec::new(),
     }
 }

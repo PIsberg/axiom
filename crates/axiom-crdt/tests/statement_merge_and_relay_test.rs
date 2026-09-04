@@ -126,3 +126,33 @@ async fn test_swarm_relay_broadcast_and_convergence() {
     assert_eq!(agent1.active_nodes_count(), 3); // root + user_service + auth_service
     assert_eq!(agent2.active_nodes_count(), 3);
 }
+
+#[test]
+fn test_statement_merge_concurrent_deletions_and_empty_base() {
+    // 1. Concurrent deletions of different statements
+    let base = "line1\nline2\nline3\nline4";
+    let local = "line1\nline3\nline4"; // deleted line2
+    let remote = "line1\nline2\nline4"; // deleted line3
+
+    let (merged, has_conflicts) = merge_statements_3way(base, local, remote);
+    assert!(!has_conflicts);
+    assert_eq!(merged, "line1\nline4");
+
+    // 2. Concurrent deletion of same statement
+    let local_same = "line1\nline3\nline4";
+    let remote_same = "line1\nline3\nline4";
+    let (merged_same, has_conflicts_same) = merge_statements_3way(base, local_same, remote_same);
+    assert!(!has_conflicts_same);
+    assert_eq!(merged_same, "line1\nline3\nline4");
+
+    // 3. Empty base with disjoint additions
+    let empty_base = "";
+    let local_add = "fn alpha() {}\nfn beta() {}";
+    let remote_add = "fn gamma() {}";
+    let (merged_empty, has_conflicts_empty) =
+        merge_statements_3way(empty_base, local_add, remote_add);
+    assert!(!has_conflicts_empty);
+    assert!(merged_empty.contains("fn alpha() {}"));
+    assert!(merged_empty.contains("fn beta() {}"));
+    assert!(merged_empty.contains("fn gamma() {}"));
+}

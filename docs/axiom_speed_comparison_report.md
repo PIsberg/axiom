@@ -29,7 +29,7 @@ Tree A unless noted.
 | `axiom_get_blast_radius`, warm | 4.7 to 8.1 ms median | Per query. First: 5.7 to 13.3 ms. |
 | `grep -rn` over the same source tree | 80 ms | For comparison with search. |
 | One blast radius, `TelemetryEventBuffer::publish` | 12 of 3,429 tests, 99.65% pruned | Depth 1. |
-| Evaluate a Rust snippet (`axiom bench`, 20 iterations) | min 204 ms, median 271 ms, mean 373 ms, max 1,485 ms | `rustc` dominates. Identical snippets are recompiled; there is no artifact cache. |
+| Evaluate a Rust snippet (`axiom bench`, 20 iterations) | min 204 ms, median 271 ms, mean 373 ms, max 1,485 ms | `rustc` dominates. Taken before the compile cache existed. Re-measured 2026-09-01 on the same machine: median 220 ms with `AXIOM_EVAL_CACHE=off`, 125 ms with the cache on, where every iteration after the first reuses the compiled binary and still runs it. |
 | `axiom swarm --agents 10 --ops 50` | 9.5 ms for 1,000 operations | Zero merge conflicts, replicas converged. |
 
 Blast-radius selection across many symbols, from

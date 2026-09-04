@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 axiom-proto = { path = "../axiom-proto" }
+blake3.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tokio.workspace = true
