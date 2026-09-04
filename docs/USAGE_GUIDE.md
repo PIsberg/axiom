@@ -230,6 +230,18 @@ outright. A command that has not finished after `AXIOM_EVAL_TIMEOUT_SECS`
 (default 30) is killed and reported as `TIMEOUT`, so a snippet that never
 terminates cannot hold the session open.
 
+**The compile step is cached; the verdict is not.** Byte-identical source under
+the same toolchain and platform reuses the compiled artifact, and the report's
+`compile_cache` field says so: `hit` when the artifact was restored and the
+compiler skipped, `miss` when it was compiled and stored, absent for a language
+with no build step or with `AXIOM_EVAL_CACHE=off`. A hit still runs the
+artifact, so a failing snippet fails again; nothing is ever answered from a
+stored verdict. Every stored file is checked against its recorded BLAKE3 digest
+before reuse, and a mismatch is a miss. `AXIOM_EVAL_CACHE_DIR` moves the cache
+(default `axiom-eval-cache` under the system temp directory) and
+`AXIOM_EVAL_CACHE_MAX_MB` (default 512) caps it. Measured 2026-09-01 with
+`axiom bench --iterations 20`: median 220 ms with the cache off, 125 ms on.
+
 Three answers mean nothing ran, and none of them is ever `PASSED`:
 
 * `EVALUATOR_UNAVAILABLE` with `UnsupportedLanguage`: the language has no

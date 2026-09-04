@@ -1501,16 +1501,29 @@ async fn main() -> Result<()> {
 
             if verify {
                 let ledger_path = server.ledger_path();
-                let records =
-                    axiom_core::mcp::load_attestations_from(&ledger_path).unwrap_or_default();
+                let records = match axiom_core::mcp::load_attestations_from(&ledger_path) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!(
+                            "Error: Failed to read attestation ledger at {}: {}",
+                            ledger_path.display(),
+                            e
+                        );
+                        std::process::exit(1);
+                    }
+                };
                 if records.is_empty() {
                     eprintln!(
                         "Warning: Attestation ledger at {} is empty.",
                         ledger_path.display()
                     );
                 } else {
+                    if let Err(e) = axiom_proto::verify_chain(&records) {
+                        eprintln!("❌ Attestation ledger chain verification failed: {}", e);
+                        std::process::exit(1);
+                    }
                     println!(
-                        "Verified {} cryptographic attestation seal(s) in ledger.",
+                        "Verified {} cryptographic attestation seal(s) in unbroken ledger chain.",
                         records.len()
                     );
                 }

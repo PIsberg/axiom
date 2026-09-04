@@ -433,6 +433,16 @@ pub struct Verification {
     pub detail: String,
 }
 
+/// An in-memory speculative mutation overlay before disk persistence or CRDT commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedMutation {
+    pub node_id: String,
+    pub symbol_path: String,
+    pub content: String,
+    pub original_signature: Option<String>,
+    pub timestamp: u64,
+}
+
 pub struct AxiomMcpServer {
     /// Verifications this server knows about, by task id.
     ///
@@ -443,6 +453,8 @@ pub struct AxiomMcpServer {
     /// something real, and can say so. What it cannot do is pass that off as
     /// axiom's own work, which is why the kind travels with the record.
     pub verifications: Arc<RwLock<HashMap<String, Verification>>>,
+    /// In-memory speculative mutation overlay.
+    pub staged_mutations: Arc<RwLock<HashMap<String, StagedMutation>>>,
     pub ast_index: Arc<AstIndex>,
     pub wasi_engine: Arc<WasiEngine>,
     pub tree_crdt: Arc<TreeCrdt>,
@@ -537,8 +549,16 @@ impl AxiomMcpServer {
             }
         }
 
+        // Warm up worker instances in DaemonPool for detected repository languages
+        let detected = ast_index.detected_languages();
+        if !detected.is_empty() {
+            let lang_refs: Vec<&str> = detected.iter().map(|s| s.as_str()).collect();
+            axiom_vmm::daemon::DaemonPool::global().warmup(&lang_refs);
+        }
+
         Ok(Self {
             verifications: Arc::new(RwLock::new(HashMap::new())),
+            staged_mutations: Arc::new(RwLock::new(HashMap::new())),
             ast_index,
             wasi_engine,
             tree_crdt,
@@ -568,25 +588,28 @@ impl AxiomMcpServer {
                 vec!["jwt::verifier".into()],
             );
             self.ast_index.index_node(
-                "test_auth_validation",
-                "test",
-                "#[test] fn test_auth_validation() { assert!(validate_token(\"valid_token_secret\")); }",
+                "auth::service::login",
+                "function",
+                "pub fn login(user: &str, pass: &str) -> bool { true }",
                 vec!["auth::service::validate_token".into()],
             );
-
-            self.tree_crdt.insert_node(
-                "root",
-                "node_auth_val",
-                "auth::service::validate_token",
-                "function",
-                "pub fn validate_token(t: &str) -> bool { t.len() > 10 }",
+            self.ast_index.index_node(
+                "auth::test::test_validate_token",
+                "test",
+                "pub fn test_validate_token() { assert!(validate_token(\"valid_token_123\")); }",
+                vec!["auth::service::validate_token".into()],
+            );
+            self.ast_index.index_node(
+                "auth::test::test_login_flow",
+                "test",
+                "pub fn test_login_flow() { assert!(login(\"admin\", \"pass\")); }",
+                vec!["auth::service::login".into()],
             );
         }
     }
 
     pub async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         let id = req.id.unwrap_or(Value::Null);
-
         match req.method.as_str() {
             "initialize" => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
@@ -594,8 +617,8 @@ impl AxiomMcpServer {
                 result: Some(json!({
                     "protocolVersion": "2024-11-05",
                     "serverInfo": {
-                        "name": "axiom-mcp-server",
-                        "version": "0.1.0"
+                        "name": "axiom",
+                        "version": env!("CARGO_PKG_VERSION")
                     },
                     "capabilities": {
                         "tools": {},
@@ -642,6 +665,12 @@ impl AxiomMcpServer {
                             "name": "Blast Radius",
                             "description": "Pruned test targets and reachability graph for a symbol",
                             "mimeType": "application/json"
+                        },
+                        {
+                            "uriTemplate": "axiom://slice/{symbol_path}",
+                            "name": "Adaptive Context Slice",
+                            "description": "Token-budgeted context slice (declaration, docstring, callers, callees) for an AST symbol",
+                            "mimeType": "application/json"
                         }
                     ]
                 })),
@@ -649,10 +678,14 @@ impl AxiomMcpServer {
             },
 
             "resources/read" => {
-                let params = req.params.unwrap_or(Value::Null);
-                let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
-                let read_res = self.handle_resource_read(uri);
-                match read_res {
+                let uri = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                match self.handle_resource_read(uri) {
                     Ok(val) => JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id,
@@ -738,12 +771,20 @@ impl AxiomMcpServer {
             },
 
             "prompts/get" => {
-                let params = req.params.unwrap_or(Value::Null);
-                let prompt_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+                let name = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let args = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("arguments"))
+                    .cloned()
+                    .unwrap_or(json!({}));
 
-                let prompt_res = self.handle_prompt_get(prompt_name, &args);
-                match prompt_res {
+                match self.handle_prompt_get(name, &args) {
                     Ok(val) => JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id,
@@ -769,18 +810,19 @@ impl AxiomMcpServer {
                     "tools": [
                         {
                             "name": "axiom_query_symbol",
-                            "description": "Look up one indexed symbol. A shorter name resolves when it identifies exactly one symbol; a name matching several returns the candidates instead of choosing.",
+                            "description": "Look up one indexed symbol. A shorter name resolves when it identifies exactly one symbol; a name matching several returns the candidates instead of choosing. Provide token_budget for an adaptive context slice (decl, docstring, callers, callees).",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "symbol_path": { "type": "string", "description": "Symbol path e.g. auth::service::validate_token" }
+                                    "symbol_path": { "type": "string", "description": "Symbol path e.g. auth::service::validate_token" },
+                                    "token_budget": { "type": "integer", "description": "Optional token budget for adaptive context slicing (default 500)" }
                                 },
                                 "required": ["symbol_path"]
                             }
                         },
                         {
                             "name": "axiom_get_blast_radius",
-                            "description": "The tests that reach a symbol, so a change can be checked without running everything. impacted_tests holds what to run: direct dependents, and tests reaching the symbol through an accessor. tests_by_depth also lists tests that reach it through another class, at depth 2 and beyond, which are not in impacted_tests because including them costs more precision than it gains; widen max_depth to move them into the answer. An empty result means none were found in the index, which is not the same as nothing being affected.",
+                            "description": "The tests that reach a symbol, so a change can be checked without running everything. impacted_tests holds what to run: direct dependents, and tests reaching the symbol through an accessor. tests_by_depth also lists tests that reach it through another class, at depth 2 and beyond, which are not in impacted_tests because including them costs more precision than it gains; widen max_depth to move them into the answer. causal_paths provides the propagation path from target symbol to each test. An empty result means none were found in the index, which is not the same as nothing being affected.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -813,20 +855,23 @@ impl AxiomMcpServer {
                                     "ctop_task_id": { "type": "string" },
                                     "agent_identity": { "type": "string", "description": "What to record as the author. Self-declared: axiom stores what you send and does not check it. It is covered by the seal, so it cannot be edited afterwards, and by the signature when a key is configured, which is what ties it to an issuer. Omit it and the record reads 'unattributed' rather than naming an agent nothing established. Printable single-line text, at most 128 characters." }
                                 },
-                                "required": ["prompt", "symbol_path"]
+                                "required": ["prompt", "symbol_path", "ctop_task_id"]
                             }
                         },
                         {
                             "name": "axiom_apply_mutation",
-                            "description": "Apply a Tree-CRDT mutation to one symbol and persist it. Only that symbol is written, so a concurrent agent sharing the workspace does not lose its work.",
+                            "description": "Apply a Tree-CRDT mutation to one symbol and persist it, or stage/commit/rollback speculative in-memory mutations. Only that symbol is written, so a concurrent agent sharing the workspace does not lose its work.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "node_id": { "type": "string" },
-                                    "symbol_path": { "type": "string" },
-                                    "content": { "type": "string" }
+                                    "node_id": { "type": "string", "description": "Tree-CRDT node identifier" },
+                                    "symbol_path": { "type": "string", "description": "Symbol path being modified" },
+                                    "content": { "type": "string", "description": "New source content of the symbol" },
+                                    "speculative": { "type": "boolean", "description": "If true, stage mutation in memory without persisting to disk or CRDT log" },
+                                    "commit_staged": { "type": "boolean", "description": "If true, commit a previously staged speculative mutation" },
+                                    "rollback_staged": { "type": "boolean", "description": "If true, discard a staged speculative mutation and restore previous AST state" }
                                 },
-                                "required": ["node_id", "symbol_path", "content"]
+                                "required": ["symbol_path"]
                             }
                         },
                         {
@@ -879,12 +924,11 @@ impl AxiomMcpServer {
             },
 
             "tools/call" => {
-                let params = req.params.unwrap_or(Value::Null);
-                let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+                let params = req.params.unwrap_or(json!({}));
+                let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-                let result = self.execute_tool(tool_name, args).await;
-                match result {
+                match self.execute_tool(name, args).await {
                     Ok(val) => {
                         // A tool that ran and reported a problem carries an
                         // `error` field in its payload. MCP surfaces such a
@@ -897,13 +941,11 @@ impl AxiomMcpServer {
                             jsonrpc: "2.0".to_string(),
                             id,
                             result: Some(json!({
-                                "isError": is_error,
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": serde_json::to_string_pretty(&val).unwrap_or_default()
-                                    }
-                                ]
+                                "content": [{
+                                    "type": "text",
+                                    "text": serde_json::to_string_pretty(&val).unwrap_or_default()
+                                }],
+                                "isError": is_error
                             })),
                             error: None,
                         }
@@ -911,11 +953,14 @@ impl AxiomMcpServer {
                     Err(e) => JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id,
-                        result: None,
-                        error: Some(json!({
-                            "code": -32603,
-                            "message": e.to_string()
+                        result: Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Error: {}", e)
+                            }],
+                            "isError": true
                         })),
+                        error: None,
                     },
                 }
             }
@@ -946,6 +991,11 @@ impl AxiomMcpServer {
                 return Ok(json!(node));
             }
             let candidates = self.ast_index.candidates_for(symbol);
+            if candidates.len() == 1 {
+                if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
+                    return Ok(json!(node));
+                }
+            }
             if candidates.len() > 1 {
                 return Err(format!(
                     "Symbol '{symbol}' is ambiguous; matches: {:?}",
@@ -973,12 +1023,38 @@ impl AxiomMcpServer {
             return Err(format!("Seal '{seal}' not found in attestation ledger"));
         }
 
-        if let Some(symbol) = uri.strip_prefix("axiom://blast-radius/") {
-            let radius = self.ast_index.compute_blast_radius(symbol, 1);
+        if let Some(symbol_query) = uri.strip_prefix("axiom://blast-radius/") {
+            let (symbol, query) = symbol_query.split_once('?').unwrap_or((symbol_query, ""));
+            let depth = query
+                .split('&')
+                .find_map(|p| p.strip_prefix("depth="))
+                .and_then(|d| d.parse::<usize>().ok())
+                .unwrap_or(1);
+            let radius = self.ast_index.compute_blast_radius(symbol, depth);
             match radius {
                 Some(r) => return Ok(json!(r)),
                 None => return Err(format!("Blast radius could not be computed for '{symbol}'")),
             }
+        }
+
+        if let Some(symbol_query) = uri.strip_prefix("axiom://slice/") {
+            let (symbol, query) = symbol_query.split_once('?').unwrap_or((symbol_query, ""));
+            let budget = query
+                .split('&')
+                .find_map(|p| p.strip_prefix("budget="))
+                .and_then(|b| b.parse::<usize>().ok());
+            if let Some(slice) = self.ast_index.get_symbol_slice(symbol, budget) {
+                return Ok(json!(slice));
+            }
+            let candidates = self.ast_index.candidates_for(symbol);
+            if candidates.len() == 1 {
+                if let Some(slice) = self.ast_index.get_symbol_slice(&candidates[0], budget) {
+                    return Ok(json!(slice));
+                }
+            }
+            return Err(format!(
+                "Context slice could not be computed for '{symbol}'"
+            ));
         }
 
         Err(format!("Resource URI '{uri}' is not supported"))
@@ -1065,14 +1141,51 @@ impl AxiomMcpServer {
                     Ok(s) => s,
                     Err(e) => return Ok(json!({ "error": e })),
                 };
+                let token_budget = args
+                    .get("token_budget")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
 
                 if let Some(node) = self.ast_index.get_symbol(symbol) {
-                    return Ok(json!(node));
+                    let supertypes = self.ast_index.get_supertypes(symbol);
+                    let implementors = self.ast_index.get_implementors(symbol);
+                    let mut val = serde_json::to_value(node)?;
+                    if !supertypes.is_empty() {
+                        val["supertypes"] = json!(supertypes);
+                    }
+                    if !implementors.is_empty() {
+                        val["implementors"] = json!(implementors);
+                    }
+                    if let Some(slice) = self.ast_index.get_symbol_slice(symbol, token_budget) {
+                        val["context_slice"] = json!(slice);
+                    }
+                    return Ok(val);
+                }
+
+                // Resolve unique short-name candidate
+                let candidates = self.ast_index.candidates_for(symbol);
+                if candidates.len() == 1 {
+                    let resolved = &candidates[0];
+                    if let Some(node) = self.ast_index.get_symbol(resolved) {
+                        let supertypes = self.ast_index.get_supertypes(resolved);
+                        let implementors = self.ast_index.get_implementors(resolved);
+                        let mut val = serde_json::to_value(node)?;
+                        if !supertypes.is_empty() {
+                            val["supertypes"] = json!(supertypes);
+                        }
+                        if !implementors.is_empty() {
+                            val["implementors"] = json!(implementors);
+                        }
+                        if let Some(slice) = self.ast_index.get_symbol_slice(resolved, token_budget)
+                        {
+                            val["context_slice"] = json!(slice);
+                        }
+                        return Ok(val);
+                    }
                 }
 
                 // An ambiguous name is not a miss. Saying so beats picking one of
                 // the candidates and presenting it as the answer.
-                let candidates = self.ast_index.candidates_for(symbol);
                 if candidates.len() > 1 {
                     return Ok(json!({
                         "error": format!("{:?} matches {} symbols; name one of them", symbol, candidates.len()),
@@ -1091,7 +1204,11 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let depth = args.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                let depth = args
+                    .get("depth")
+                    .or_else(|| args.get("max_depth"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1) as usize;
                 if let Some(res) = self.ast_index.compute_blast_radius(symbol, depth) {
                     Ok(json!(res))
                 } else {
@@ -1271,22 +1388,163 @@ impl AxiomMcpServer {
             }
 
             "axiom_apply_mutation" => {
-                // Required, not defaulted. A missing symbol_path used to become
-                // the literal `module::fn`, so a malformed call wrote a node
-                // under a name no source declares and persisted it to the
-                // index. The same for node_id, which keyed the CRDT op.
                 let symbol = match required_str(&args, "symbol_path") {
                     Ok(s) => s,
                     Err(e) => return Ok(json!({ "error": e })),
                 };
-                let node_id = match required_str(&args, "node_id") {
-                    Ok(s) => s,
-                    Err(e) => return Ok(json!({ "error": e })),
+                let speculative = args
+                    .get("speculative")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let commit_staged = args
+                    .get("commit_staged")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let rollback_staged = args
+                    .get("rollback_staged")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                if rollback_staged {
+                    let mut staged = self.staged_mutations.write().unwrap();
+                    if let Some(entry) = staged.remove(symbol) {
+                        if let Some(orig_sig) = entry.original_signature {
+                            if let Some(existing) = self.ast_index.get_symbol(symbol) {
+                                self.ast_index.index_node_at(
+                                    symbol,
+                                    &existing.kind,
+                                    &orig_sig,
+                                    "",
+                                    existing.dependencies,
+                                    Some(existing.source_range),
+                                );
+                            }
+                        }
+                        return Ok(json!({
+                            "status": "ROLLED_BACK",
+                            "symbol_path": symbol,
+                            "message": format!("Staged mutation for '{symbol}' was rolled back")
+                        }));
+                    } else {
+                        return Ok(json!({
+                            "error": format!("No staged mutation found to rollback for '{symbol}'")
+                        }));
+                    }
+                }
+
+                if commit_staged {
+                    let staged_entry = {
+                        let mut staged = self.staged_mutations.write().unwrap();
+                        staged.remove(symbol)
+                    };
+                    let entry = match staged_entry {
+                        Some(e) => e,
+                        None => {
+                            return Ok(json!({
+                                "error": format!("No staged mutation found to commit for '{symbol}'")
+                            }));
+                        }
+                    };
+
+                    let (kind, deps, range, sig) =
+                        if let Some(existing) = self.ast_index.get_symbol(symbol) {
+                            (
+                                existing.kind,
+                                existing.dependencies,
+                                Some(existing.source_range),
+                                existing.signature.unwrap_or_default(),
+                            )
+                        } else {
+                            ("function".to_string(), vec![], None, String::new())
+                        };
+
+                    let op = self.tree_crdt.insert_node(
+                        "root",
+                        &entry.node_id,
+                        symbol,
+                        &kind,
+                        &entry.content,
+                    );
+
+                    if let Err(e) = append_crdt_op(&self.op_log_path(), &op) {
+                        return Ok(json!({
+                            "error": format!("could not record the mutation: {e}")
+                        }));
+                    }
+                    self.ast_index
+                        .index_node_at(symbol, &kind, &sig, &entry.content, deps, range);
+                    let root = self.tree_crdt.compute_tree_merkle_root();
+
+                    let index_path = self.index_path();
+                    if let Err(e) = self.ast_index.persist_symbol(&index_path, symbol) {
+                        eprintln!("Warning: Failed to save {}: {}", index_path.display(), e);
+                    }
+
+                    return Ok(json!({
+                        "status": "COMMITTED",
+                        "symbol_path": symbol,
+                        "crdt_op": op,
+                        "new_merkle_root": root,
+                        "active_ast_nodes": self.tree_crdt.active_nodes_count()
+                    }));
+                }
+
+                let content = match args.get("content").and_then(|v| v.as_str()) {
+                    Some(c) => c,
+                    None => {
+                        return Ok(json!({
+                            "error": "content parameter missing for mutation (specify content, or commit_staged / rollback_staged)"
+                        }));
+                    }
                 };
-                let content = match required_str(&args, "content") {
-                    Ok(s) => s,
-                    Err(e) => return Ok(json!({ "error": e })),
-                };
+                let node_id = args
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("staged_node");
+
+                if speculative {
+                    let original_sig = self.ast_index.get_symbol(symbol).and_then(|s| s.signature);
+                    let (kind, deps, range, sig) =
+                        if let Some(existing) = self.ast_index.get_symbol(symbol) {
+                            (
+                                existing.kind,
+                                existing.dependencies,
+                                Some(existing.source_range),
+                                existing.signature.unwrap_or_default(),
+                            )
+                        } else {
+                            ("function".to_string(), vec![], None, String::new())
+                        };
+                    self.ast_index
+                        .index_node_at(symbol, &kind, &sig, content, deps, range);
+
+                    let staged_mutation = StagedMutation {
+                        node_id: node_id.to_string(),
+                        symbol_path: symbol.to_string(),
+                        content: content.to_string(),
+                        original_signature: original_sig,
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    };
+                    self.staged_mutations
+                        .write()
+                        .unwrap()
+                        .insert(symbol.to_string(), staged_mutation);
+
+                    return Ok(json!({
+                        "status": "STAGED",
+                        "symbol_path": symbol,
+                        "node_id": node_id,
+                        "speculative": true,
+                        "staged_count": self.staged_mutations.read().unwrap().len(),
+                        "note": "Mutation staged in-memory. Call axiom_apply_mutation with commit_staged: true to persist or rollback_staged: true to discard."
+                    }));
+                }
+
+                // Clear any existing staged mutation for this symbol
+                self.staged_mutations.write().unwrap().remove(symbol);
 
                 let (kind, deps, range, sig) =
                     if let Some(existing) = self.ast_index.get_symbol(symbol) {

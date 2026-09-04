@@ -17,6 +17,26 @@ pub enum CtopStatus {
     EvaluatorUnavailable,
 }
 
+/// Structured compiler diagnostic span for compiler-guided repair
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiagnosticSpan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    pub message: String,
+    #[serde(default = "default_diagnostic_severity")]
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_replacement: Option<String>,
+}
+
+fn default_diagnostic_severity() -> String {
+    "error".to_string()
+}
+
 /// A specific failure check in CTOP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailedCheck {
@@ -26,6 +46,8 @@ pub struct FailedCheck {
     pub actual: Option<String>,
     pub stack_trace_ast_nodes: Vec<String>,
     pub hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<DiagnosticSpan>,
 }
 
 /// Standardized Common Test Output Protocol (CTOP) execution response
@@ -48,6 +70,16 @@ pub struct CtopReport {
     pub stdout: String,
     pub stderr: String,
     pub memory_allocated_bytes: Option<u64>,
+    /// Whether the compile step was served by the content-addressed artifact
+    /// cache. `Some("hit")`: a previously compiled artifact for byte-identical
+    /// source under a byte-identical toolchain was reused; the verdict still
+    /// comes from running it, never from a stored verdict. `Some("miss")`:
+    /// compiled fresh and stored. `None`: no compile step exists for the
+    /// language, or the cache is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile_cache: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<DiagnosticSpan>,
 }
 
 /// The basis for a count of assertion tokens, see `CtopReport::passed_checks_basis`.
@@ -384,6 +416,8 @@ impl CtopReport {
             stdout,
             stderr: String::new(),
             memory_allocated_bytes: None,
+            compile_cache: None,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -407,6 +441,8 @@ impl CtopReport {
             stdout,
             stderr,
             memory_allocated_bytes: None,
+            compile_cache: None,
+            diagnostics: Vec::new(),
         }
     }
 }

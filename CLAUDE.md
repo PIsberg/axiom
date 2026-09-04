@@ -18,7 +18,7 @@ answer* rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test                            # 208 tests across 43 test binaries: e2e, mcp, crdt, persistence, blast radius, eval, cache audit, key format, seal coverage, env confinement, scip, doc drift, protocol
+cargo test                            # 240 tests across 53 test binaries: e2e, mcp, crdt, persistence, blast radius, eval, artifact cache, cache audit, key format, seal coverage, env confinement, scip, doc drift, protocol
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -71,7 +71,12 @@ Eight MCP tools, all declared and dispatched in `axiom-core/src/mcp.rs`: `axiom_
 `axiom_record_verification`, `axiom_search_regex`, `axiom_run_tests`. The tool list in
 `handle_request` and the dispatch `match` below it are two places that must be edited together; a
 tool declared but not dispatched fails at call time, not at startup, and
-`declared_tools_are_dispatched.rs` pins the set so the count here cannot drift.
+`declared_tools_are_dispatched.rs` pins the set so the count here cannot drift, and pins the
+argument names against the dispatch: the schema for `axiom_apply_mutation` once required `symbol`
+and `kind` while the dispatch read `symbol_path`, `axiom_run_tests` advertised a `timeout_seconds`
+nothing read, and `axiom_attest_commit` listed `ctop_task_id` as optional while the dispatch
+refused a call without it. The schema is all an agent has to go on, so each of those is answered
+with a complaint about a name the agent was never shown.
 
 `axiom_run_tests` runs the project's own test command in the workspace and records the outcome as a
 third verification kind, `executed`: axiom ran it and saw the exit code, so it can vouch for it,
@@ -330,6 +335,26 @@ anything. The usability probe and the version fingerprint run under the same con
 toolchain that needs a dropped variable reads as missing rather than failing the snippet.
 `child_environment.rs` pins it, and a new variable a toolchain needs goes in `PASSED_NAMES` or
 `PASSED_PREFIXES`, never by widening the two refused names.
+
+**Compiled artifacts are cached; verdicts never are.** `artifact_cache` in `axiom-vmm` keys
+the build step's output on the wrapped source, the shape of the build command, the toolchain's
+reported version and the platform, and on a hit restores the artifact into the work directory
+and skips the compiler. The artifact still runs, so a failing snippet fails again from a hit and
+a nondeterministic one can still change its answer; a stored verdict would be the
+assertion-substring fallback in a new form. Every stored file's BLAKE3 digest is checked before
+reuse, so a tampered or truncated entry reads as a miss and the snippet is recompiled, never run
+from the cache. Any cache failure degrades to a miss, because the compiler can always answer what
+the cache cannot. `CtopReport::compile_cache` reads `hit`, `miss`, or is absent for a language
+with no build step; `crates/axiom-vmm/tests/artifact_cache.rs` pins the fails-again and tampered
+cases. `AXIOM_EVAL_CACHE=off` disables it, `AXIOM_EVAL_CACHE_DIR` moves it from
+`axiom-eval-cache` under the system temp directory, and `AXIOM_EVAL_CACHE_MAX_MB` (default 512)
+caps it, pruned least-recently-restored. Measured 2026-09-01 with `axiom bench --iterations 20`
+on Windows: median 220 ms with the cache off, 125 ms with it on; a hit still pays the restore,
+the spawn and the run. `program_version` in `native.rs` feeds both this key and the environment
+fingerprint, so the two cannot disagree about which toolchain built an artifact. The native tier
+is reached through `DaemonPool::global().evaluate`, and the pool holds no resident process:
+`warmup` primes the probe and version caches and the cache root, nothing more, and its module
+comment says so because an earlier one promised pre-warmed sandboxes that did not exist.
 
 **A timeout ends the whole process tree, not just the child.** `run_with_timeout` puts the child in
 its own process group on Unix and kills the group, and uses `taskkill /T` on Windows, because

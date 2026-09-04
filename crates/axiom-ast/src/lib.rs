@@ -492,6 +492,18 @@ impl AstIndex {
         results.into_iter().collect()
     }
 
+    /// Return all distinct file extensions present in the indexed workspace.
+    pub fn detected_languages(&self) -> Vec<String> {
+        let mut set = HashSet::new();
+        let map = self.file_to_symbols.read().unwrap();
+        for file in map.keys() {
+            if let Some(ext) = Path::new(file).extension().and_then(|e| e.to_str()) {
+                set.insert(ext.to_ascii_lowercase());
+            }
+        }
+        set.into_iter().collect()
+    }
+
     /// Insert a node, recording the lines its declaration spans.
     ///
     /// `declared_on` is a zero-based inclusive line range, which is one line
@@ -1002,15 +1014,16 @@ impl AstIndex {
         let file_calls = self.file_call_names.read().unwrap();
 
         let mut visited = HashSet::new();
-        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        let mut queue: VecDeque<(String, usize, Vec<String>)> = VecDeque::new();
         let mut impacted_tests: Vec<String> = Vec::new();
+        let mut causal_paths: HashMap<String, Vec<String>> = HashMap::new();
 
         // Seed queue with canonical symbol, unqualified name, and class prefix
-        queue.push_back((canonical_symbol.clone(), 0));
+        queue.push_back((canonical_symbol.clone(), 0, vec![canonical_symbol.clone()]));
         visited.insert(canonical_symbol.clone());
 
         if simple_name != canonical_symbol {
-            queue.push_back((simple_name.to_string(), 0));
+            queue.push_back((simple_name.to_string(), 0, vec![canonical_symbol.clone()]));
             visited.insert(simple_name.to_string());
         }
 
@@ -1019,7 +1032,7 @@ impl AstIndex {
             .next()
             .unwrap_or(&canonical_symbol);
         if class_symbol != canonical_symbol && visited.insert(class_symbol.to_string()) {
-            queue.push_back((class_symbol.to_string(), 0));
+            queue.push_back((class_symbol.to_string(), 0, vec![canonical_symbol.clone()]));
         }
 
         let mut tests_by_depth: HashMap<usize, Vec<String>> = HashMap::new();
@@ -1039,15 +1052,21 @@ impl AstIndex {
         // running the tests that is not.
         let survey_depth = max_depth.max(Self::SURVEY_DEPTH);
 
-        while let Some((curr, depth)) = queue.pop_front() {
+        while let Some((curr, depth, path)) = queue.pop_front() {
             if let Some(node) = nodes.get(&curr) {
                 if node.kind == "test" {
                     let d = depth.max(1);
                     if tests_recorded.insert(curr.clone()) {
                         tests_by_depth.entry(d).or_default().push(curr.clone());
+                        causal_paths
+                            .entry(curr.clone())
+                            .or_insert_with(|| path.clone());
                     }
                     if d <= max_depth && impacted_set.insert(curr.clone()) {
                         impacted_tests.push(curr.clone());
+                        causal_paths
+                            .entry(curr.clone())
+                            .or_insert_with(|| path.clone());
                     }
                 }
             }
@@ -1067,7 +1086,9 @@ impl AstIndex {
                     if let Some(callers) = rev.get(*key) {
                         for caller in callers {
                             if visited.insert(caller.clone()) {
-                                queue.push_back((caller.clone(), depth + 1));
+                                let mut next_path = path.clone();
+                                next_path.push(caller.clone());
+                                queue.push_back((caller.clone(), depth + 1, next_path));
                             }
                         }
                     }
@@ -1076,7 +1097,9 @@ impl AstIndex {
                     // If key is an interface or base class, traverse all derived subclasses/implementors
                     for impl_cls in self.get_implementors(key) {
                         if visited.insert(impl_cls.clone()) {
-                            queue.push_back((impl_cls, depth + 1));
+                            let mut next_path = path.clone();
+                            next_path.push(impl_cls.clone());
+                            queue.push_back((impl_cls, depth + 1, next_path));
                         }
                     }
                 }
@@ -1103,6 +1126,9 @@ impl AstIndex {
                                 if let Some(node) = nodes.get(sym) {
                                     if node.kind == "test" && impacted_set.insert(sym.clone()) {
                                         impacted_tests.push(sym.clone());
+                                        causal_paths.entry(sym.clone()).or_insert_with(|| {
+                                            vec![canonical_symbol.clone(), sym.clone()]
+                                        });
                                         if tests_recorded.insert(sym.clone()) {
                                             tests_by_depth.entry(1).or_default().push(sym.clone());
                                         }
@@ -1131,6 +1157,11 @@ impl AstIndex {
                         && impacted_set.insert(sym.clone())
                     {
                         method_expansions.push(sym.clone());
+                        let mut p = causal_paths.get(class_prefix).cloned().unwrap_or_else(|| {
+                            vec![canonical_symbol.clone(), class_prefix.to_string()]
+                        });
+                        p.push(sym.clone());
+                        causal_paths.entry(sym.clone()).or_insert(p);
                         if tests_recorded.insert(sym.clone()) {
                             tests_by_depth.entry(1).or_default().push(sym.clone());
                         }
@@ -1142,13 +1173,6 @@ impl AstIndex {
 
         // Fallback: a test whose own name carries the symbol's, for the case
         // where nothing in the graph reaches it.
-        //
-        // This reads the symbol path. It used to read `signature` as well,
-        // which held the symbol path again, so the two were the same string
-        // and the extra checks were the same check. Now that `signature` holds
-        // the declaration, matching it here would put every test whose
-        // declaration mentions a name into the answer, which is the loosening
-        // that once returned all 49 tests for every symbol in this repository.
         if impacted_tests.is_empty() && !simple_name.is_empty() {
             let test_pattern_1 = format!("{}Test", simple_name);
             let test_pattern_2 = format!("test{}", simple_name);
@@ -1169,6 +1193,9 @@ impl AstIndex {
                     && impacted_set.insert(sym.clone())
                 {
                     impacted_tests.push(sym.clone());
+                    causal_paths
+                        .entry(sym.clone())
+                        .or_insert_with(|| vec![canonical_symbol.clone(), sym.clone()]);
                     tests_by_depth.entry(1).or_default().push(sym.clone());
                 }
             }
@@ -1191,8 +1218,117 @@ impl AstIndex {
             impacted_tests,
             direct_tests,
             tests_by_depth,
+            causal_paths,
             total_tests_in_repo: total_tests,
             pruned_test_percentage: pruned_percentage,
+        })
+    }
+
+    /// Generate a token-budgeted adaptive context slice for a symbol.
+    /// Includes the symbol declaration, signature, docstring, and immediate
+    /// callers and callees, truncated if necessary to respect the budget.
+    pub fn get_symbol_slice(
+        &self,
+        symbol_path: &str,
+        token_budget: Option<usize>,
+    ) -> Option<SymbolContextSlice> {
+        let node = self.get_symbol(symbol_path)?;
+        let budget = token_budget.unwrap_or(500);
+
+        let rev = self.reverse_deps.read().unwrap();
+        let nodes = self.nodes.read().unwrap();
+
+        let mut callers = Vec::new();
+        let simple = Self::simple_name_of(&node.symbol_path);
+        let keys = [node.symbol_path.as_str(), simple];
+        for k in keys
+            .iter()
+            .take(if simple == node.symbol_path { 1 } else { 2 })
+        {
+            if let Some(c_set) = rev.get(*k) {
+                for c in c_set {
+                    if !callers.contains(c) {
+                        callers.push(c.clone());
+                    }
+                }
+            }
+        }
+        callers.sort();
+
+        let callees = node.dependencies.clone();
+
+        // Format the adaptive context slice
+        let mut rendered = String::new();
+        rendered.push_str(&format!(
+            "// Symbol: {} [{}]\n",
+            node.symbol_path, node.kind
+        ));
+        if let Some(doc) = &node.docstring {
+            for line in doc.lines() {
+                rendered.push_str(&format!("/// {}\n", line));
+            }
+        }
+        if let Some(sig) = &node.signature {
+            rendered.push_str(&format!("{};\n", sig));
+        }
+
+        let mut truncated = false;
+        if !callers.is_empty() {
+            rendered.push_str(&format!("\n// Immediate Callers ({}):\n", callers.len()));
+            for caller in &callers {
+                if (rendered.len() / 4) >= budget {
+                    rendered.push_str("// ... [callers truncated for token budget]\n");
+                    truncated = true;
+                    break;
+                }
+                if let Some(c_node) = nodes.get(caller) {
+                    if let Some(c_sig) = &c_node.signature {
+                        rendered.push_str(&format!("// - {}: {}\n", caller, c_sig));
+                    } else {
+                        rendered.push_str(&format!("// - {}\n", caller));
+                    }
+                } else {
+                    rendered.push_str(&format!("// - {}\n", caller));
+                }
+            }
+        }
+
+        if !callees.is_empty() {
+            rendered.push_str(&format!(
+                "\n// Dependencies / Callees ({}):\n",
+                callees.len()
+            ));
+            for callee in &callees {
+                if (rendered.len() / 4) >= budget {
+                    rendered.push_str("// ... [dependencies truncated for token budget]\n");
+                    truncated = true;
+                    break;
+                }
+                if let Some(c_node) = nodes.get(callee) {
+                    if let Some(c_sig) = &c_node.signature {
+                        rendered.push_str(&format!("// - {}: {}\n", callee, c_sig));
+                    } else {
+                        rendered.push_str(&format!("// - {}\n", callee));
+                    }
+                } else {
+                    rendered.push_str(&format!("// - {}\n", callee));
+                }
+            }
+        }
+
+        let estimated_tokens = (rendered.len() / 4).max(1);
+
+        Some(SymbolContextSlice {
+            symbol: node.symbol_path,
+            kind: node.kind,
+            signature: node.signature,
+            docstring: node.docstring,
+            estimated_tokens,
+            callers,
+            callees,
+            dependencies: node.dependencies,
+            truncated,
+            rendered_slice: rendered,
         })
     }
 
@@ -1318,6 +1454,9 @@ impl AstIndex {
             let mut forgotten = self.forgotten_symbols.write().unwrap();
             let mut lines = self.symbol_lines.write().unwrap();
             let mut sym_file = self.symbol_to_file.write().unwrap();
+            let mut hier = self.type_hierarchy.write().unwrap();
+            let mut impls = self.interface_implementors.write().unwrap();
+
             for symbol in symbols {
                 // Only drop the symbol itself if this file is still its owner.
                 // Two files can declare one key, a package-keyed Java class of
@@ -1332,7 +1471,25 @@ impl AstIndex {
                     nodes.remove(&symbol);
                     lines.remove(&symbol);
                     sym_file.remove(&symbol);
-                    forgotten.insert(symbol);
+                    forgotten.insert(symbol.clone());
+
+                    let simple = Self::simple_name_of(&symbol).to_string();
+                    if let Some(parents) = hier.remove(&symbol) {
+                        for p in parents {
+                            if let Some(children) = impls.get_mut(&p) {
+                                children.retain(|c| c != &symbol && c != &simple);
+                            }
+                        }
+                    }
+                    if let Some(parents) = hier.remove(&simple) {
+                        for p in parents {
+                            if let Some(children) = impls.get_mut(&p) {
+                                children.retain(|c| c != &symbol && c != &simple);
+                            }
+                        }
+                    }
+                    impls.remove(&symbol);
+                    impls.remove(&simple);
                 }
             }
         }
@@ -2083,17 +2240,25 @@ impl AstIndex {
                                     c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
                                 });
                                 let base = clean.split('<').next().unwrap_or(clean).trim();
+                                let base_ident = base.split('.').next_back().unwrap_or(base).trim();
                                 if token == "extends"
                                     || token == "implements"
                                     || token == "with"
                                     || token == ":"
                                 {
                                     in_ext_or_impl = true;
-                                } else if in_ext_or_impl && Self::is_valid_identifier(base) {
+                                } else if in_ext_or_impl && Self::is_valid_identifier(base_ident) {
                                     self.register_inheritance(&full_symbol, base);
+                                    self.register_inheritance(&full_symbol, base_ident);
                                     self.register_inheritance(class_name, base);
+                                    self.register_inheritance(class_name, base_ident);
                                     if !node_deps.contains(&base.to_string()) {
                                         node_deps.push(base.to_string());
+                                    }
+                                    if base_ident != base
+                                        && !node_deps.contains(&base_ident.to_string())
+                                    {
+                                        node_deps.push(base_ident.to_string());
                                     }
                                 }
                             }
@@ -2364,25 +2529,60 @@ impl AstIndex {
                             Some((line_no, line_no)),
                         );
                         *nodes_count += 1;
-                    } else if (decl.starts_with("impl ") || decl.contains(" impl "))
+                    } else if (decl.starts_with("impl ")
+                        || decl.starts_with("impl<")
+                        || decl.contains(" impl ")
+                        || decl.contains(" impl<"))
                         && decl.contains(" for ")
                     {
-                        let after_impl = decl.split("impl ").last().unwrap_or("");
-                        let after_gen = Self::skip_angle_group(after_impl.trim_start());
+                        let after_impl = if let Some(pos) = decl.find("impl") {
+                            decl[pos + 4..].trim_start()
+                        } else {
+                            ""
+                        };
+                        let after_gen = Self::skip_angle_group(after_impl);
                         let parts: Vec<&str> = after_gen.split(" for ").collect();
                         if parts.len() == 2 {
                             let tr = parts[0].split('<').next().unwrap_or(parts[0]).trim();
                             let tr_name = tr.rsplit("::").next().unwrap_or(tr).trim();
-                            let st = parts[1]
-                                .split(|c: char| c == '<' || c == '{' || c.is_whitespace())
-                                .next()
-                                .unwrap_or("")
-                                .trim();
-                            let st_name = st.rsplit("::").next().unwrap_or(st).trim();
+                            let tokens: Vec<&str> = parts[1].split_whitespace().collect();
+                            let mut st_name = "";
+                            let mut raw_st = "";
+                            for tok in tokens {
+                                let clean = tok
+                                    .trim_matches(|c: char| {
+                                        c == '&'
+                                            || c == '*'
+                                            || c == '{'
+                                            || c == '('
+                                            || c == ')'
+                                            || c == ';'
+                                    })
+                                    .split('<')
+                                    .next()
+                                    .unwrap_or(tok)
+                                    .trim();
+                                if clean.starts_with('\'')
+                                    || clean == "mut"
+                                    || clean == "const"
+                                    || clean.is_empty()
+                                {
+                                    continue;
+                                }
+                                let ident = clean.rsplit("::").next().unwrap_or(clean).trim();
+                                if Self::is_valid_identifier(ident) {
+                                    st_name = ident;
+                                    raw_st = clean;
+                                    break;
+                                }
+                            }
                             if Self::is_valid_identifier(tr_name)
                                 && Self::is_valid_identifier(st_name)
                             {
                                 self.register_inheritance(st_name, tr_name);
+                                if tr != tr_name || raw_st != st_name {
+                                    self.register_inheritance(raw_st, tr);
+                                }
                             }
                         }
                     }
@@ -2531,18 +2731,25 @@ impl AstIndex {
             None => rest,
         };
 
-        let name = target
-            .trim_start()
-            .split(|c: char| c == '<' || c == '{' || c == '(' || c.is_whitespace())
-            .next()
-            .unwrap_or("");
-        let name = name.rsplit("::").next().unwrap_or(name);
-
-        if Self::is_valid_identifier(name) {
-            Some(name.to_string())
-        } else {
-            None
+        let tokens: Vec<&str> = target.split_whitespace().collect();
+        for tok in tokens {
+            let clean = tok
+                .trim_matches(|c: char| {
+                    c == '&' || c == '*' || c == '{' || c == '(' || c == ')' || c == ';'
+                })
+                .split('<')
+                .next()
+                .unwrap_or(tok)
+                .trim();
+            if clean.starts_with('\'') || clean == "mut" || clean == "const" || clean.is_empty() {
+                continue;
+            }
+            let ident = clean.rsplit("::").next().unwrap_or(clean).trim();
+            if Self::is_valid_identifier(ident) {
+                return Some(ident.to_string());
+            }
         }
+        None
     }
 
     /// Everything after a leading generic list, with nesting counted.
@@ -2606,14 +2813,15 @@ impl AstIndex {
                         {
                             for base in bases_str.split(',') {
                                 let base_clean = base.trim();
-                                let base_name = base_clean
-                                    .split('.')
-                                    .next_back()
-                                    .unwrap_or(base_clean)
-                                    .trim();
+                                let base_raw =
+                                    base_clean.split('[').next().unwrap_or(base_clean).trim();
+                                let base_name =
+                                    base_raw.split('.').next_back().unwrap_or(base_raw).trim();
                                 if Self::is_valid_identifier(base_name) {
                                     self.register_inheritance(&symbol, base_name);
+                                    self.register_inheritance(&symbol, base_raw);
                                     self.register_inheritance(&name, base_name);
+                                    self.register_inheritance(&name, base_raw);
                                 }
                             }
                         }
@@ -2746,11 +2954,14 @@ impl AstIndex {
                             c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
                         });
                         let base = clean.split('<').next().unwrap_or(clean).trim();
+                        let base_ident = base.split('.').next_back().unwrap_or(base).trim();
                         if t == "extends" || t == "implements" {
                             in_ext_or_impl = true;
-                        } else if in_ext_or_impl && Self::is_valid_identifier(base) {
+                        } else if in_ext_or_impl && Self::is_valid_identifier(base_ident) {
                             self.register_inheritance(&symbol, base);
+                            self.register_inheritance(&symbol, base_ident);
                             self.register_inheritance(&name, base);
+                            self.register_inheritance(&name, base_ident);
                         }
                     }
 
@@ -2791,11 +3002,14 @@ impl AstIndex {
                             c == '{' || c == ',' || c == ';' || c == '(' || c == ')'
                         });
                         let base = clean.split('<').next().unwrap_or(clean).trim();
+                        let base_ident = base.split('.').next_back().unwrap_or(base).trim();
                         if t == "extends" {
                             in_ext = true;
-                        } else if in_ext && Self::is_valid_identifier(base) {
+                        } else if in_ext && Self::is_valid_identifier(base_ident) {
                             self.register_inheritance(&symbol, base);
+                            self.register_inheritance(&symbol, base_ident);
                             self.register_inheritance(&name, base);
+                            self.register_inheritance(&name, base_ident);
                         }
                     }
 
@@ -3177,16 +3391,33 @@ impl AstIndex {
                                         base_entry.split_whitespace().collect();
                                     for w in base_words {
                                         let clean_w = w.trim_matches(|c: char| {
-                                            c == '{' || c == ';' || c == ',' || c == '<' || c == '>'
+                                            c == '{'
+                                                || c == ';'
+                                                || c == ','
+                                                || c == '<'
+                                                || c == '>'
+                                                || c == '('
+                                                || c == ')'
                                         });
+                                        let base_ident = clean_w
+                                            .split('<')
+                                            .next()
+                                            .unwrap_or(clean_w)
+                                            .split('.')
+                                            .next_back()
+                                            .unwrap_or(clean_w)
+                                            .trim();
                                         if clean_w != "public"
                                             && clean_w != "protected"
                                             && clean_w != "private"
                                             && clean_w != "virtual"
-                                            && Self::is_valid_identifier(clean_w)
+                                            && clean_w != "internal"
+                                            && Self::is_valid_identifier(base_ident)
                                         {
                                             self.register_inheritance(&symbol, clean_w);
+                                            self.register_inheritance(&symbol, base_ident);
                                             self.register_inheritance(&name, clean_w);
+                                            self.register_inheritance(&name, base_ident);
                                         }
                                     }
                                 }
@@ -3745,8 +3976,27 @@ pub struct BlastRadiusResult {
     pub impacted_tests: Vec<String>,
     pub direct_tests: Vec<String>,
     pub tests_by_depth: HashMap<usize, Vec<String>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub causal_paths: HashMap<String, Vec<String>>,
     pub total_tests_in_repo: usize,
     pub pruned_test_percentage: f64,
+}
+
+/// A token-budgeted adaptive symbol slice for lean context windows
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SymbolContextSlice {
+    pub symbol: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docstring: Option<String>,
+    pub estimated_tokens: usize,
+    pub callers: Vec<String>,
+    pub callees: Vec<String>,
+    pub dependencies: Vec<String>,
+    pub truncated: bool,
+    pub rendered_slice: String,
 }
 
 /// A symbol's forward dependency closure: everything it can reach.

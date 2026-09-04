@@ -1,14 +1,26 @@
-//! Pre-warmed Worker Daemon Pool for Sub-Second Multi-Language Sandbox Evaluation.
+//! Bookkeeping around the evaluators: warm-up, recycling policy, telemetry.
 //!
-//! Cold process initialization (especially JVM, Node, Python) introduces startup
-//! latency that slows down tight agent mutation-eval loops. The `DaemonPool` manages
-//! pre-warmed, recycled worker instances and warm execution sandboxes with strict
-//! memory, isolation, and deadline confines.
+//! What "warm" means here, precisely, because an earlier version of this
+//! comment promised pre-warmed execution sandboxes that did not exist. A
+//! worker holds no resident process; every evaluation still spawns the
+//! toolchain. What `warmup` does prime is real and bounded: the per-process
+//! toolchain probe and version caches (one spawn per language instead of one
+//! on the first evaluation's clock) and the artifact-cache root. The heavy
+//! saving comes from the content-addressed artifact cache in
+//! [`crate::artifact_cache`], which the pool surfaces per language as
+//! `cache_hits`. A resident-process tier, a JVM that compiles in-process, is
+//! design rather than code, and nothing here claims it.
+//!
+//! The pool also owns eviction policy: idle workers are dropped after
+//! `idle_evict_duration`, and `evict_idle` prunes the artifact cache to its
+//! size cap at the same time.
 
-use crate::native::{DEFAULT_TIMEOUT, NativeLanguage, evaluate, temp_work_dir};
+use crate::artifact_cache;
+use crate::native::{DEFAULT_TIMEOUT, NativeLanguage, evaluate, language_for, prime};
 use axiom_proto::CtopReport;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -43,6 +55,9 @@ pub struct WorkerStats {
     pub successful_evaluations: u64,
     pub total_duration_ms: f64,
     pub recycled_count: u64,
+    /// Evaluations whose compile step was served by the artifact cache. The
+    /// verdicts still came from real runs; only the compile was skipped.
+    pub cache_hits: u64,
 }
 
 /// An individual managed worker instance.
@@ -58,21 +73,22 @@ struct WorkerInstance {
 
 impl WorkerInstance {
     fn new(language: &str) -> Self {
+        // A counter rather than `Instant::now().elapsed()`, which measures
+        // the time since the same statement and is always near zero, so every
+        // worker got the same id.
+        static IDS: AtomicU64 = AtomicU64::new(1);
         let id = format!(
-            "worker_{}_{:x}",
+            "worker_{}_{}",
             language,
-            Instant::now().elapsed().as_nanos()
+            IDS.fetch_add(1, Ordering::Relaxed)
         );
-        let work_dir = temp_work_dir(language)
-            .ok()
-            .map(|td| td.path().to_path_buf());
         Self {
             id,
             language: language.to_string(),
             created_at: Instant::now(),
             last_used_at: Instant::now(),
             eval_count: 0,
-            work_dir,
+            work_dir: None,
         }
     }
 
@@ -104,10 +120,22 @@ impl DaemonPool {
         GLOBAL.get_or_init(|| DaemonPool::new(DaemonConfig::default()))
     }
 
-    /// Warm up worker instances for the specified language extensions.
+    /// Prime what can be primed before the first evaluation asks for it.
+    ///
+    /// Concretely: the toolchain probe and version caches (each is one
+    /// process spawn, memoized for the life of this process, that would
+    /// otherwise land on the first evaluation's clock), the artifact-cache
+    /// root, and the worker queue the recycling policy runs on. No resident
+    /// process is started, and nothing here makes a cold toolchain fast.
     pub fn warmup(&self, languages: &[&str]) {
+        if artifact_cache::enabled() {
+            let _ = std::fs::create_dir_all(artifact_cache::cache_root());
+        }
         let mut map = self.workers.lock().unwrap();
         for &lang in languages {
+            if let Some(known) = language_for(lang) {
+                prime(known);
+            }
             let queue = map.entry(lang.to_string()).or_default();
             while queue.len() < self.config.max_workers_per_lang.min(2) {
                 queue.push_back(WorkerInstance::new(lang));
@@ -154,6 +182,9 @@ impl DaemonPool {
             if is_pass {
                 s.successful_evaluations += 1;
             }
+            if report.compile_cache.as_deref() == Some("hit") {
+                s.cache_hits += 1;
+            }
             s.total_duration_ms += elapsed_ms;
 
             if worker.should_recycle(self.config.max_evals_before_recycle) {
@@ -196,8 +227,10 @@ impl DaemonPool {
             .unwrap_or(0)
     }
 
-    /// Evict idle workers that have exceeded idle_evict_duration.
+    /// Evict idle workers that have exceeded idle_evict_duration, and prune
+    /// the artifact cache to its size cap while at it.
     pub fn evict_idle(&self) -> usize {
+        artifact_cache::evict_cache_to_cap();
         let mut evicted = 0;
         let now = Instant::now();
         let mut map = self.workers.lock().unwrap();
