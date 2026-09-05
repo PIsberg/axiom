@@ -6,7 +6,10 @@ use std::time::Duration;
 #[test]
 fn test_job_object_sandbox_creation_and_memory_accounting() {
     let guard = SandboxGuard::new();
-    assert!(guard.is_some(), "SandboxGuard must be constructible on this OS");
+    assert!(
+        guard.is_some(),
+        "SandboxGuard must be constructible on this OS"
+    );
 
     let mut guard = guard.unwrap();
 
@@ -20,18 +23,22 @@ fn test_job_object_sandbox_creation_and_memory_accounting() {
         c
     };
 
-    let child = cmd.spawn().expect("failed to spawn child process");
+    let mut child = cmd.spawn().expect("failed to spawn child process");
     let assigned = guard.assign_child(&child);
     assert!(assigned, "Child process must be assignable to SandboxGuard");
 
     let _ = guard.peak_memory_bytes();
+    let _ = child.wait();
 }
 
 #[test]
 fn test_secret_confinement_prevents_secret_leakage() {
     // Set test secrets in host environment
     unsafe {
-        std::env::set_var("AXIOM_SIGNING_KEY", "super_secret_hex_signing_key_never_leak");
+        std::env::set_var(
+            "AXIOM_SIGNING_KEY",
+            "super_secret_hex_signing_key_never_leak",
+        );
         std::env::set_var("AXIOM_SIGNING_KEY_FILE", "/path/to/key.sec");
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "AKIAIOSFODNN7EXAMPLE");
         std::env::set_var("MY_APPLICATION_SECRET", "super_confidential");
@@ -74,7 +81,9 @@ fn test_secret_confinement_prevents_secret_leakage() {
         finished.stdout
     );
     assert!(
-        !finished.stdout.contains("super_secret_hex_signing_key_never_leak"),
+        !finished
+            .stdout
+            .contains("super_secret_hex_signing_key_never_leak"),
         "Secret value must never leak to child"
     );
 }
@@ -94,8 +103,8 @@ fn test_sandbox_timeout_terminates_runaway_process() {
     };
 
     let start = std::time::Instant::now();
-    let finished = run_with_timeout(runaway_cmd, timeout)
-        .expect("run_with_timeout should complete cleanly");
+    let finished =
+        run_with_timeout(runaway_cmd, timeout).expect("run_with_timeout should complete cleanly");
 
     let elapsed = start.elapsed();
     assert!(

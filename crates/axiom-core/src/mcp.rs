@@ -1178,7 +1178,9 @@ impl AxiomMcpServer {
                     "candidates": candidates
                 }));
             }
-            return Err(format!("Fingerprint '{fp}' not found in verified fix cache"));
+            return Err(format!(
+                "Fingerprint '{fp}' not found in verified fix cache"
+            ));
         }
 
         Err(format!("Resource URI '{uri}' is not supported"))
@@ -1198,7 +1200,10 @@ impl AxiomMcpServer {
                 if let Some(resolved) = self.resolve_symbol_candidate(symbol_path) {
                     if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
                         let br = self.ast_index.compute_blast_radius(&resolved, 2);
-                        let impacted_tests = br.as_ref().map(|b| b.impacted_tests.clone()).unwrap_or_default();
+                        let impacted_tests = br
+                            .as_ref()
+                            .map(|b| b.impacted_tests.clone())
+                            .unwrap_or_default();
                         let causal_lines: Vec<String> = br
                             .as_ref()
                             .map(|b| {
@@ -1247,7 +1252,10 @@ impl AxiomMcpServer {
                 if let Some(resolved) = self.resolve_symbol_candidate(target_symbol) {
                     if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
                         let br = self.ast_index.compute_blast_radius(&resolved, 2);
-                        let impacted = br.as_ref().map(|b| b.impacted_tests.clone()).unwrap_or_default();
+                        let impacted = br
+                            .as_ref()
+                            .map(|b| b.impacted_tests.clone())
+                            .unwrap_or_default();
                         prompt_text.push_str(&format!(
                             "\n\n### Pre-Computed Context for Target '{}':\n{}\n\n### Impacted Test Targets To Keep Green:\n{:?}\n\n### Refactoring Directives:\n- Targeted Symbol: {}\n- Context Budget: ~{} tokens\n- Downstream Impact: {} test suites",
                             resolved, slice.rendered_slice, impacted, resolved, slice.estimated_tokens, impacted.len()
@@ -1456,7 +1464,9 @@ impl AxiomMcpServer {
                             fixes.extend(self.find_matching_fixes(&ast_hash, act));
                         }
                     }
-                    fixes.dedup_by(|a, b| a.fingerprint == b.fingerprint && a.patch_content == b.patch_content);
+                    fixes.dedup_by(|a, b| {
+                        a.fingerprint == b.fingerprint && a.patch_content == b.patch_content
+                    });
                     report.suggested_fixes = fixes;
                 }
 

@@ -513,7 +513,10 @@ impl AstIndex {
         {
             let mut cons = self.di_consumers.write().unwrap();
             let keys = [clean_type, simple_type];
-            for key in keys.iter().take(if simple_type == clean_type { 1 } else { 2 }) {
+            for key in keys
+                .iter()
+                .take(if simple_type == clean_type { 1 } else { 2 })
+            {
                 let list = cons.entry(key.to_string()).or_default();
                 if !list.iter().any(|c| c == consumer) {
                     list.push(consumer.to_string());
@@ -536,7 +539,10 @@ impl AstIndex {
         let mut results = HashSet::new();
 
         let keys = [service_or_type, simple];
-        for key in keys.iter().take(if simple == service_or_type { 1 } else { 2 }) {
+        for key in keys
+            .iter()
+            .take(if simple == service_or_type { 1 } else { 2 })
+        {
             if let Some(consumers) = cons.get(*key) {
                 for c in consumers {
                     results.insert(c.clone());
@@ -2148,7 +2154,19 @@ impl AstIndex {
             .replace(';', "");
         let tokens: Vec<&str> = clean.split_whitespace().collect();
         for &tok in &tokens {
-            if ["private", "protected", "public", "final", "static", "transient", "volatile", "val", "var"].contains(&tok) {
+            if [
+                "private",
+                "protected",
+                "public",
+                "final",
+                "static",
+                "transient",
+                "volatile",
+                "val",
+                "var",
+            ]
+            .contains(&tok)
+            {
                 continue;
             }
             if tok.starts_with('@') {
@@ -2156,7 +2174,9 @@ impl AstIndex {
             }
             let raw_type = tok.split('<').next().unwrap_or(tok).trim();
             let simple = raw_type.split('.').next_back().unwrap_or(raw_type).trim();
-            if Self::is_valid_identifier(simple) && simple.chars().next().is_some_and(|c| c.is_uppercase()) {
+            if Self::is_valid_identifier(simple)
+                && simple.chars().next().is_some_and(|c| c.is_uppercase())
+            {
                 return Some(simple.to_string());
             }
         }
@@ -2525,15 +2545,16 @@ impl AstIndex {
                     .unwrap_or("")
                     .trim();
 
-                let (enclosing_class, is_managed_component) = match class_stack.last().map(|(c, _, m)| (c.as_str(), *m)) {
-                    Some((class, m)) => (class, m),
-                    // Only Kotlin and Scala reach the fallback: for Java an
-                    // empty owner still means the line was not a method, and
-                    // inventing one would resurrect the symbols this parser used
-                    // to produce from `new Foo(...)` and `catch` clauses.
-                    None if scala_or_kotlin => (file_stem.as_str(), false),
-                    None => ("", false),
-                };
+                let (enclosing_class, is_managed_component) =
+                    match class_stack.last().map(|(c, _, m)| (c.as_str(), *m)) {
+                        Some((class, m)) => (class, m),
+                        // Only Kotlin and Scala reach the fallback: for Java an
+                        // empty owner still means the line was not a method, and
+                        // inventing one would resurrect the symbols this parser used
+                        // to produce from `new Foo(...)` and `catch` clauses.
+                        None if scala_or_kotlin => (file_stem.as_str(), false),
+                        None => ("", false),
+                    };
                 let is_valid_name = Self::is_valid_identifier(method_name)
                     && !Self::is_java_keyword(method_name)
                     && (method_name
@@ -2588,8 +2609,13 @@ impl AstIndex {
                     }
 
                     let is_constructor = method_name == enclosing_class;
-                    if full_sig.contains("@Autowired") || full_sig.contains("@Inject") || (is_constructor && is_managed_component) {
-                        if let Some(params_part) = full_sig.split('(').nth(1).and_then(|s| s.split(')').next()) {
+                    if full_sig.contains("@Autowired")
+                        || full_sig.contains("@Inject")
+                        || (is_constructor && is_managed_component)
+                    {
+                        if let Some(params_part) =
+                            full_sig.split('(').nth(1).and_then(|s| s.split(')').next())
+                        {
                             for param in params_part.split(',') {
                                 if let Some(injected) = Self::extract_di_field_type(param) {
                                     let full_class = if !package.is_empty() {

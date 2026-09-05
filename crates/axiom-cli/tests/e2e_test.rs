@@ -3121,7 +3121,9 @@ async fn test_e2e_mcp_patch_memory_and_fix_cache() -> Result<()> {
     };
     let list_resp = server.handle_request(list_req).await;
     let list_val: Value = serde_json::from_str(
-        list_resp.result.as_ref().unwrap()["contents"][0]["text"].as_str().unwrap()
+        list_resp.result.as_ref().unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
     )?;
     assert_eq!(list_val["count"], 0);
 
@@ -3174,7 +3176,9 @@ async fn test_e2e_mcp_patch_memory_and_fix_cache() -> Result<()> {
     };
     let read_fixes_resp = server.handle_request(read_fixes_req).await;
     let fixes_data: Value = serde_json::from_str(
-        read_fixes_resp.result.as_ref().unwrap()["contents"][0]["text"].as_str().unwrap()
+        read_fixes_resp.result.as_ref().unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
     )?;
     assert_eq!(fixes_data["count"], 1);
 
@@ -3194,7 +3198,9 @@ async fn test_e2e_mcp_patch_memory_and_fix_cache() -> Result<()> {
     };
     let reloaded_resp = reloaded_server.handle_request(reloaded_req).await;
     let reloaded_data: Value = serde_json::from_str(
-        reloaded_resp.result.as_ref().unwrap()["contents"][0]["text"].as_str().unwrap()
+        reloaded_resp.result.as_ref().unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
     )?;
     assert_eq!(reloaded_data["count"], 1);
 
@@ -3223,7 +3229,11 @@ async fn test_e2e_dynamic_subgraph_context_prompts() -> Result<()> {
         .as_array()
         .expect("prompts array");
     assert!(prompts.iter().any(|p| p["name"] == "axiom_review_patch"));
-    assert!(prompts.iter().any(|p| p["name"] == "axiom_targeted_refactor"));
+    assert!(
+        prompts
+            .iter()
+            .any(|p| p["name"] == "axiom_targeted_refactor")
+    );
     assert!(prompts.iter().any(|p| p["name"] == "axiom_attest_task"));
 
     // 2. prompts/get axiom_review_patch
@@ -3296,8 +3306,20 @@ async fn test_e2e_dynamic_subgraph_context_prompts() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_synthetic_di_full_repo_lifecycle() -> Result<()> {
     let temp_root = unique_temp_dir("axiom_e2e_di_repo");
-    let src_pkg = temp_root.join("src").join("main").join("java").join("com").join("example").join("service");
-    let test_pkg = temp_root.join("src").join("test").join("java").join("com").join("example").join("service");
+    let src_pkg = temp_root
+        .join("src")
+        .join("main")
+        .join("java")
+        .join("com")
+        .join("example")
+        .join("service");
+    let test_pkg = temp_root
+        .join("src")
+        .join("test")
+        .join("java")
+        .join("com")
+        .join("example")
+        .join("service");
     std::fs::create_dir_all(&src_pkg)?;
     std::fs::create_dir_all(&test_pkg)?;
 
@@ -3385,7 +3407,9 @@ public class CheckoutServiceTest {
     let radius = extract_tool_result(&blast_resp);
     let tests = radius["impacted_tests"].as_array().expect("impacted tests");
     assert!(
-        tests.iter().any(|t| t.as_str().unwrap_or("").contains("CheckoutServiceTest")),
+        tests
+            .iter()
+            .any(|t| t.as_str().unwrap_or("").contains("CheckoutServiceTest")),
         "StripeBillingGateway must transitively impact CheckoutServiceTest via DI: {:?}",
         tests
     );
@@ -3424,15 +3448,36 @@ public class CheckoutService {
     server.ast_index.scan_directory(&temp_root)?;
 
     // Both dependencies should now be active
-    assert!(server.ast_index.get_di_consumers("BillingGateway").iter().any(|c| c.contains("CheckoutService")));
-    assert!(server.ast_index.get_di_consumers("NotificationClient").iter().any(|c| c.contains("CheckoutService")));
+    assert!(
+        server
+            .ast_index
+            .get_di_consumers("BillingGateway")
+            .iter()
+            .any(|c| c.contains("CheckoutService"))
+    );
+    assert!(
+        server
+            .ast_index
+            .get_di_consumers("NotificationClient")
+            .iter()
+            .any(|c| c.contains("CheckoutService"))
+    );
 
     // Save and load round-trip
     server.ast_index.save_to_disk(&index_file)?;
     let loaded = axiom_ast::AstIndex::load_from_disk(&index_file)?;
-    assert!(loaded.get_di_consumers("BillingGateway").iter().any(|c| c.contains("CheckoutService")));
-    assert!(loaded.get_di_consumers("NotificationClient").iter().any(|c| c.contains("CheckoutService")));
+    assert!(
+        loaded
+            .get_di_consumers("BillingGateway")
+            .iter()
+            .any(|c| c.contains("CheckoutService"))
+    );
+    assert!(
+        loaded
+            .get_di_consumers("NotificationClient")
+            .iter()
+            .any(|c| c.contains("CheckoutService"))
+    );
 
     Ok(())
 }
-

@@ -11,7 +11,8 @@ struct TempWorkspace {
 impl TempWorkspace {
     fn new(tag: &str) -> Self {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("axiom-fc-{}-{}-{}", tag, std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("axiom-fc-{}-{}-{}", tag, std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".axiom")).expect("create .axiom dir");
         Self { path: dir }
@@ -41,9 +42,8 @@ async fn test_verified_fix_cache_attestation_and_retrieval() {
     let list_res = server.handle_request(list_req).await;
     assert!(list_res.error.is_none());
     let list_result = list_res.result.unwrap();
-    let initial_data: serde_json::Value = serde_json::from_str(
-        list_result["contents"][0]["text"].as_str().unwrap()
-    ).unwrap();
+    let initial_data: serde_json::Value =
+        serde_json::from_str(list_result["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(initial_data["count"], 0);
     assert!(initial_data["fixes"].as_object().unwrap().is_empty());
 
@@ -89,9 +89,8 @@ async fn test_verified_fix_cache_attestation_and_retrieval() {
     let attest_result = attest_res.result.unwrap();
     assert_eq!(attest_result["isError"], false);
 
-    let attest_body: serde_json::Value = serde_json::from_str(
-        attest_result["content"][0]["text"].as_str().unwrap()
-    ).unwrap();
+    let attest_body: serde_json::Value =
+        serde_json::from_str(attest_result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert!(attest_body["seal"].is_string());
     assert_eq!(attest_body["symbol_path"], "auth::service::validate_token");
 
@@ -105,9 +104,8 @@ async fn test_verified_fix_cache_attestation_and_retrieval() {
     let read_fixes_res = server.handle_request(read_fixes_req).await;
     assert!(read_fixes_res.error.is_none());
     let read_fixes_result = read_fixes_res.result.unwrap();
-    let fixes_data: serde_json::Value = serde_json::from_str(
-        read_fixes_result["contents"][0]["text"].as_str().unwrap()
-    ).unwrap();
+    let fixes_data: serde_json::Value =
+        serde_json::from_str(read_fixes_result["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(fixes_data["count"], 1);
 
     let fixes_map = fixes_data["fixes"].as_object().unwrap();
@@ -116,7 +114,10 @@ async fn test_verified_fix_cache_attestation_and_retrieval() {
     assert_eq!(candidates_arr.len(), 1);
     assert_eq!(candidates_arr[0]["error_signature"], error_sig);
     assert_eq!(candidates_arr[0]["patch_content"], patch_body);
-    assert_eq!(candidates_arr[0]["symbol_path"], "auth::service::validate_token");
+    assert_eq!(
+        candidates_arr[0]["symbol_path"],
+        "auth::service::validate_token"
+    );
 
     // 5. Query specific fix by fingerprint axiom://fixes/{fingerprint}
     let single_fix_req = JsonRpcRequest {
@@ -128,9 +129,8 @@ async fn test_verified_fix_cache_attestation_and_retrieval() {
     let single_fix_res = server.handle_request(single_fix_req).await;
     assert!(single_fix_res.error.is_none());
     let single_fix_result = single_fix_res.result.unwrap();
-    let fix_obj: serde_json::Value = serde_json::from_str(
-        single_fix_result["contents"][0]["text"].as_str().unwrap()
-    ).unwrap();
+    let fix_obj: serde_json::Value =
+        serde_json::from_str(single_fix_result["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(fix_obj["fingerprint"], *fingerprint);
     let single_candidates = fix_obj["candidates"].as_array().unwrap();
     assert_eq!(single_candidates[0]["fingerprint"], *fingerprint);
@@ -153,9 +153,8 @@ async fn test_verified_fix_cache_attestation_and_retrieval() {
     let reloaded_res = reloaded_server.handle_request(reloaded_req).await;
     assert!(reloaded_res.error.is_none());
     let reloaded_result = reloaded_res.result.unwrap();
-    let reloaded_data: serde_json::Value = serde_json::from_str(
-        reloaded_result["contents"][0]["text"].as_str().unwrap()
-    ).unwrap();
+    let reloaded_data: serde_json::Value =
+        serde_json::from_str(reloaded_result["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(reloaded_data["count"], 1);
     let reloaded_map = reloaded_data["fixes"].as_object().unwrap();
     assert!(reloaded_map.contains_key(fingerprint));
@@ -183,7 +182,9 @@ async fn test_dynamic_context_prompts_expansion() {
     let review_res = server.handle_request(review_req).await;
     assert!(review_res.error.is_none());
     let review_result = review_res.result.unwrap();
-    let text = review_result["messages"][0]["content"]["text"].as_str().unwrap();
+    let text = review_result["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
     assert!(text.contains("Pre-Computed Sub-Graph Context"));
     assert!(text.contains("auth::service::validate_token"));
     assert!(text.contains("Impacted Tests"));
@@ -205,7 +206,9 @@ async fn test_dynamic_context_prompts_expansion() {
     let refactor_res = server.handle_request(refactor_req).await;
     assert!(refactor_res.error.is_none());
     let refactor_result = refactor_res.result.unwrap();
-    let refactor_text = refactor_result["messages"][0]["content"]["text"].as_str().unwrap();
+    let refactor_text = refactor_result["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
     assert!(refactor_text.contains("Migrate to argon2 password hashing"));
     assert!(refactor_text.contains("Pre-Computed Context for Target"));
     assert!(refactor_text.contains("Refactoring Directives"));
@@ -227,7 +230,9 @@ async fn test_dynamic_context_prompts_expansion() {
     let attest_res = server.handle_request(attest_req).await;
     assert!(attest_res.error.is_none());
     let attest_result = attest_res.result.unwrap();
-    let attest_text = attest_result["messages"][0]["content"]["text"].as_str().unwrap();
+    let attest_text = attest_result["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
     assert!(attest_text.contains("Implement secure auth token validation"));
     assert!(attest_text.contains("auth::service::validate_token"));
     assert!(attest_text.contains("Task Attestation Context"));

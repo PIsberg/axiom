@@ -12,7 +12,8 @@ struct TempRepo {
 impl TempRepo {
     fn new(tag: &str) -> Self {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!("axiom-reg-{}-{}-{}", tag, std::process::id(), n));
+        let root =
+            std::env::temp_dir().join(format!("axiom-reg-{}-{}-{}", tag, std::process::id(), n));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create repo dir");
         Self { root }
@@ -93,10 +94,22 @@ public class OrderServiceTest {
 }
 "#;
 
-    repo.write("src/main/java/com/acme/order/OrderRepository.java", repo_interface);
-    repo.write("src/main/java/com/acme/order/JpaOrderRepository.java", repo_impl);
-    repo.write("src/main/java/com/acme/order/OrderService.java", service_code);
-    repo.write("src/test/java/com/acme/order/OrderServiceTest.java", test_code);
+    repo.write(
+        "src/main/java/com/acme/order/OrderRepository.java",
+        repo_interface,
+    );
+    repo.write(
+        "src/main/java/com/acme/order/JpaOrderRepository.java",
+        repo_impl,
+    );
+    repo.write(
+        "src/main/java/com/acme/order/OrderService.java",
+        service_code,
+    );
+    repo.write(
+        "src/test/java/com/acme/order/OrderServiceTest.java",
+        test_code,
+    );
 
     // 2. Initial Indexing and disk persistence
     let axiom_dir = repo.path().join(".axiom");
@@ -115,10 +128,13 @@ public class OrderServiceTest {
         di_consumers
     );
 
-    let br = index.compute_blast_radius("com.acme.order.JpaOrderRepository", 3)
+    let br = index
+        .compute_blast_radius("com.acme.order.JpaOrderRepository", 3)
         .expect("blast radius for JpaOrderRepository");
     assert!(
-        br.impacted_tests.iter().any(|t| t.contains("OrderServiceTest")),
+        br.impacted_tests
+            .iter()
+            .any(|t| t.contains("OrderServiceTest")),
         "Blast radius of JpaOrderRepository must reach OrderServiceTest through interface & DI, got: {:?}",
         br.impacted_tests
     );
@@ -201,16 +217,21 @@ public class OrderServiceTest {
     assert_eq!(attest_content["isError"], false);
 
     // Query axiom://fixes resource
-    let fixes_res = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(5)),
-        method: "resources/read".to_string(),
-        params: Some(json!({ "uri": "axiom://fixes" })),
-    }).await;
+    let fixes_res = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(5)),
+            method: "resources/read".to_string(),
+            params: Some(json!({ "uri": "axiom://fixes" })),
+        })
+        .await;
     assert!(fixes_res.error.is_none());
     let fixes_json: serde_json::Value = serde_json::from_str(
-        fixes_res.result.unwrap()["contents"][0]["text"].as_str().unwrap()
-    ).unwrap();
+        fixes_res.result.unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(fixes_json["count"], 1);
 
     // 0ms patch memory lookup matching error signature
@@ -246,13 +267,23 @@ public interface PaymentGateway {
     void processPayment(double amount);
 }
 "#;
-    repo.write("src/main/java/com/acme/order/OrderService.java", updated_service);
-    repo.write("src/main/java/com/acme/order/PaymentGateway.java", payment_interface);
+    repo.write(
+        "src/main/java/com/acme/order/OrderService.java",
+        updated_service,
+    );
+    repo.write(
+        "src/main/java/com/acme/order/PaymentGateway.java",
+        payment_interface,
+    );
 
     // Incremental scan
     let reloaded_index = axiom_ast::AstIndex::load_from_disk(&index_file).expect("load disk index");
-    reloaded_index.scan_directory(repo.path()).expect("rescan repo");
-    reloaded_index.save_to_disk(&index_file).expect("resave disk index");
+    reloaded_index
+        .scan_directory(repo.path())
+        .expect("rescan repo");
+    reloaded_index
+        .save_to_disk(&index_file)
+        .expect("resave disk index");
 
     // Both OrderRepository and PaymentGateway should now be injected
     let order_consumers = reloaded_index.get_di_consumers("OrderRepository");
@@ -264,20 +295,32 @@ public interface PaymentGateway {
     drop(server);
     let restarted = AxiomMcpServer::with_index(Some(&index_file)).expect("reloaded server");
 
-    let restarted_fixes = restarted.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(6)),
-        method: "resources/read".to_string(),
-        params: Some(json!({ "uri": "axiom://fixes" })),
-    }).await;
+    let restarted_fixes = restarted
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(6)),
+            method: "resources/read".to_string(),
+            params: Some(json!({ "uri": "axiom://fixes" })),
+        })
+        .await;
     assert!(restarted_fixes.error.is_none());
     let restarted_json: serde_json::Value = serde_json::from_str(
-        restarted_fixes.result.unwrap()["contents"][0]["text"].as_str().unwrap()
-    ).unwrap();
+        restarted_fixes.result.unwrap()["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(restarted_json["count"], 1);
 
     // Blast radius across reloaded server
-    let reloaded_br = restarted.ast_index.compute_blast_radius("com.acme.order.PaymentGateway", 3)
+    let reloaded_br = restarted
+        .ast_index
+        .compute_blast_radius("com.acme.order.PaymentGateway", 3)
         .expect("blast radius for PaymentGateway");
-    assert!(reloaded_br.impacted_tests.iter().any(|t| t.contains("OrderServiceTest")));
+    assert!(
+        reloaded_br
+            .impacted_tests
+            .iter()
+            .any(|t| t.contains("OrderServiceTest"))
+    );
 }

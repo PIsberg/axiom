@@ -151,7 +151,9 @@ fn test_git_hook_verify_intact_chain_and_slsa_export() {
         String::from_utf8_lossy(&out_verify.stderr)
     );
     let stdout = String::from_utf8_lossy(&out_verify.stdout);
-    assert!(stdout.contains("Verified 2 cryptographic attestation seal(s) in unbroken ledger chain"));
+    assert!(
+        stdout.contains("Verified 2 cryptographic attestation seal(s) in unbroken ledger chain")
+    );
     assert!(stdout.contains("Exported 2 SLSA provenance statement(s)"));
 
     assert!(slsa_out.exists(), "SLSA provenance file must be created");
@@ -247,7 +249,8 @@ fn test_git_hook_verify_trusted_key_validation() {
         previous_seal: "",
     });
 
-    r1.sign_with("auth::validate", "prompt 1", &priv_hex).unwrap();
+    r1.sign_with("auth::validate", "prompt 1", &priv_hex)
+        .unwrap();
 
     let records = vec![r1];
     let ledger_json = serde_json::to_string_pretty(&records).unwrap();

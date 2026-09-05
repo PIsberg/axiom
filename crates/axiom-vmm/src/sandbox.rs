@@ -31,7 +31,12 @@ pub fn configured_max_processes() -> Option<u32> {
 }
 
 #[cfg(windows)]
-#[allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
+#[allow(
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    clippy::upper_case_acronyms
+)]
 mod win32 {
     use std::ffi::c_void;
 
@@ -115,15 +120,9 @@ mod win32 {
             lpReturnLength: *mut DWORD,
         ) -> BOOL;
 
-        pub fn AssignProcessToJobObject(
-            hJob: HANDLE,
-            hProcess: HANDLE,
-        ) -> BOOL;
+        pub fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> BOOL;
 
-        pub fn TerminateJobObject(
-            hJob: HANDLE,
-            uExitCode: u32,
-        ) -> BOOL;
+        pub fn TerminateJobObject(hJob: HANDLE, uExitCode: u32) -> BOOL;
 
         pub fn CloseHandle(hObject: HANDLE) -> BOOL;
     }
@@ -284,7 +283,7 @@ pub fn configure_command_isolation(command: &mut Command) {
     unsafe {
         command.pre_exec(move || {
             // Set process group leader
-            if libc::setpgid(0, 0) != 0 {
+            if unsafe { libc::setpgid(0, 0) } != 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
@@ -294,7 +293,7 @@ pub fn configure_command_isolation(command: &mut Command) {
                     rlim_cur: mem as libc::rlim_t,
                     rlim_max: mem as libc::rlim_t,
                 };
-                libc::setrlimit(libc::RLIMIT_AS, &rlim);
+                let _ = unsafe { libc::setrlimit(libc::RLIMIT_AS, &rlim) };
             }
 
             // Process count limit
@@ -303,7 +302,7 @@ pub fn configure_command_isolation(command: &mut Command) {
                     rlim_cur: procs as libc::rlim_t,
                     rlim_max: procs as libc::rlim_t,
                 };
-                libc::setrlimit(libc::RLIMIT_NPROC, &rlim);
+                let _ = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
             }
 
             // Disable core dumps
@@ -311,7 +310,7 @@ pub fn configure_command_isolation(command: &mut Command) {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            libc::setrlimit(libc::RLIMIT_CORE, &rlim_core);
+            let _ = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &rlim_core) };
 
             Ok(())
         });
