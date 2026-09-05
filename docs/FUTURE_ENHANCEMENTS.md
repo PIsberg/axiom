@@ -4,21 +4,24 @@ This document captures the strategic and architectural roadmap for extending Axi
 
 ---
 
-## 1. Merkle Ledger Patch Memory & Verified Fix Cache
+## 1. Merkle Ledger Patch Memory & Verified Fix Cache [Implemented]
+- **Status**: Completed in PR #72 (`crates/axiom-core/src/mcp.rs`, `crates/axiom-proto/src/lib.rs`).
 - **Concept**: AST-hash indexed historical patch memory linking error signatures directly to successful provenance-attested mutations.
-- **Mechanism**:
-  - Hash AST sub-trees before and after verified mutations.
-  - When an agent encounters a compiler or test failure in `axiom_eval_patch` or `axiom_run_tests`, compute a diagnostic fingerprint (error code + AST symbol hash).
-  - Query CAS for previous attested mutations matching this fingerprint.
-  - Deliver instant 0ms suggested patch candidates to the agent, enabling instant automated self-healing.
+- **Mechanism & Capabilities**:
+  - `axiom_proto::compute_diagnostic_fingerprint` generates BLAKE3 hashes of `symbol_ast_hash:error_signature`.
+  - Attesting commits (`axiom_attest_commit`) with `error_signature` and `patch_content` records verified fix candidates into `.axiom/fix_cache.json`.
+  - When compiler or test failures occur in `axiom_eval_patch`, matching fix candidates are retrieved with 0ms overhead and returned in `CtopReport.suggested_fixes`.
+  - Exposes MCP resources `axiom://fixes` and `axiom://fixes/{fingerprint}` for direct agent discovery and retrieval.
 
 ---
 
-## 2. Dynamic Agent Sub-Graph Context Prompts
+## 2. Dynamic Agent Sub-Graph Context Prompts [Implemented]
+- **Status**: Completed in PR #72 (`crates/axiom-core/src/mcp.rs`).
 - **Concept**: Automated prompt template expansion with pre-computed topological context.
-- **Mechanism**:
-  - Extend MCP prompt handlers (`axiom_review_patch`, `axiom_targeted_refactor`, `axiom_attest_task`) to automatically resolve and embed adaptive token slices and causal call-paths directly into prompt messages.
-  - Eliminates multi-turn context discovery cycles for autonomous agent swarms by delivering complete, pruned sub-graph context in the initial turn.
+- **Mechanism & Capabilities**:
+  - Dynamically resolves symbol candidates in MCP prompt handlers (`axiom_review_patch`, `axiom_targeted_refactor`, `axiom_attest_task`).
+  - Pre-computes and embeds adaptive token slices, blast-radius impacted test suites, and topological causal propagation paths directly into the initial turn user message.
+  - Eliminates context-gathering round trips for autonomous agents and swarms.
 
 ---
 
@@ -31,21 +34,26 @@ This document captures the strategic and architectural roadmap for extending Axi
 
 ---
 
-## 4. Synthetic Dependency Graph Ingestion (DI & Reflection)
+## 4. Synthetic Dependency Graph Ingestion (DI & Reflection) [Implemented]
+- **Status**: Completed in PR #72 (`crates/axiom-ast/src/lib.rs`).
 - **Concept**: Bridge the gap between static AST references and runtime dependency injection / reflection.
-- **Mechanism**:
-  - Detect DI annotations (`@Inject`, `@Autowired`, `@Component`, `@Provides`, `@Bean`, Guice `bind()`, Dagger modules, Spring contexts).
-  - Synthesize virtual AST dependency edges between interface definitions, injection sites, and concrete implementations.
-  - Blast-radius calculations accurately trace through injected services and dynamic dispatch that static AST callgraphs miss.
+- **Mechanism & Capabilities**:
+  - Automatically detects DI annotations (`@Inject`, `@Autowired`, `@Resource`, `@Component`, `@Service`, constructor parameters) in Java/JVM parsing.
+  - Registers consumer-to-provider virtual dependency bindings in `AstIndex` (`di_consumers` and `di_providers`), persisted in `index.json`.
+  - `compute_blast_radius` traverses synthetic DI consumer edges and implementor hierarchies, identifying downstream consumers and their test suites in `impacted_tests` and `causal_paths`.
 
 ---
 
-## 5. MicroVM & Snapshot-Isolated Sandbox Execution (Tier 3)
-- **Concept**: Sub-50ms snapshot-isolated virtualization for arbitrary multi-language code execution.
-- **Mechanism**:
-  - Integrate Firecracker or gVisor microVMs with Copy-on-Write memory snapshots.
-  - Allows full execution of arbitrary binaries, network mocks, and database integration tests in complete isolation from host environment secrets, keys, and disk state.
-  - Sub-second restore time from warm snapshot states.
+## 5. MicroVM & Snapshot-Isolated Sandbox Execution [Kernel Isolation Implemented]
+- **Status**: Windows Job Objects and Unix rlimit process isolation implemented in PR #73 (`crates/axiom-vmm/src/sandbox.rs`, `crates/axiom-vmm/src/native.rs`).
+- **Concept**: Kernel-enforced execution containment preventing runaway resource exhaustion, process leaks, and secret exfiltration.
+- **Mechanism & Capabilities**:
+  - Windows Job Object sandbox (`SandboxGuard`) with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION`, and memory/process ceilings.
+  - Guarantees termination of entire child + grandchild process trees on timeout or unexpected exit.
+  - Real peak memory accounting returned in `CtopReport.memory_allocated_bytes`.
+  - Unix process group leadership (`setpgid`), address space memory limits (`RLIMIT_AS`), process limits (`RLIMIT_NPROC`), and negative-PID group termination.
+  - Complete environment secret confinement (`is_refused_secret`) eliminating risk of signing key, AWS token, or credential leakage to untrusted agent snippets.
+  - Future roadmap: Firecracker/gVisor microVMs with Copy-on-Write memory snapshots for full network and disk virtualization.
 
 ---
 
@@ -55,3 +63,17 @@ This document captures the strategic and architectural roadmap for extending Axi
   - S3 / GCS / HTTP CAS backend for pre-compiled sandbox artifacts and attested verification seals.
   - CRDT vector clock synchronization across geographically distributed CI runners and local developer agent instances.
   - Cross-agent collaboration with verifiable provenance and zero merge conflicts across arbitrary branch boundaries.
+
+---
+
+## 7. CI / GitHub Action Provenance Gate & Git Verification [Implemented]
+- **Status**: Completed in PR #73 (`.github/actions/axiom-gate/action.yml`, `.github/workflows/axiom-gate.yml`, `crates/axiom-cli/src/main.rs`).
+- **Concept**: Native CI/CD provenance gate enforcing unbroken Merkle ledger chains, valid cryptographic seals, required Ed25519 signer anchors, and in-toto/SLSA v1.0 provenance compliance.
+- **Mechanism & Capabilities**:
+  - Reusable composite GitHub Action (`.github/actions/axiom-gate/action.yml`) verifying repository provenance before merges.
+  - Automated workflow (`.github/workflows/axiom-gate.yml`) testing on Ubuntu and Windows.
+  - CLI gate flags on `axiom git-hook --verify`:
+    - `--strict`: Fails if the attestation ledger is empty or untrusted.
+    - `--trusted-key <KEY>`: Validates that all ledger attestations are signed by the specified Ed25519 public key.
+    - `--slsa <PATH>`: Exports and validates in-toto / SLSA v1.0 provenance statements during the gate verification.
+

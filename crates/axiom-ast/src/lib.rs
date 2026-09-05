@@ -321,6 +321,10 @@ struct PersistedIndex {
     type_hierarchy: HashMap<String, Vec<String>>,
     #[serde(default)]
     interface_implementors: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    di_consumers: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    di_providers: HashMap<String, Vec<String>>,
 }
 
 /// Merkle AST Content-Addressable Store (CAS), Symbol Graph & Zoekt Trigram Index
@@ -344,6 +348,10 @@ pub struct AstIndex {
     type_hierarchy: RwLock<HashMap<String, Vec<String>>>,
     /// Interface & superclass implementors (parent type -> implementing child types)
     interface_implementors: RwLock<HashMap<String, Vec<String>>>,
+    /// Synthetic DI bindings: injected type/interface -> consumers (classes/methods that inject it)
+    di_consumers: RwLock<HashMap<String, Vec<String>>>,
+    /// Synthetic DI providers: consumer -> injected types/services
+    di_providers: RwLock<HashMap<String, Vec<String>>>,
     /// Symbols and files this process has deliberately forgotten since it loaded.
     ///
     /// Saving has to merge rather than overwrite, or a scan running beside
@@ -420,6 +428,8 @@ impl AstIndex {
             file_to_symbols: RwLock::new(HashMap::new()),
             type_hierarchy: RwLock::new(HashMap::new()),
             interface_implementors: RwLock::new(HashMap::new()),
+            di_consumers: RwLock::new(HashMap::new()),
+            di_providers: RwLock::new(HashMap::new()),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             scan_root: RwLock::new(None),
@@ -490,6 +500,56 @@ impl AstIndex {
             }
         }
         results.into_iter().collect()
+    }
+
+    /// Register a synthetic DI dependency: `consumer` injects `injected_type`
+    pub fn register_di_binding(&self, consumer: &str, injected_type: &str) {
+        let clean_type = injected_type.trim();
+        if clean_type.is_empty() {
+            return;
+        }
+        let simple_type = Self::simple_name_of(clean_type);
+
+        {
+            let mut cons = self.di_consumers.write().unwrap();
+            let keys = [clean_type, simple_type];
+            for key in keys.iter().take(if simple_type == clean_type { 1 } else { 2 }) {
+                let list = cons.entry(key.to_string()).or_default();
+                if !list.iter().any(|c| c == consumer) {
+                    list.push(consumer.to_string());
+                }
+            }
+        }
+        {
+            let mut prov = self.di_providers.write().unwrap();
+            let list = prov.entry(consumer.to_string()).or_default();
+            if !list.iter().any(|t| t == clean_type) {
+                list.push(clean_type.to_string());
+            }
+        }
+    }
+
+    /// Look up all consumer symbols that inject a given service or interface.
+    pub fn get_di_consumers(&self, service_or_type: &str) -> Vec<String> {
+        let cons = self.di_consumers.read().unwrap();
+        let simple = Self::simple_name_of(service_or_type);
+        let mut results = HashSet::new();
+
+        let keys = [service_or_type, simple];
+        for key in keys.iter().take(if simple == service_or_type { 1 } else { 2 }) {
+            if let Some(consumers) = cons.get(*key) {
+                for c in consumers {
+                    results.insert(c.clone());
+                }
+            }
+        }
+        results.into_iter().collect()
+    }
+
+    /// Look up all injected services/types required by a given consumer.
+    pub fn get_di_providers(&self, consumer: &str) -> Vec<String> {
+        let prov = self.di_providers.read().unwrap();
+        prov.get(consumer).cloned().unwrap_or_default()
     }
 
     /// Return all distinct file extensions present in the indexed workspace.
@@ -1102,6 +1162,26 @@ impl AstIndex {
                             queue.push_back((impl_cls, depth + 1, next_path));
                         }
                     }
+
+                    // Synthetic Dependency Graph Ingestion (DI & Reflection):
+                    // 1. If key is an injected service or interface, traverse all consuming components
+                    for di_consumer in self.get_di_consumers(key) {
+                        if visited.insert(di_consumer.clone()) {
+                            let mut next_path = path.clone();
+                            next_path.push(di_consumer.clone());
+                            queue.push_back((di_consumer, depth + 1, next_path));
+                        }
+                    }
+                    // 2. If key implements interfaces/superclasses, traverse consumers of those interfaces
+                    for parent in self.get_supertypes(key) {
+                        for di_consumer in self.get_di_consumers(&parent) {
+                            if visited.insert(di_consumer.clone()) {
+                                let mut next_path = path.clone();
+                                next_path.push(di_consumer.clone());
+                                queue.push_back((di_consumer, depth + 1, next_path));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1490,6 +1570,16 @@ impl AstIndex {
                     }
                     impls.remove(&symbol);
                     impls.remove(&simple);
+
+                    let mut di_c = self.di_consumers.write().unwrap();
+                    let mut di_p = self.di_providers.write().unwrap();
+                    di_p.remove(&symbol);
+                    di_p.remove(&simple);
+                    for consumers in di_c.values_mut() {
+                        consumers.retain(|c| c != &symbol && c != &simple);
+                    }
+                    di_c.remove(&symbol);
+                    di_c.remove(&simple);
                 }
             }
         }
@@ -2050,6 +2140,29 @@ impl AstIndex {
         }
     }
 
+    fn extract_di_field_type(line: &str) -> Option<String> {
+        let clean = line
+            .replace("@Inject", "")
+            .replace("@Autowired", "")
+            .replace("@Resource", "")
+            .replace(';', "");
+        let tokens: Vec<&str> = clean.split_whitespace().collect();
+        for &tok in &tokens {
+            if ["private", "protected", "public", "final", "static", "transient", "volatile", "val", "var"].contains(&tok) {
+                continue;
+            }
+            if tok.starts_with('@') {
+                continue;
+            }
+            let raw_type = tok.split('<').next().unwrap_or(tok).trim();
+            let simple = raw_type.split('.').next_back().unwrap_or(raw_type).trim();
+            if Self::is_valid_identifier(simple) && simple.chars().next().is_some_and(|c| c.is_uppercase()) {
+                return Some(simple.to_string());
+            }
+        }
+        None
+    }
+
     fn parse_java_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let is_test_file = Self::is_test_path_or_file(file_path);
 
@@ -2094,7 +2207,7 @@ impl AstIndex {
             &["class", "interface", "enum", "record"]
         };
         let mut imports = Vec::new();
-        let mut class_stack: Vec<(String, usize)> = Vec::new(); // (class_name, open_brace_depth)
+        let mut class_stack: Vec<(String, usize, bool)> = Vec::new(); // (class_name, open_brace_depth, is_managed_component)
         let mut current_brace_depth: usize = 0;
 
         // Extract package first
@@ -2151,6 +2264,7 @@ impl AstIndex {
         let structure_text = Self::strip_comments_and_strings(content, true);
         let structure: Vec<&str> = structure_text.lines().collect();
         let mut i = 0;
+        let mut pending_di_annotation = false;
 
         while i < lines.len() {
             let line = lines[i];
@@ -2164,6 +2278,33 @@ impl AstIndex {
             {
                 i += 1;
                 continue;
+            }
+
+            let is_di_annotation = trimmed == "@Inject"
+                || trimmed == "@Autowired"
+                || trimmed == "@Resource"
+                || trimmed.starts_with("@Inject ")
+                || trimmed.starts_with("@Inject(")
+                || trimmed.starts_with("@Autowired ")
+                || trimmed.starts_with("@Autowired(")
+                || trimmed.starts_with("@Resource ")
+                || trimmed.starts_with("@Resource(");
+
+            if is_di_annotation || pending_di_annotation {
+                if let Some((class_name, _, _)) = class_stack.last() {
+                    let full_class = if package.is_empty() {
+                        class_name.to_string()
+                    } else {
+                        format!("{}.{}", package, class_name)
+                    };
+                    if let Some(injected_type) = Self::extract_di_field_type(trimmed) {
+                        self.register_di_binding(&full_class, &injected_type);
+                        self.register_di_binding(class_name, &injected_type);
+                        pending_di_annotation = false;
+                    } else if is_di_annotation {
+                        pending_di_annotation = true;
+                    }
+                }
             }
 
             if trimmed.starts_with("import ") {
@@ -2205,7 +2346,28 @@ impl AstIndex {
                         if Self::is_valid_identifier(class_name) {
                             let open_c = trimmed.chars().filter(|&c| c == '{').count();
                             let decl_depth = current_brace_depth + open_c.max(1);
-                            class_stack.push((class_name.to_string(), decl_depth));
+                            let mut is_managed = false;
+                            let mut p_idx = i;
+                            while p_idx > 0 {
+                                p_idx -= 1;
+                                let p = lines[p_idx].trim();
+                                if p.starts_with('@') {
+                                    if p.starts_with("@Component")
+                                        || p.starts_with("@Service")
+                                        || p.starts_with("@Repository")
+                                        || p.starts_with("@Controller")
+                                        || p.starts_with("@RestController")
+                                        || p.starts_with("@Configuration")
+                                        || p.starts_with("@Bean")
+                                    {
+                                        is_managed = true;
+                                        break;
+                                    }
+                                } else if !p.is_empty() {
+                                    break;
+                                }
+                            }
+                            class_stack.push((class_name.to_string(), decl_depth, is_managed));
 
                             let full_symbol = if package.is_empty() {
                                 class_name.to_string()
@@ -2363,14 +2525,14 @@ impl AstIndex {
                     .unwrap_or("")
                     .trim();
 
-                let enclosing_class = match class_stack.last().map(|(c, _)| c.as_str()) {
-                    Some(class) => class,
+                let (enclosing_class, is_managed_component) = match class_stack.last().map(|(c, _, m)| (c.as_str(), *m)) {
+                    Some((class, m)) => (class, m),
                     // Only Kotlin and Scala reach the fallback: for Java an
                     // empty owner still means the line was not a method, and
                     // inventing one would resurrect the symbols this parser used
                     // to produce from `new Foo(...)` and `catch` clauses.
-                    None if scala_or_kotlin => file_stem.as_str(),
-                    None => "",
+                    None if scala_or_kotlin => (file_stem.as_str(), false),
+                    None => ("", false),
                 };
                 let is_valid_name = Self::is_valid_identifier(method_name)
                     && !Self::is_java_keyword(method_name)
@@ -2425,6 +2587,23 @@ impl AstIndex {
                         }
                     }
 
+                    let is_constructor = method_name == enclosing_class;
+                    if full_sig.contains("@Autowired") || full_sig.contains("@Inject") || (is_constructor && is_managed_component) {
+                        if let Some(params_part) = full_sig.split('(').nth(1).and_then(|s| s.split(')').next()) {
+                            for param in params_part.split(',') {
+                                if let Some(injected) = Self::extract_di_field_type(param) {
+                                    let full_class = if !package.is_empty() {
+                                        format!("{}.{}", package, enclosing_class)
+                                    } else {
+                                        enclosing_class.to_string()
+                                    };
+                                    self.register_di_binding(&full_class, &injected);
+                                    self.register_di_binding(enclosing_class, &injected);
+                                }
+                            }
+                        }
+                    }
+
                     self.index_node_at(
                         &full_symbol,
                         kind,
@@ -2454,7 +2633,7 @@ impl AstIndex {
             current_brace_depth += open_count;
             current_brace_depth = current_brace_depth.saturating_sub(close_count);
 
-            while let Some((_, depth)) = class_stack.last() {
+            while let Some((_, depth, _)) = class_stack.last() {
                 if current_brace_depth < *depth {
                     class_stack.pop();
                 } else {
@@ -3537,6 +3716,8 @@ impl AstIndex {
                     file_to_symbols: HashMap::new(),
                     type_hierarchy: HashMap::new(),
                     interface_implementors: HashMap::new(),
+                    di_consumers: HashMap::new(),
+                    di_providers: HashMap::new(),
                 })
             }
         }
@@ -3579,6 +3760,8 @@ impl AstIndex {
                 file_to_symbols: HashMap::new(),
                 type_hierarchy: HashMap::new(),
                 interface_implementors: HashMap::new(),
+                di_consumers: HashMap::new(),
+                di_providers: HashMap::new(),
             },
         };
 
@@ -3618,6 +3801,8 @@ impl AstIndex {
             file_to_symbols: HashMap::new(),
             type_hierarchy: HashMap::new(),
             interface_implementors: HashMap::new(),
+            di_consumers: HashMap::new(),
+            di_providers: HashMap::new(),
         });
 
         for symbol in self.forgotten_symbols.read().unwrap().iter() {
@@ -3645,6 +3830,12 @@ impl AstIndex {
         payload
             .interface_implementors
             .extend(self.interface_implementors.read().unwrap().clone());
+        payload
+            .di_consumers
+            .extend(self.di_consumers.read().unwrap().clone());
+        payload
+            .di_providers
+            .extend(self.di_providers.read().unwrap().clone());
 
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -3755,6 +3946,8 @@ impl AstIndex {
             file_to_symbols: RwLock::new(payload.file_to_symbols),
             type_hierarchy: RwLock::new(payload.type_hierarchy),
             interface_implementors: RwLock::new(interface_implementors),
+            di_consumers: RwLock::new(payload.di_consumers),
+            di_providers: RwLock::new(payload.di_providers),
             forgotten_symbols: RwLock::new(HashSet::new()),
             forgotten_files: RwLock::new(HashSet::new()),
             scan_root: RwLock::new(scan_root),

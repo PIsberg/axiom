@@ -612,7 +612,33 @@ const PASSED_PREFIXES: &[&str] = &[
 ];
 
 /// Never passed, whatever `AXIOM_EVAL_ENV_PASS` says.
-const REFUSED_NAMES: &[&str] = &["AXIOM_SIGNING_KEY", "AXIOM_SIGNING_KEY_FILE"];
+const REFUSED_NAMES: &[&str] = &[
+    "AXIOM_SIGNING_KEY",
+    "AXIOM_SIGNING_KEY_FILE",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITLAB_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+];
+
+pub fn is_refused_secret(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if REFUSED_NAMES.contains(&upper.as_str()) {
+        return true;
+    }
+    if upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PRIVATE_KEY")
+        || upper.contains("SIGNING_KEY")
+    {
+        return !PASSED_NAMES.contains(&upper.as_str());
+    }
+    false
+}
 
 /// Give `command` an environment a snippet may see.
 ///
@@ -645,7 +671,7 @@ pub fn confine_environment(command: &mut Command) -> &mut Command {
     command.env_clear();
     for (name, value) in std::env::vars_os() {
         let upper = name.to_string_lossy().to_ascii_uppercase();
-        if REFUSED_NAMES.contains(&upper.as_str()) {
+        if is_refused_secret(&upper) {
             continue;
         }
         let passed = PASSED_NAMES.contains(&upper.as_str())
@@ -670,6 +696,8 @@ pub struct Finished {
     /// `stderr` may be missing a tail. Something the snippet started was
     /// still holding them.
     pub drained: bool,
+    /// Peak memory consumed by the sandboxed process tree in bytes, if measured.
+    pub peak_memory_bytes: Option<u64>,
 }
 
 impl Finished {
@@ -779,6 +807,9 @@ fn kill_tree(child: &mut std::process::Child) {
 /// The environment is confined here too, so no caller can forget it.
 pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result<Finished> {
     confine_environment(&mut command);
+    crate::sandbox::prepare_command(&mut command);
+
+    let mut sandbox = crate::sandbox::SandboxGuard::new();
 
     #[cfg(unix)]
     {
@@ -792,6 +823,10 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
         .stderr(Stdio::piped())
         .spawn()?;
 
+    if let Some(sb) = sandbox.as_mut() {
+        let _ = sb.assign_child(&child);
+    }
+
     // Each pipe is drained on its own thread. Reading them after the wait
     // deadlocks as soon as a snippet writes more than one pipe buffer holds.
     let out_rx = drain_in_background(child.stdout.take());
@@ -804,6 +839,9 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
             Some(status) => break Some(status),
             None => {
                 if Instant::now() >= deadline {
+                    if let Some(sb) = sandbox.as_ref() {
+                        sb.terminate();
+                    }
                     kill_tree(&mut child);
                     timed_out = true;
                     break None;
@@ -812,6 +850,8 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
             }
         }
     };
+
+    let peak_memory_bytes = sandbox.as_ref().and_then(|sb| sb.peak_memory_bytes());
 
     // After the child exits its pipes close at once in the ordinary case. A
     // process it started and left behind can hold them open, and that process
@@ -833,6 +873,7 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
         stderr: String::from_utf8_lossy(&err).to_string(),
         timed_out,
         drained: out_done && err_done,
+        peak_memory_bytes,
     })
 }
 
@@ -1051,6 +1092,7 @@ fn unavailable(
         memory_allocated_bytes: None,
         compile_cache: None,
         diagnostics: Vec::new(),
+        suggested_fixes: Vec::new(),
     }
 }
 
@@ -1061,6 +1103,7 @@ fn timed_out_report(
     duration_ms: f64,
     program: &str,
     timeout: Duration,
+    peak_memory_bytes: Option<u64>,
 ) -> CtopReport {
     CtopReport {
         task_id,
@@ -1088,9 +1131,10 @@ fn timed_out_report(
         passed_checks_basis: String::new(),
         stdout: String::new(),
         stderr: format!("timed out after {}s", timeout.as_secs()),
-        memory_allocated_bytes: None,
+        memory_allocated_bytes: peak_memory_bytes,
         compile_cache: None,
         diagnostics: Vec::new(),
+        suggested_fixes: Vec::new(),
     }
 }
 
@@ -1271,9 +1315,10 @@ fn compilation_error(
         passed_checks_basis: String::new(),
         stdout: done.stdout,
         stderr: detail,
-        memory_allocated_bytes: None,
+        memory_allocated_bytes: done.peak_memory_bytes,
         compile_cache: None,
         diagnostics: diags,
+        suggested_fixes: Vec::new(),
     }
 }
 
@@ -1475,6 +1520,7 @@ pub fn evaluate(
                         elapsed,
                         &program,
                         timeout,
+                        done.peak_memory_bytes,
                     );
                 }
                 Ok(done) if !done.succeeded() => {
@@ -1557,6 +1603,7 @@ pub fn evaluate(
             duration,
             &program,
             timeout,
+            done.peak_memory_bytes,
         );
         report.compile_cache = compile_cache;
         return report;
@@ -1580,6 +1627,7 @@ pub fn evaluate(
         );
         report.stdout = done.stdout;
         report.stderr = done.stderr;
+        report.memory_allocated_bytes = done.peak_memory_bytes;
         report.compile_cache = compile_cache;
         return report;
     }
@@ -1627,6 +1675,7 @@ pub fn evaluate(
         detail,
     );
     report.diagnostics = diags;
+    report.memory_allocated_bytes = done.peak_memory_bytes;
     report.compile_cache = compile_cache;
     report
 }

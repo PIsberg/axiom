@@ -3101,3 +3101,338 @@ fn verify_chain_or_report(stored: &[axiom_proto::ProvenanceAttestation]) {
         );
     }
 }
+
+#[tokio::test]
+async fn test_e2e_mcp_patch_memory_and_fix_cache() -> Result<()> {
+    let temp_root = unique_temp_dir("axiom_e2e_fix_cache");
+    let axiom_dir = temp_root.join(".axiom");
+    std::fs::create_dir_all(&axiom_dir)?;
+    let index_file = axiom_dir.join("index.json");
+
+    let server = Arc::new(AxiomMcpServer::with_index(Some(&index_file))?);
+    server.seed_demo_workspace();
+
+    // 1. Initially verify axiom://fixes is empty
+    let list_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "resources/read".into(),
+        params: Some(json!({ "uri": "axiom://fixes" })),
+    };
+    let list_resp = server.handle_request(list_req).await;
+    let list_val: Value = serde_json::from_str(
+        list_resp.result.as_ref().unwrap()["contents"][0]["text"].as_str().unwrap()
+    )?;
+    assert_eq!(list_val["count"], 0);
+
+    // 2. Record verification for a task
+    let record_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_record_verification",
+            "arguments": {
+                "task_id": "task_fix_42",
+                "command": "cargo test --test auth_tests",
+                "passed": true
+            }
+        })),
+    };
+    let record_resp = server.handle_request(record_req).await;
+    assert!(record_resp.error.is_none());
+
+    // 3. Attest commit with error_signature and patch_content to register in patch memory
+    let err_sig = "AuthTokenExpired: token timestamp is stale";
+    let patch = "if (token.is_expired()) return false;";
+    let attest_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(3)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_attest_commit",
+            "arguments": {
+                "prompt": "Fix expired token handling",
+                "symbol_path": "auth::service::validate_token",
+                "ctop_task_id": "task_fix_42",
+                "error_signature": err_sig,
+                "patch_content": patch
+            }
+        })),
+    };
+    let attest_resp = server.handle_request(attest_req).await;
+    assert!(attest_resp.error.is_none());
+    let attest_val = extract_tool_result(&attest_resp);
+    assert!(attest_val["seal"].is_string());
+
+    // 4. Query axiom://fixes resource - 1 fix recorded
+    let read_fixes_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(4)),
+        method: "resources/read".into(),
+        params: Some(json!({ "uri": "axiom://fixes" })),
+    };
+    let read_fixes_resp = server.handle_request(read_fixes_req).await;
+    let fixes_data: Value = serde_json::from_str(
+        read_fixes_resp.result.as_ref().unwrap()["contents"][0]["text"].as_str().unwrap()
+    )?;
+    assert_eq!(fixes_data["count"], 1);
+
+    // 5. Test 0ms patch memory lookup matching error signature
+    let matching = server.find_matching_fixes("any_hash", err_sig);
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].patch_content, patch);
+
+    // 6. Test persistence across server restart from disk
+    drop(server);
+    let reloaded_server = Arc::new(AxiomMcpServer::with_index(Some(&index_file))?);
+    let reloaded_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(5)),
+        method: "resources/read".into(),
+        params: Some(json!({ "uri": "axiom://fixes" })),
+    };
+    let reloaded_resp = reloaded_server.handle_request(reloaded_req).await;
+    let reloaded_data: Value = serde_json::from_str(
+        reloaded_resp.result.as_ref().unwrap()["contents"][0]["text"].as_str().unwrap()
+    )?;
+    assert_eq!(reloaded_data["count"], 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_e2e_dynamic_subgraph_context_prompts() -> Result<()> {
+    let temp_root = unique_temp_dir("axiom_e2e_prompts");
+    let axiom_dir = temp_root.join(".axiom");
+    std::fs::create_dir_all(&axiom_dir)?;
+    let index_file = axiom_dir.join("index.json");
+
+    let server = Arc::new(AxiomMcpServer::with_index(Some(&index_file))?);
+    server.seed_demo_workspace();
+
+    // 1. prompts/list advertises all 3 prompts
+    let list_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "prompts/list".into(),
+        params: None,
+    };
+    let list_resp = server.handle_request(list_req).await;
+    let prompts = list_resp.result.as_ref().unwrap()["prompts"]
+        .as_array()
+        .expect("prompts array");
+    assert!(prompts.iter().any(|p| p["name"] == "axiom_review_patch"));
+    assert!(prompts.iter().any(|p| p["name"] == "axiom_targeted_refactor"));
+    assert!(prompts.iter().any(|p| p["name"] == "axiom_attest_task"));
+
+    // 2. prompts/get axiom_review_patch
+    let review_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(2)),
+        method: "prompts/get".into(),
+        params: Some(json!({
+            "name": "axiom_review_patch",
+            "arguments": {
+                "symbol_path": "validate_token"
+            }
+        })),
+    };
+    let review_resp = server.handle_request(review_req).await;
+    let review_text = review_resp.result.as_ref().unwrap()["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(review_text.contains("auth::service::validate_token"));
+    assert!(review_text.contains("Pre-Computed Sub-Graph Context"));
+    assert!(review_text.contains("Impacted Tests"));
+    assert!(review_text.contains("Causal Propagation Paths"));
+
+    // 3. prompts/get axiom_targeted_refactor
+    let refactor_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(3)),
+        method: "prompts/get".into(),
+        params: Some(json!({
+            "name": "axiom_targeted_refactor",
+            "arguments": {
+                "target_symbol": "validate_token",
+                "goal": "Migrate token claims to Ed25519"
+            }
+        })),
+    };
+    let refactor_resp = server.handle_request(refactor_req).await;
+    let refactor_text = refactor_resp.result.as_ref().unwrap()["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(refactor_text.contains("Migrate token claims to Ed25519"));
+    assert!(refactor_text.contains("Pre-Computed Context for Target"));
+    assert!(refactor_text.contains("Refactoring Directives"));
+
+    // 4. prompts/get axiom_attest_task
+    let attest_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(4)),
+        method: "prompts/get".into(),
+        params: Some(json!({
+            "name": "axiom_attest_task",
+            "arguments": {
+                "prompt": "Secure JWT signing key",
+                "symbol_path": "validate_token"
+            }
+        })),
+    };
+    let attest_resp = server.handle_request(attest_req).await;
+    let attest_text = attest_resp.result.as_ref().unwrap()["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(attest_text.contains("Secure JWT signing key"));
+    assert!(attest_text.contains("auth::service::validate_token"));
+    assert!(attest_text.contains("Task Attestation Context"));
+    assert!(attest_text.contains("Merkle Commit Root"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_e2e_synthetic_di_full_repo_lifecycle() -> Result<()> {
+    let temp_root = unique_temp_dir("axiom_e2e_di_repo");
+    let src_pkg = temp_root.join("src").join("main").join("java").join("com").join("example").join("service");
+    let test_pkg = temp_root.join("src").join("test").join("java").join("com").join("example").join("service");
+    std::fs::create_dir_all(&src_pkg)?;
+    std::fs::create_dir_all(&test_pkg)?;
+
+    let repo_interface = r#"
+package com.example.service;
+
+public interface BillingGateway {
+    void charge(double amount);
+}
+"#;
+
+    let repo_impl = r#"
+package com.example.service;
+import org.springframework.stereotype.Component;
+
+@Component
+public class StripeBillingGateway implements BillingGateway {
+    public void charge(double amount) {}
+}
+"#;
+
+    let service_code = r#"
+package com.example.service;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+@Service
+public class CheckoutService {
+    @Autowired
+    private BillingGateway billingGateway;
+
+    public void checkout(double amount) {
+        billingGateway.charge(amount);
+    }
+}
+"#;
+
+    let test_code = r#"
+package com.example.service;
+import org.junit.Test;
+
+public class CheckoutServiceTest {
+    @Test
+    public void testCheckout() {
+        BillingGateway gw = new StripeBillingGateway();
+        CheckoutService svc = new CheckoutService();
+        svc.checkout(199.99);
+    }
+}
+"#;
+
+    std::fs::write(src_pkg.join("BillingGateway.java"), repo_interface)?;
+    std::fs::write(src_pkg.join("StripeBillingGateway.java"), repo_impl)?;
+    std::fs::write(src_pkg.join("CheckoutService.java"), service_code)?;
+    std::fs::write(test_pkg.join("CheckoutServiceTest.java"), test_code)?;
+
+    let axiom_dir = temp_root.join(".axiom");
+    std::fs::create_dir_all(&axiom_dir)?;
+    let index_file = axiom_dir.join("index.json");
+
+    let server = Arc::new(AxiomMcpServer::with_index(Some(&index_file))?);
+    server.ast_index.scan_directory(&temp_root)?;
+
+    // Verify DI bindings detected
+    let consumers = server.ast_index.get_di_consumers("BillingGateway");
+    assert!(
+        consumers.iter().any(|c| c.contains("CheckoutService")),
+        "CheckoutService must be recorded as DI consumer of BillingGateway"
+    );
+
+    // Blast radius over MCP tool
+    let blast_req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(1)),
+        method: "tools/call".into(),
+        params: Some(json!({
+            "name": "axiom_get_blast_radius",
+            "arguments": {
+                "symbol_path": "com.example.service.StripeBillingGateway",
+                "max_depth": 3
+            }
+        })),
+    };
+    let blast_resp = server.handle_request(blast_req).await;
+    let radius = extract_tool_result(&blast_resp);
+    let tests = radius["impacted_tests"].as_array().expect("impacted tests");
+    assert!(
+        tests.iter().any(|t| t.as_str().unwrap_or("").contains("CheckoutServiceTest")),
+        "StripeBillingGateway must transitively impact CheckoutServiceTest via DI: {:?}",
+        tests
+    );
+
+    // Test incremental rescan with new injected dependency
+    let notif_interface = r#"
+package com.example.service;
+
+public interface NotificationClient {
+    void notifyUser(String msg);
+}
+"#;
+    let updated_checkout = r#"
+package com.example.service;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+@Service
+public class CheckoutService {
+    @Autowired
+    private BillingGateway billingGateway;
+
+    @Autowired
+    private NotificationClient notificationClient;
+
+    public void checkout(double amount) {
+        billingGateway.charge(amount);
+        notificationClient.notifyUser("Charged: " + amount);
+    }
+}
+"#;
+    std::fs::write(src_pkg.join("NotificationClient.java"), notif_interface)?;
+    std::fs::write(src_pkg.join("CheckoutService.java"), updated_checkout)?;
+
+    // Rescan directory
+    server.ast_index.scan_directory(&temp_root)?;
+
+    // Both dependencies should now be active
+    assert!(server.ast_index.get_di_consumers("BillingGateway").iter().any(|c| c.contains("CheckoutService")));
+    assert!(server.ast_index.get_di_consumers("NotificationClient").iter().any(|c| c.contains("CheckoutService")));
+
+    // Save and load round-trip
+    server.ast_index.save_to_disk(&index_file)?;
+    let loaded = axiom_ast::AstIndex::load_from_disk(&index_file)?;
+    assert!(loaded.get_di_consumers("BillingGateway").iter().any(|c| c.contains("CheckoutService")));
+    assert!(loaded.get_di_consumers("NotificationClient").iter().any(|c| c.contains("CheckoutService")));
+
+    Ok(())
+}
+

@@ -455,6 +455,8 @@ pub struct AxiomMcpServer {
     pub verifications: Arc<RwLock<HashMap<String, Verification>>>,
     /// In-memory speculative mutation overlay.
     pub staged_mutations: Arc<RwLock<HashMap<String, StagedMutation>>>,
+    /// Historical patch memory linking diagnostic fingerprints to verified fixes.
+    pub verified_fix_cache: Arc<RwLock<HashMap<String, Vec<axiom_proto::VerifiedFixCandidate>>>>,
     pub ast_index: Arc<AstIndex>,
     pub wasi_engine: Arc<WasiEngine>,
     pub tree_crdt: Arc<TreeCrdt>,
@@ -484,6 +486,82 @@ impl AxiomMcpServer {
     /// The index this server persists a mutated symbol into.
     pub fn index_path(&self) -> PathBuf {
         self.axiom_dir.join("index.json")
+    }
+
+    /// The path to the persisted verified fix cache.
+    pub fn fix_cache_path(&self) -> PathBuf {
+        self.axiom_dir.join("fix_cache.json")
+    }
+
+    /// Resolve a symbol candidate (exact match or single unambiguous prefix match)
+    pub fn resolve_symbol_candidate(&self, symbol: &str) -> Option<String> {
+        if let Some(node) = self.ast_index.get_symbol(symbol) {
+            return Some(node.symbol_path);
+        }
+        let candidates = self.ast_index.candidates_for(symbol);
+        if candidates.len() == 1 {
+            return Some(candidates[0].clone());
+        }
+        None
+    }
+
+    /// Record an attested mutation as a verified fix candidate in patch memory.
+    pub fn record_verified_fix(&self, mut fix: axiom_proto::VerifiedFixCandidate) -> Result<()> {
+        if fix.fingerprint.is_empty() {
+            fix.fingerprint = axiom_proto::compute_diagnostic_fingerprint(
+                if !fix.parent_ast_hash.is_empty() {
+                    &fix.parent_ast_hash
+                } else {
+                    &fix.commit_ast_hash
+                },
+                &fix.error_signature,
+            );
+        }
+        if fix.timestamp.is_empty() {
+            fix.timestamp = chrono::Utc::now().to_rfc3339();
+        }
+        let fp = fix.fingerprint.clone();
+        {
+            let mut cache = self.verified_fix_cache.write().unwrap();
+            cache.entry(fp).or_default().push(fix.clone());
+        }
+
+        // Persist to fix_cache.json
+        let cache_path = self.fix_cache_path();
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let cache_data = self.verified_fix_cache.read().unwrap();
+        if let Ok(json) = serde_json::to_string_pretty(&*cache_data) {
+            let _ = std::fs::write(&cache_path, json);
+        }
+        Ok(())
+    }
+
+    /// Find matching verified fixes from patch memory.
+    pub fn find_matching_fixes(
+        &self,
+        symbol_ast_hash: &str,
+        error_sig: &str,
+    ) -> Vec<axiom_proto::VerifiedFixCandidate> {
+        let cache = self.verified_fix_cache.read().unwrap();
+        let mut results = Vec::new();
+        let target_fp = axiom_proto::compute_diagnostic_fingerprint(symbol_ast_hash, error_sig);
+        if let Some(list) = cache.get(&target_fp) {
+            results.extend(list.clone());
+        }
+        if results.is_empty() {
+            for list in cache.values() {
+                for candidate in list {
+                    if candidate.error_signature == error_sig
+                        || error_sig.contains(&candidate.error_signature)
+                    {
+                        results.push(candidate.clone());
+                    }
+                }
+            }
+        }
+        results
     }
 }
 
@@ -556,9 +634,21 @@ impl AxiomMcpServer {
             axiom_vmm::daemon::DaemonPool::global().warmup(&lang_refs);
         }
 
+        let fix_cache_file = axiom_dir.join("fix_cache.json");
+        let initial_fixes: HashMap<String, Vec<axiom_proto::VerifiedFixCandidate>> =
+            if fix_cache_file.exists() {
+                std::fs::read_to_string(&fix_cache_file)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+
         Ok(Self {
             verifications: Arc::new(RwLock::new(HashMap::new())),
             staged_mutations: Arc::new(RwLock::new(HashMap::new())),
+            verified_fix_cache: Arc::new(RwLock::new(initial_fixes)),
             ast_index,
             wasi_engine,
             tree_crdt,
@@ -651,6 +741,12 @@ impl AxiomMcpServer {
                             "name": "Axiom Attestation Ledger",
                             "description": "Cryptographic provenance attestation ledger",
                             "mimeType": "application/json"
+                        },
+                        {
+                            "uri": "axiom://fixes",
+                            "name": "Axiom Verified Fix Cache",
+                            "description": "Historical AST patch memory linking error signatures to verified mutations",
+                            "mimeType": "application/json"
                         }
                     ],
                     "resourceTemplates": [
@@ -670,6 +766,12 @@ impl AxiomMcpServer {
                             "uriTemplate": "axiom://slice/{symbol_path}",
                             "name": "Adaptive Context Slice",
                             "description": "Token-budgeted context slice (declaration, docstring, callers, callees) for an AST symbol",
+                            "mimeType": "application/json"
+                        },
+                        {
+                            "uriTemplate": "axiom://fixes/{fingerprint}",
+                            "name": "Verified Fix Candidate",
+                            "description": "Historical verified patch candidate matching diagnostic fingerprint",
                             "mimeType": "application/json"
                         }
                     ]
@@ -853,7 +955,9 @@ impl AxiomMcpServer {
                                     "prompt": { "type": "string" },
                                     "symbol_path": { "type": "string" },
                                     "ctop_task_id": { "type": "string" },
-                                    "agent_identity": { "type": "string", "description": "What to record as the author. Self-declared: axiom stores what you send and does not check it. It is covered by the seal, so it cannot be edited afterwards, and by the signature when a key is configured, which is what ties it to an issuer. Omit it and the record reads 'unattributed' rather than naming an agent nothing established. Printable single-line text, at most 128 characters." }
+                                    "agent_identity": { "type": "string", "description": "What to record as the author. Self-declared: axiom stores what you send and does not check it. It is covered by the seal, so it cannot be edited afterwards, and by the signature when a key is configured, which is what ties it to an issuer. Omit it and the record reads 'unattributed' rather than naming an agent nothing established. Printable single-line text, at most 128 characters." },
+                                    "error_signature": { "type": "string", "description": "Optional error signature this attested mutation resolves, recording it into patch memory" },
+                                    "patch_content": { "type": "string", "description": "Optional code patch content associated with the verified fix" }
                                 },
                                 "required": ["prompt", "symbol_path", "ctop_task_id"]
                             }
@@ -1057,6 +1161,26 @@ impl AxiomMcpServer {
             ));
         }
 
+        if uri == "axiom://fixes" {
+            let cache = self.verified_fix_cache.read().unwrap();
+            let count: usize = cache.values().map(|v| v.len()).sum();
+            return Ok(json!({
+                "count": count,
+                "fixes": *cache
+            }));
+        }
+
+        if let Some(fp) = uri.strip_prefix("axiom://fixes/") {
+            let cache = self.verified_fix_cache.read().unwrap();
+            if let Some(candidates) = cache.get(fp) {
+                return Ok(json!({
+                    "fingerprint": fp,
+                    "candidates": candidates
+                }));
+            }
+            return Err(format!("Fingerprint '{fp}' not found in verified fix cache"));
+        }
+
         Err(format!("Resource URI '{uri}' is not supported"))
     }
 
@@ -1067,6 +1191,35 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let mut prompt_text = format!(
+                    "Please review changes affecting symbol '{}'. Query its AST signature and blast radius to verify impacted tests and sandbox safety before attesting.",
+                    symbol_path
+                );
+                if let Some(resolved) = self.resolve_symbol_candidate(symbol_path) {
+                    if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
+                        let br = self.ast_index.compute_blast_radius(&resolved, 2);
+                        let impacted_tests = br.as_ref().map(|b| b.impacted_tests.clone()).unwrap_or_default();
+                        let causal_lines: Vec<String> = br
+                            .as_ref()
+                            .map(|b| {
+                                b.causal_paths
+                                    .iter()
+                                    .take(5)
+                                    .map(|(t, p)| format!("- {} -> {}", t, p.join(" -> ")))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let causal_summary = if causal_lines.is_empty() {
+                            "None detected".to_string()
+                        } else {
+                            causal_lines.join("\n")
+                        };
+                        prompt_text.push_str(&format!(
+                            "\n\n### Pre-Computed Sub-Graph Context for '{}':\n{}\n\n### Impacted Tests ({}):\n{:?}\n\n### Causal Propagation Paths:\n{}",
+                            resolved, slice.rendered_slice, impacted_tests.len(), impacted_tests, causal_summary
+                        ));
+                    }
+                }
                 Ok(json!({
                     "description": "Review a proposed code patch against AST blast radius and security rules",
                     "messages": [
@@ -1074,10 +1227,7 @@ impl AxiomMcpServer {
                             "role": "user",
                             "content": {
                                 "type": "text",
-                                "text": format!(
-                                    "Please review changes affecting symbol '{}'. Query its AST signature and blast radius to verify impacted tests and sandbox safety before attesting.",
-                                    symbol_path
-                                )
+                                "text": prompt_text
                             }
                         }
                     ]
@@ -1090,6 +1240,20 @@ impl AxiomMcpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let goal = args.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+                let mut prompt_text = format!(
+                    "Refactor symbol '{}' to accomplish: {}.\nStep 1: axiom_query_symbol\nStep 2: axiom_get_blast_radius\nStep 3: axiom_apply_mutation\nStep 4: axiom_eval_patch / axiom_run_tests\nStep 5: axiom_attest_commit",
+                    target_symbol, goal
+                );
+                if let Some(resolved) = self.resolve_symbol_candidate(target_symbol) {
+                    if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
+                        let br = self.ast_index.compute_blast_radius(&resolved, 2);
+                        let impacted = br.as_ref().map(|b| b.impacted_tests.clone()).unwrap_or_default();
+                        prompt_text.push_str(&format!(
+                            "\n\n### Pre-Computed Context for Target '{}':\n{}\n\n### Impacted Test Targets To Keep Green:\n{:?}\n\n### Refactoring Directives:\n- Targeted Symbol: {}\n- Context Budget: ~{} tokens\n- Downstream Impact: {} test suites",
+                            resolved, slice.rendered_slice, impacted, resolved, slice.estimated_tokens, impacted.len()
+                        ));
+                    }
+                }
                 Ok(json!({
                     "description": "Safely refactor a code symbol using blast radius test selection and atomic mutations",
                     "messages": [
@@ -1097,10 +1261,7 @@ impl AxiomMcpServer {
                             "role": "user",
                             "content": {
                                 "type": "text",
-                                "text": format!(
-                                    "Refactor symbol '{}' to accomplish: {}.\nStep 1: axiom_query_symbol\nStep 2: axiom_get_blast_radius\nStep 3: axiom_apply_mutation\nStep 4: axiom_eval_patch / axiom_run_tests\nStep 5: axiom_attest_commit",
-                                    target_symbol, goal
-                                )
+                                "text": prompt_text
                             }
                         }
                     ]
@@ -1113,6 +1274,19 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let mut prompt_text = format!(
+                    "Attest task completion for prompt '{}' on symbol '{}'. Ensure execution verification passes.",
+                    prompt, symbol_path
+                );
+                if let Some(resolved) = self.resolve_symbol_candidate(symbol_path) {
+                    if let Some(node) = self.ast_index.get_symbol(&resolved) {
+                        let root = self.ast_index.compute_merkle_root();
+                        prompt_text.push_str(&format!(
+                            "\n\n### Task Attestation Context:\n- Symbol: {} [{}]\n- Current AST Hash: {}\n- Merkle Commit Root: {}\n- Next: Supply passing ctop_task_id from axiom_eval_patch or axiom_run_tests to axiom_attest_commit.",
+                            resolved, node.kind, node.hash, root
+                        ));
+                    }
+                }
                 Ok(json!({
                     "description": "Attest a task completion with cryptographic Merkle proof",
                     "messages": [
@@ -1120,10 +1294,7 @@ impl AxiomMcpServer {
                             "role": "user",
                             "content": {
                                 "type": "text",
-                                "text": format!(
-                                    "Attest task completion for prompt '{}' on symbol '{}'. Ensure execution verification passes.",
-                                    prompt, symbol_path
-                                )
+                                "text": prompt_text
                             }
                         }
                     ]
@@ -1264,10 +1435,30 @@ impl AxiomMcpServer {
                     }
                 }
 
-                let report = self
+                let mut report = self
                     .wasi_engine
                     .execute_eval_in(symbol, snippet, language.as_deref())
                     .await?;
+
+                if !matches!(report.status, CtopStatus::Passed) {
+                    let ast_hash = self
+                        .ast_index
+                        .get_symbol(symbol)
+                        .map(|n| n.hash)
+                        .unwrap_or_default();
+                    let mut fixes = Vec::new();
+                    for diag in &report.diagnostics {
+                        fixes.extend(self.find_matching_fixes(&ast_hash, &diag.message));
+                    }
+                    for failed in &report.failed_checks {
+                        fixes.extend(self.find_matching_fixes(&ast_hash, &failed.error_type));
+                        if let Some(act) = &failed.actual {
+                            fixes.extend(self.find_matching_fixes(&ast_hash, act));
+                        }
+                    }
+                    fixes.dedup_by(|a, b| a.fingerprint == b.fingerprint && a.patch_content == b.patch_content);
+                    report.suggested_fixes = fixes;
+                }
 
                 // Record the outcome so an attestation can be checked against a
                 // run that genuinely happened, rather than against a task id the
@@ -1382,6 +1573,23 @@ impl AxiomMcpServer {
                     return Ok(json!({
                         "error": format!("could not record the attestation: {e}")
                     }));
+                }
+
+                let error_signature = args.get("error_signature").and_then(|v| v.as_str());
+                let patch_content = args.get("patch_content").and_then(|v| v.as_str());
+                if let Some(err_sig) = error_signature {
+                    let patch = patch_content.unwrap_or("");
+                    let _ = self.record_verified_fix(axiom_proto::VerifiedFixCandidate {
+                        fingerprint: String::new(),
+                        symbol_path: symbol.to_string(),
+                        error_signature: err_sig.to_string(),
+                        patch_content: patch.to_string(),
+                        parent_ast_hash: root.clone(),
+                        commit_ast_hash: code_root.clone(),
+                        attestation_seal: attestation.seal.clone(),
+                        verified_by: verification.kind.clone(),
+                        timestamp: attestation.timestamp.clone(),
+                    });
                 }
 
                 Ok(json!(attestation))

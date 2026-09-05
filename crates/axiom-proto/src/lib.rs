@@ -80,6 +80,8 @@ pub struct CtopReport {
     pub compile_cache: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<DiagnosticSpan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_fixes: Vec<VerifiedFixCandidate>,
 }
 
 /// The basis for a count of assertion tokens, see `CtopReport::passed_checks_basis`.
@@ -418,6 +420,7 @@ impl CtopReport {
             memory_allocated_bytes: None,
             compile_cache: None,
             diagnostics: Vec::new(),
+            suggested_fixes: Vec::new(),
         }
     }
 
@@ -443,6 +446,7 @@ impl CtopReport {
             memory_allocated_bytes: None,
             compile_cache: None,
             diagnostics: Vec::new(),
+            suggested_fixes: Vec::new(),
         }
     }
 }
@@ -627,4 +631,33 @@ pub fn verify_chain(records: &[ProvenanceAttestation]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Verified mutation fix candidate from Merkle ledger patch memory
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VerifiedFixCandidate {
+    pub fingerprint: String,
+    pub symbol_path: String,
+    pub error_signature: String,
+    pub patch_content: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent_ast_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub commit_ast_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attestation_seal: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verified_by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub timestamp: String,
+}
+
+/// Compute a deterministic diagnostic fingerprint for AST patch memory
+pub fn compute_diagnostic_fingerprint(symbol_ast_hash: &str, error_sig: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"axiom_fix_v1:");
+    hasher.update(symbol_ast_hash.trim().as_bytes());
+    hasher.update(b":");
+    hasher.update(error_sig.trim().as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
