@@ -283,7 +283,7 @@ pub fn configure_command_isolation(command: &mut Command) {
     unsafe {
         command.pre_exec(move || {
             // Set process group leader
-            if unsafe { libc::setpgid(0, 0) } != 0 {
+            if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
@@ -293,7 +293,7 @@ pub fn configure_command_isolation(command: &mut Command) {
                     rlim_cur: mem as libc::rlim_t,
                     rlim_max: mem as libc::rlim_t,
                 };
-                let _ = unsafe { libc::setrlimit(libc::RLIMIT_AS, &rlim) };
+                let _ = libc::setrlimit(libc::RLIMIT_AS, &rlim);
             }
 
             // Process count limit
@@ -302,7 +302,7 @@ pub fn configure_command_isolation(command: &mut Command) {
                     rlim_cur: procs as libc::rlim_t,
                     rlim_max: procs as libc::rlim_t,
                 };
-                let _ = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &rlim) };
+                let _ = libc::setrlimit(libc::RLIMIT_NPROC, &rlim);
             }
 
             // Disable core dumps
@@ -310,7 +310,7 @@ pub fn configure_command_isolation(command: &mut Command) {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            let _ = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &rlim_core) };
+            let _ = libc::setrlimit(libc::RLIMIT_CORE, &rlim_core);
 
             Ok(())
         });
