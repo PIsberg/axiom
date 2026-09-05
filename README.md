@@ -341,7 +341,7 @@ for the other.
 | `axiom watch --path <DIR>` | Polls a cheap fingerprint of the tree and re-scans the tree when it changes |
 | `axiom git-export` | Writes `.axiom/export.md` summarising the index and Merkle root |
 | `axiom export-slsa [--symbol <SYM>] [--out <PATH>]` | Exports cryptographic provenance ledger attestations as in-toto / SLSA v1.0 statement JSON |
-| `axiom git-hook [--install] [--verify]` | Installs or executes Git pre-commit cryptographic attestation provenance verification |
+| `axiom git-hook [--install] [--verify] [--strict] [--trusted-key K] [--slsa FILE]` | Installs or executes Git and CI cryptographic attestation provenance verification |
 | `axiom dashboard` | Prints a one-shot snapshot of the workspace: symbol counts by kind, index file size, CRDT node count, Merkle root, provenance record count |
 
 ---

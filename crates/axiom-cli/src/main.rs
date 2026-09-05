@@ -140,7 +140,7 @@ enum Commands {
         #[arg(short, long)]
         out: Option<String>,
     },
-    /// Manage Git pre-commit provenance verification hooks
+    /// Manage Git and CI cryptographic attestation provenance verification gates
     GitHook {
         /// Install git pre-commit hook in .git/hooks/pre-commit
         #[arg(long)]
@@ -148,6 +148,15 @@ enum Commands {
         /// Verify that staged changes have valid cryptographic attestation seals
         #[arg(long)]
         verify: bool,
+        /// Enforce strict mode: fail if the ledger is empty or any seal is invalid
+        #[arg(long)]
+        strict: bool,
+        /// Public key, or a file holding one, that the records must be signed by
+        #[arg(long)]
+        trusted_key: Option<String>,
+        /// Export verified SLSA v1.0 provenance statements to specified file
+        #[arg(long)]
+        slsa: Option<String>,
     },
 }
 
@@ -281,6 +290,18 @@ async fn main() -> Result<()> {
                 }
                 if let Some(h) = f["hint"].as_str() {
                     println!("    hint     {h}");
+                }
+            }
+
+            if let Some(fixes) = report["suggested_fixes"].as_array() {
+                if !fixes.is_empty() {
+                    println!();
+                    println!("  suggested fixes from patch memory ({}):", fixes.len());
+                    for fix in fixes {
+                        if let Some(p) = fix["patch_content"].as_str() {
+                            println!("    -> {}", p.trim());
+                        }
+                    }
                 }
             }
 
@@ -1475,7 +1496,13 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::GitHook { install, verify } => {
+        Commands::GitHook {
+            install,
+            verify,
+            strict,
+            trusted_key,
+            slsa,
+        } => {
             if install {
                 let git_hooks_dir = std::path::Path::new(".git").join("hooks");
                 if !git_hooks_dir.exists() {
@@ -1513,6 +1540,13 @@ async fn main() -> Result<()> {
                     }
                 };
                 if records.is_empty() {
+                    if strict {
+                        eprintln!(
+                            "❌ Strict verification failed: attestation ledger at {} is empty.",
+                            ledger_path.display()
+                        );
+                        std::process::exit(1);
+                    }
                     eprintln!(
                         "Warning: Attestation ledger at {} is empty.",
                         ledger_path.display()
@@ -1522,12 +1556,58 @@ async fn main() -> Result<()> {
                         eprintln!("❌ Attestation ledger chain verification failed: {}", e);
                         std::process::exit(1);
                     }
+
+                    let expected_key = trusted_key.as_ref().map(|k| {
+                        std::fs::read_to_string(k)
+                            .map(|c| c.trim().to_string())
+                            .unwrap_or_else(|_| k.trim().to_string())
+                    });
+
+                    if let Some(want_key) = &expected_key {
+                        for (idx, r) in records.iter().enumerate() {
+                            if r.signature.is_empty() {
+                                eprintln!(
+                                    "❌ Record {} ('{}') is unsigned; trusted key required.",
+                                    idx, r.symbol_path
+                                );
+                                std::process::exit(1);
+                            }
+                            if &r.public_key != want_key {
+                                eprintln!(
+                                    "❌ Record {} ('{}') signer mismatch: expected {}, got {}.",
+                                    idx,
+                                    r.symbol_path,
+                                    axiom_proto::signing::fingerprint(want_key),
+                                    axiom_proto::signing::fingerprint(&r.public_key)
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                        println!(
+                            "Verified signatures of {} record(s) against trusted key {}.",
+                            records.len(),
+                            axiom_proto::signing::fingerprint(want_key)
+                        );
+                    }
+
                     println!(
                         "Verified {} cryptographic attestation seal(s) in unbroken ledger chain.",
                         records.len()
                     );
+
+                    if let Some(out_path) = &slsa {
+                        let statements: Vec<_> =
+                            records.iter().map(|r| r.to_slsa_statement()).collect();
+                        let json = serde_json::to_string_pretty(&statements)?;
+                        std::fs::write(out_path, json)?;
+                        println!(
+                            "Exported {} SLSA provenance statement(s) to {}",
+                            statements.len(),
+                            out_path
+                        );
+                    }
                 }
-                println!("Git pre-commit verification passed.");
+                println!("Git / CI provenance verification passed.");
             }
         }
     }

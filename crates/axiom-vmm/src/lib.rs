@@ -12,6 +12,7 @@ use wasmtime_wasi::p1::{self as preview1, WasiP1Ctx};
 pub mod artifact_cache;
 pub mod daemon;
 pub mod native;
+pub mod sandbox;
 
 pub use native::parse_compiler_diagnostics;
 
@@ -162,6 +163,7 @@ fn unavailable_rustc(
         memory_allocated_bytes: None,
         compile_cache: None,
         diagnostics: Vec::new(),
+        suggested_fixes: Vec::new(),
     }
 }
 
@@ -202,6 +204,7 @@ impl SandboxEngine for WasiEngine {
                     memory_allocated_bytes: None,
                     compile_cache: None,
                     diagnostics: Vec::new(),
+                    suggested_fixes: Vec::new(),
                 });
             }
         };
@@ -382,6 +385,7 @@ impl SandboxEngine for WasiEngine {
                         memory_allocated_bytes: None,
                         compile_cache: None,
                         diagnostics: Vec::new(),
+                        suggested_fixes: Vec::new(),
                     });
                 }
             }
@@ -420,7 +424,9 @@ impl SandboxEngine for WasiEngine {
                             )),
                             stack_trace_ast_nodes: vec![symbol_path.to_string()],
                             hint: Some(
-                                "Run this symbol's own test suite instead and report the outcome                                  with axiom_record_verification; axiom_get_blast_radius will name                                  the tests to run."
+                                "Run this symbol's own test suite instead and report the outcome \
+                                 with axiom_record_verification; axiom_get_blast_radius will name \
+                                 the tests to run."
                                     .to_string(),
                             ),
                             diagnostics: Vec::new(),
@@ -432,6 +438,7 @@ impl SandboxEngine for WasiEngine {
                         memory_allocated_bytes: None,
                         compile_cache: None,
                         diagnostics: Vec::new(),
+                        suggested_fixes: Vec::new(),
                     },
                 });
             }
@@ -611,6 +618,7 @@ fn main() {{
                     memory_allocated_bytes: None,
                     compile_cache,
                     diagnostics: diags,
+                    suggested_fixes: Vec::new(),
                 });
             }
             // Built by the exact rustc the key names, from exactly this
@@ -658,6 +666,7 @@ fn main() {{
             );
             report.stdout = r_out.stdout;
             report.stderr = r_out.stderr;
+            report.memory_allocated_bytes = r_out.peak_memory_bytes;
             report.compile_cache = compile_cache;
             return Ok(report);
         }
@@ -682,6 +691,7 @@ fn main() {{
             r_out.stdout,
             stderr,
         );
+        report.memory_allocated_bytes = r_out.peak_memory_bytes;
         report.compile_cache = compile_cache;
         Ok(report)
     }
@@ -726,8 +736,9 @@ fn rustc_timeout(
         passed_checks_basis: String::new(),
         stdout: done.stdout,
         stderr: done.stderr,
-        memory_allocated_bytes: None,
+        memory_allocated_bytes: done.peak_memory_bytes,
         compile_cache: None,
         diagnostics: Vec::new(),
+        suggested_fixes: Vec::new(),
     }
 }

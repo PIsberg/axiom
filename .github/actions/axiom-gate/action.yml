@@ -1,0 +1,61 @@
+name: "Axiom Provenance Gate"
+description: "Verify Merkle chain integrity, attestation seals, prompt bindings, and SLSA provenance in CI"
+inputs:
+  trusted-key:
+    description: "Public key (hex) or file path holding Ed25519 public key that all attestations must be signed by"
+    required: false
+  strict:
+    description: "Fail if the attestation ledger is empty or any record has invalid seals"
+    required: false
+    default: "true"
+  slsa:
+    description: "Output path for verified SLSA v1.0 provenance statements"
+    required: false
+    default: ".axiom/slsa-provenance.json"
+  axiom-binary:
+    description: "Path to the axiom binary (defaults to checking PATH or target/release/axiom)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve Axiom Binary
+      id: resolve-axiom
+      shell: bash
+      run: |
+        BIN="${{ inputs.axiom-binary }}"
+        if [ -n "$BIN" ] && [ -f "$BIN" ]; then
+          echo "axiom_bin=$BIN" >> "$GITHUB_OUTPUT"
+        elif command -v axiom >/dev/null 2>&1; then
+          echo "axiom_bin=$(command -v axiom)" >> "$GITHUB_OUTPUT"
+        elif [ -f "./target/release/axiom" ]; then
+          echo "axiom_bin=./target/release/axiom" >> "$GITHUB_OUTPUT"
+        elif [ -f "./target/release/axiom.exe" ]; then
+          echo "axiom_bin=./target/release/axiom.exe" >> "$GITHUB_OUTPUT"
+        else
+          echo "Axiom binary not found. Building with cargo..."
+          cargo build --release --bin axiom
+          if [ -f "./target/release/axiom" ]; then
+            echo "axiom_bin=./target/release/axiom" >> "$GITHUB_OUTPUT"
+          else
+            echo "axiom_bin=./target/release/axiom.exe" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+
+    - name: Run Cryptographic Provenance Gate
+      shell: bash
+      run: |
+        AXIOM="${{ steps.resolve-axiom.outputs.axiom_bin }}"
+        ARGS="git-hook --verify"
+        if [ "${{ inputs.strict }}" = "true" ]; then
+          ARGS="$ARGS --strict"
+        fi
+        if [ -n "${{ inputs.trusted-key }}" ]; then
+          ARGS="$ARGS --trusted-key ${{ inputs.trusted-key }}"
+        fi
+        if [ -n "${{ inputs.slsa }}" ]; then
+          ARGS="$ARGS --slsa ${{ inputs.slsa }}"
+        fi
+        echo "Executing: $AXIOM $ARGS"
+        $AXIOM $ARGS
