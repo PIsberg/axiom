@@ -119,6 +119,18 @@ Scala would carry a flag that does nothing; one copied the other way would lose 
 decides whether a false assertion reports `PASSED`. Ask the question per language and answer it by
 running it.
 
+**C and C++ share the trap in a third spelling: `NDEBUG`.** C's `assert` is compiled out entirely
+when `NDEBUG` is defined, so a false assertion becomes a no-op and the snippet exits zero.
+Measured 2026-09-11 with gcc 14 on Windows: by default `assert(1 + 1 == 3)` aborted with a
+non-zero status, and with `-DNDEBUG` it printed the line after the assertion and exited 0. The
+recipes pass `-UNDEBUG`, and a later `-U` beats an earlier `-D`, so the assertion stays live even
+if a flag arrives from elsewhere.
+
+MSVC's `cl` is deliberately not a recipe. It reads `INCLUDE` and `LIB`, which `confine_environment`
+strips, so it would read as a broken toolchain rather than a missing one. `cc`, `gcc` and `clang`
+need nothing outside the existing allowlist: verified 2026-09-11 by compiling and running with only
+PATH, PATHEXT, SYSTEMROOT, TEMP and TMP set.
+
 **A Rust snippet without `fn main` is wrapped in one**, with a `validate_token` helper injected.
 
 **A TypeScript snippet cannot assume Node's type declarations.** A `node:assert` import runs under

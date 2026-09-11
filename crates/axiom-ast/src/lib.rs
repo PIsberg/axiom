@@ -2055,7 +2055,7 @@ impl AstIndex {
         )
     }
 
-    fn strip_comments_and_strings(content: &str, single_quotes_are_strings: bool) -> String {
+    pub fn strip_comments_and_strings(content: &str, single_quotes_are_strings: bool) -> String {
         let mut result = String::with_capacity(content.len());
         let chars: Vec<char> = content.chars().collect();
         let mut i = 0;

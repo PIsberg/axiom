@@ -90,8 +90,9 @@ agent sees through `axiom_get_blast_radius`.
 - 3 resources: `axiom://symbols`, `axiom://ledger`, `axiom://fixes`.
 
 **Languages.** `parse_by_language` in axiom-ast indexes Java (shared with Kotlin and Scala), Rust,
-Python, TypeScript/JavaScript, Go, and C/C++. `LANGUAGES` in axiom-vmm decides what can be
-evaluated. `scip_ingest.rs` is the precise alternative to the line parsers, reading a SCIP index
+Python, TypeScript/JavaScript, Go, and C/C++, dispatching through `AstIndex::PARSERS`. `LANGUAGES`
+in axiom-vmm decides what can be evaluated, and every indexed language now has a recipe except
+Rust, which belongs to tier 1. `scip_ingest.rs` is the precise alternative to the line parsers, reading a SCIP index
 produced by a language's own indexer.
 
 ## The ideas the whole thing rests on
@@ -112,8 +113,10 @@ that touches one.
    this repository that survived reads the code: `declared_tools_are_dispatched.rs` calls
    `tools/list`, `docs_name_every_tool.rs` compares the docs against it,
    `readme_lists_every_subcommand.rs` reads clap, `every_language_has_a_toolchain...` iterates
-   `native::languages()`, `every_indexed_language_has_an_evaluator` reads `AstIndex::indexed_extensions`. A guard
-   that copies the list it guards drifts silently and stays green.
+   `native::languages()`, `every_indexed_language_has_an_evaluator` reads
+   `AstIndex::indexed_extensions`, and `docs_quote_the_real_numbers.rs` counts the suite rather
+   than trusting the README's count of it. A guard that copies the list it guards drifts silently
+   and stays green.
    → `axiom-core/CLAUDE.md`, `axiom-vmm/CLAUDE.md`
 
 4. **Agreement between two readings of one graph is not evidence about the code.** `cache-audit`

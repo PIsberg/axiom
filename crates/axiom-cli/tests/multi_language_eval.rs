@@ -90,6 +90,27 @@ fn polyglot_workspace() -> Result<(AxiomMcpServer, PathBuf)> {
         "def isOpen(depth):\n    return depth > 0\n",
     )?;
     std::fs::write(
+        root.join("gate.c"),
+        "#include <stdio.h>
+
+int cIsOpen(int depth) {
+    return depth > 0;
+}
+",
+    )?;
+    std::fs::write(
+        root.join("gate.cpp"),
+        "#include <string>
+
+class CppGate {
+public:
+    bool isOpen(int depth) {
+        return depth > 0;
+    }
+};
+",
+    )?;
+    std::fs::write(
         root.join("Gate.java"),
         "public class Gate {\n    public boolean isOpen(int depth) {\n        return depth > 0;\n    }\n}\n",
     )?;
@@ -263,22 +284,10 @@ async fn a_javascript_symbol_is_evaluated_by_node() -> Result<()> {
 /// An entry here is a promise that `axiom_eval_patch` answers a symbol from such
 /// a file with `EvaluatorUnavailable`, a refusal rather than a wrong verdict, and
 /// that somebody decided so on purpose.
-const NOT_RUN_BY_TIER_2: &[(&str, &str)] = &[
-    (
-        "rs",
-        "Rust belongs to tier 1; a recipe here would race the rustc path",
-    ),
-    (
-        "c",
-        "no C recipe yet: a compiler needs INCLUDE and LIB, which confine_environment \
-         strips, and neither CI runner is known to have one reachable under confinement",
-    ),
-    ("cpp", "as c"),
-    ("cc", "as c"),
-    ("cxx", "as c"),
-    ("h", "as c"),
-    ("hpp", "as c"),
-];
+const NOT_RUN_BY_TIER_2: &[(&str, &str)] = &[(
+    "rs",
+    "Rust belongs to tier 1; a recipe here would race the rustc path",
+)];
 
 /// Every language the indexer parses has an evaluator, or a named exemption.
 ///
@@ -633,6 +642,81 @@ async fn a_kotlin_method_can_be_named_and_is_evaluated_as_kotlin() -> Result<()>
         None => {
             assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
         }
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+/// C, and the assertion trap it shares with Java and Kotlin (#79).
+///
+/// C's `assert` is compiled out entirely when `NDEBUG` is defined, so a false
+/// assertion becomes a no-op and the snippet exits zero, which this tier would
+/// report as PASSED. Measured on 2026-09-11 with gcc 14 on Windows before the
+/// recipe was written: the default aborts, and `-DNDEBUG` printed the line after
+/// the assertion and exited 0. The recipe passes `-UNDEBUG`, so the assertion
+/// holds even if the flag arrives from elsewhere.
+///
+/// So the assertion that matters is the failing one, exactly as it is for Java.
+#[tokio::test]
+async fn a_c_assertion_is_checked_with_ndebug_undefined() -> Result<()> {
+    let (server, root) = polyglot_workspace()?;
+
+    let failing = eval(&server, "cIsOpen", "assert(1 + 1 == 3);").await;
+    assert_ne!(
+        status(&failing),
+        "PASSED",
+        "a false C assertion must never come back as a pass; under NDEBUG it is \
+         a no-op and the snippet exits zero: {failing:?}"
+    );
+
+    if toolchain_for("c").is_some() {
+        assert_eq!(status(&failing), "FAILED", "{failing:?}");
+        assert_eq!(engine(&failing), "tier2_native_c");
+
+        let passing = eval(&server, "cIsOpen", "assert(1 + 1 == 2);").await;
+        assert_eq!(status(&passing), "PASSED", "{passing:?}");
+    } else {
+        assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+/// C++ on the same footing, through its own compiler rather than C's.
+///
+/// A C++ snippet handed to a C compiler is the mistake `language_for` exists to
+/// prevent: the error would be filed against the snippet rather than against the
+/// language, which is the reason Kotlin is not handed to javac.
+#[tokio::test]
+async fn a_cpp_assertion_is_checked_and_runs_under_its_own_compiler() -> Result<()> {
+    let (server, root) = polyglot_workspace()?;
+
+    let failing = eval(&server, "CppGate", "assert(1 + 1 == 3);").await;
+    assert_ne!(status(&failing), "PASSED", "{failing:?}");
+
+    if toolchain_for("cpp").is_some() {
+        assert_eq!(status(&failing), "FAILED", "{failing:?}");
+        assert_eq!(
+            engine(&failing),
+            "tier2_native_cpp",
+            "a C++ symbol must reach a C++ compiler, not C's: {failing:?}"
+        );
+
+        let passing = eval(
+            &server,
+            "CppGate",
+            "assert(1 + 1 == 2);\nstd::string s = \"compiled as C++\";\nstd::cout << s << std::endl;",
+        )
+        .await;
+        assert_eq!(
+            status(&passing),
+            "PASSED",
+            "std::string and std::cout compile only as C++: {passing:?}"
+        );
+    } else {
+        assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
     }
 
     std::fs::remove_dir_all(&root).ok();

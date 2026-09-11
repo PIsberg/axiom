@@ -14,9 +14,21 @@ VALID, which forges the whole distinction the record exists to carry. `generate`
 go through `seal_over` so they cannot drift, and `tests/seal_covers_the_record.rs` pins one
 edited-field-fails case per field.
 
-**Any new stored field on `ProvenanceAttestation` has to be added to `seal_over`, or it is
-forgeable.** `prompt_digest` and `sandbox_trace_hash` are real digests of the prompt and of the
-verification, not slices of the combined digest.
+**Any new stored field on `ProvenanceAttestation` has to be covered, or it is forgeable.** There
+are two ways to cover one, and which applies depends on the field.
+
+A field the record carries independently goes into `seal_over`. A field that is a pure function of
+fields the seal already covers is re-derived by `verify` instead, which costs nothing and does not
+change the seal format. `prompt_digest` and `sandbox_trace_hash` are the second kind: the first is
+a digest of the prompt, the second of `verified_by`, `verification_detail` and `ctop_proof_hash`,
+all of which are sealed.
+
+Both were outside the seal and unchecked until 2026-09-11 (#80), so editing either in a ledger left
+a record that still printed VALID while naming a verification that never happened. `prompt_digest`
+is worse than it looks because it is published: it is exported as
+`externalParameters.promptDigest` in the SLSA statement, so an edited one goes out as though the
+seal vouched for it. Adding them to `seal_over` would have invalidated every record ever issued;
+re-deriving them does not.
 
 ## A seal that fails to re-derive does not say why
 
