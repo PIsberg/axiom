@@ -160,6 +160,22 @@ enum Commands {
     },
 }
 
+/// What a step of the demo actually got back, rather than what it hoped for.
+///
+/// The two evaluation steps used to print a fixed `FAILED` and a fixed `PASSED`
+/// beside a real latency. On a machine with no rustc both evaluations come back
+/// `EvaluatorUnavailable`, and the demo announced a sandbox self-correction pass
+/// that never happened, seconds before step 5 refused to seal anything. A demo
+/// that narrates a verdict it did not receive is the failure this engine exists
+/// to prevent, so the line reads the status out of the reply.
+fn ctop_status_of(payload: &serde_json::Value) -> (&'static str, String) {
+    match payload["status"].as_str().unwrap_or("UNKNOWN") {
+        "PASSED" => ("✅", "PASSED".to_string()),
+        "FAILED" => ("❌", "FAILED".to_string()),
+        other => ("⚠", other.to_string()),
+    }
+}
+
 /// Pull the payload out of a tool response.
 ///
 /// A tool answer arrives as a JSON-RPC envelope whose `result.content[0].text`
@@ -719,9 +735,9 @@ async fn main() -> Result<()> {
             let resp3 = server.handle_request(req3).await;
             let el3 = s3.elapsed().as_secs_f64() * 1000.0;
             let failed_payload = tool_payload(&resp3);
+            let (mark3, status3) = ctop_status_of(&failed_payload);
             println!(
-                "   ↳ Sandbox Caught the Bug: ❌ CTOP_STATUS = FAILED (Sandbox latency: {:.3} ms)",
-                el3
+                "   ↳ Sandbox verdict on the buggy hypothesis: {mark3} CTOP_STATUS = {status3} (Sandbox latency: {el3:.3} ms)"
             );
             let hint = failed_payload["failed_checks"]
                 .as_array()
@@ -751,9 +767,9 @@ async fn main() -> Result<()> {
             let el4 = s4.elapsed().as_secs_f64() * 1000.0;
             let pass_payload = tool_payload(&resp4);
             let task_id = pass_payload["task_id"].as_str().unwrap_or("").to_string();
+            let (mark4, status4) = ctop_status_of(&pass_payload);
             println!(
-                "   ↳ Sandbox Self-Correction Pass: ✅ CTOP_STATUS = PASSED (Sandbox latency: {:.3} ms)",
-                el4
+                "   ↳ Sandbox verdict after the self-correction: {mark4} CTOP_STATUS = {status4} (Sandbox latency: {el4:.3} ms)"
             );
 
             // Step 5: record the provenance of the change

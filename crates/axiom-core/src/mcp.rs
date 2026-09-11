@@ -480,6 +480,61 @@ pub struct AxiomMcpServer {
 }
 
 impl AxiomMcpServer {
+    /// The resources the server serves at a fixed URI.
+    fn concrete_resources() -> serde_json::Value {
+        json!([
+            {
+                "uri": "axiom://symbols",
+                "name": "Axiom Workspace Symbols",
+                "description": "All indexed AST symbols in the codebase CAS",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "axiom://ledger",
+                "name": "Axiom Attestation Ledger",
+                "description": "Cryptographic provenance attestation ledger",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": "axiom://fixes",
+                "name": "Axiom Verified Fix Cache",
+                "description": "Historical AST patch memory linking error signatures to verified mutations",
+                "mimeType": "application/json"
+            }
+        ])
+    }
+
+    /// The parameterised resource URIs, read by both `resources/list` and
+    /// `resources/templates/list` so the two can never disagree.
+    fn resource_templates() -> serde_json::Value {
+        json!([
+            {
+                "uriTemplate": "axiom://symbols/{symbol_path}",
+                "name": "AST Symbol",
+                "description": "AST metadata, signature, and dependency graph for a symbol",
+                "mimeType": "application/json"
+            },
+            {
+                "uriTemplate": "axiom://blast-radius/{symbol_path}",
+                "name": "Blast Radius",
+                "description": "Pruned test targets and reachability graph for a symbol",
+                "mimeType": "application/json"
+            },
+            {
+                "uriTemplate": "axiom://slice/{symbol_path}",
+                "name": "Adaptive Context Slice",
+                "description": "Token-budgeted context slice (declaration, docstring, callers, callees) for an AST symbol",
+                "mimeType": "application/json"
+            },
+            {
+                "uriTemplate": "axiom://fixes/{fingerprint}",
+                "name": "Verified Fix Candidate",
+                "description": "Historical verified patch candidate matching diagnostic fingerprint",
+                "mimeType": "application/json"
+            }
+        ])
+    }
+
     /// The ledger of issued attestations, under this server's `.axiom`.
     pub fn ledger_path(&self) -> PathBuf {
         self.axiom_dir.join("attestations.json")
@@ -736,53 +791,23 @@ impl AxiomMcpServer {
                 jsonrpc: "2.0".to_string(),
                 id,
                 result: Some(json!({
-                    "resources": [
-                        {
-                            "uri": "axiom://symbols",
-                            "name": "Axiom Workspace Symbols",
-                            "description": "All indexed AST symbols in the codebase CAS",
-                            "mimeType": "application/json"
-                        },
-                        {
-                            "uri": "axiom://ledger",
-                            "name": "Axiom Attestation Ledger",
-                            "description": "Cryptographic provenance attestation ledger",
-                            "mimeType": "application/json"
-                        },
-                        {
-                            "uri": "axiom://fixes",
-                            "name": "Axiom Verified Fix Cache",
-                            "description": "Historical AST patch memory linking error signatures to verified mutations",
-                            "mimeType": "application/json"
-                        }
-                    ],
-                    "resourceTemplates": [
-                        {
-                            "uriTemplate": "axiom://symbols/{symbol_path}",
-                            "name": "AST Symbol",
-                            "description": "AST metadata, signature, and dependency graph for a symbol",
-                            "mimeType": "application/json"
-                        },
-                        {
-                            "uriTemplate": "axiom://blast-radius/{symbol_path}",
-                            "name": "Blast Radius",
-                            "description": "Pruned test targets and reachability graph for a symbol",
-                            "mimeType": "application/json"
-                        },
-                        {
-                            "uriTemplate": "axiom://slice/{symbol_path}",
-                            "name": "Adaptive Context Slice",
-                            "description": "Token-budgeted context slice (declaration, docstring, callers, callees) for an AST symbol",
-                            "mimeType": "application/json"
-                        },
-                        {
-                            "uriTemplate": "axiom://fixes/{fingerprint}",
-                            "name": "Verified Fix Candidate",
-                            "description": "Historical verified patch candidate matching diagnostic fingerprint",
-                            "mimeType": "application/json"
-                        }
-                    ]
+                    "resources": Self::concrete_resources(),
+                    "resourceTemplates": Self::resource_templates()
                 })),
+                error: None,
+            },
+
+            // A conformant client discovers URI templates here, not in
+            // `resources/list`. Answering "method not found" left the four
+            // templates the server serves undiscoverable by anything that
+            // follows the spec, and turned a routine capability probe into an
+            // error the client had to explain away. Both arms read one list, so
+            // a template added to `resource_templates` appears in both without
+            // anyone remembering to copy it.
+            "resources/templates/list" => JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(json!({ "resourceTemplates": Self::resource_templates() })),
                 error: None,
             },
 
@@ -1228,7 +1253,8 @@ impl AxiomMcpServer {
             Ok(())
         } else {
             Err(format!(
-                "Prompt '{name}' requires {missing:?}; without them the rendered prompt                  would name no symbol at all"
+                "Prompt '{name}' requires {missing:?}; without them the rendered prompt \
+                 would name no symbol at all"
             ))
         }
     }

@@ -176,7 +176,7 @@ const RUSTC_ENGINE: &str = "tier1_native_rustc";
 impl SandboxEngine for WasiEngine {
     async fn execute_wasi(&self, wasm_binary: &[u8], entrypoint: &str) -> Result<CtopReport> {
         let start = Instant::now();
-        let task_id = format!("task_wasi_{:x}", start.elapsed().as_nanos());
+        let task_id = crate::native::next_task_id("task_wasi");
 
         let module = match Module::from_binary(&self.engine, wasm_binary) {
             Ok(m) => m,
@@ -310,7 +310,7 @@ impl SandboxEngine for WasiEngine {
         language: Option<&str>,
     ) -> Result<CtopReport> {
         let start = Instant::now();
-        let task_id = format!("eval_{:x}", start.elapsed().as_nanos());
+        let task_id = crate::native::next_task_id("eval");
 
         // 1. If WAT format is provided, compile directly with Wasmtime Cranelift JIT
         let trimmed = code_snippet.trim();
