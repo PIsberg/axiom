@@ -1253,7 +1253,8 @@ impl AxiomMcpServer {
             Ok(())
         } else {
             Err(format!(
-                "Prompt '{name}' requires {missing:?}; without them the rendered prompt                  would name no symbol at all"
+                "Prompt '{name}' requires {missing:?}; without them the rendered prompt \
+                 would name no symbol at all"
             ))
         }
     }
