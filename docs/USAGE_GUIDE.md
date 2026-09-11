@@ -161,10 +161,10 @@ rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
 Measured on this repository on 2026-09-11 with
-`.github/scripts/blast_radius_stats.py`, 657 non-test symbols against 94 tests at
-depth 1: 170 symbols reach at least one test, and those select a mean of 12.8 and
-a median of 6, pruning a mean of 86.4% and a median of 93.6%. Mean pairwise
-Jaccard overlap between two symbols' answers is 0.08. The 487 symbols that reach
+`.github/scripts/blast_radius_stats.py`, 663 non-test symbols against 94 tests at
+depth 1: 171 symbols reach at least one test, and those select a mean of 12.7 and
+a median of 6, pruning a mean of 86.5% and a median of 93.6%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.08. The 492 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a
 claim that changing one is safe.
 

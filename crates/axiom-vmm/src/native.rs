@@ -27,7 +27,7 @@ use crate::artifact_cache;
 use axiom_proto::{CtopReport, CtopStatus, DiagnosticSpan, FailedCheck};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -971,6 +971,57 @@ fn kill_tree(child: &mut std::process::Child) {
 /// gone rather than to EOF.
 ///
 /// The environment is confined here too, so no caller can forget it.
+/// Spawn, retrying briefly while Linux says the executable is still being
+/// written.
+///
+/// Every tier with a build step writes an executable and then runs it: the
+/// rustc path, all three C and C++ recipes, and any restore from the artifact
+/// cache. On Linux, `execve` fails with `ETXTBSY` while any process holds that
+/// file open for writing, and the writer here is this process, which has already
+/// closed its handle. The holder is a *fork of it*: `fs::write` opens the file,
+/// another thread spawns a compiler in the window before the close, the forked
+/// child inherits the descriptor, and the file stays busy until that child
+/// reaches its own `execve`. Microseconds, and entirely a matter of contention.
+///
+/// Seen as a one-in-four flake on the CI ubuntu runner and never on a developer
+/// machine, which is the usual shape: the suite evaluates many snippets in
+/// parallel there. The symptom is an `EvaluatorUnavailable` blaming a missing
+/// rustc for a compiler that had just run.
+///
+/// This is `worth_retrying` in axiom-ast wearing different clothes, and the same
+/// rule decides it: retry only what can clear on its own. `ETXTBSY` clears as
+/// soon as the other child execs. A missing binary or a denied directory does
+/// not, so neither is retried, and the deadline is short enough that a genuinely
+/// stuck file reports rather than hangs.
+///
+/// Not conditional on Unix beyond the error code: Windows raises a sharing
+/// violation for the same situation and never `ETXTBSY`, so the match simply
+/// does not fire there.
+fn spawn_retrying_text_file_busy(command: &mut Command) -> std::io::Result<Child> {
+    /// Linux `ETXTBSY`. Not in `std::io::ErrorKind` as a named variant, so it is
+    /// matched by raw code, and only on the platform that produces it.
+    #[cfg(unix)]
+    const ETXTBSY: i32 = 26;
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) => {
+                #[cfg(unix)]
+                let retryable = e.raw_os_error() == Some(ETXTBSY);
+                #[cfg(not(unix))]
+                let retryable = false;
+
+                if !retryable || Instant::now() >= deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
 pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result<Finished> {
     confine_environment(&mut command);
     crate::sandbox::prepare_command(&mut command);
@@ -983,11 +1034,12 @@ pub fn run_with_timeout(mut command: Command, timeout: Duration) -> std::io::Res
         command.process_group(0);
     }
 
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+
+    let mut child = spawn_retrying_text_file_busy(&mut command)?;
 
     if let Some(sb) = sandbox.as_mut() {
         let _ = sb.assign_child(&child);

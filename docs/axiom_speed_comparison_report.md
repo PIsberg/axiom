@@ -13,7 +13,7 @@ tree roughly doubled in between.
 
 * **Tree A**, `async-test-lib`: 898 Java source files, 9,058 indexed symbols, of
   which 3,429 are tests.
-* **Tree B**, this repository: 75 source files, 751 indexed symbols, of which 94
+* **Tree B**, this repository: 76 source files, 757 indexed symbols, of which 94
   are tests. Re-measured 2026-09-11; the 2026-08-25 figures were 55 files, 543
   symbols and 53 tests, and the blast-radius column below moved with them.
 
@@ -50,12 +50,12 @@ Tree A unless noted.
 Blast-radius selection across many symbols, from
 `.github/scripts/blast_radius_stats.py` at depth 1:
 
-| | Tree A (sample of 60) | Tree B (all 657) |
+| | Tree A (sample of 60) | Tree B (all 663) |
 |---|---|---|
 | Suite | 3,429 tests | 94 tests |
-| Reach at least one test | 53 of 60 asked | 170 of 657 |
-| Tests selected | mean 16.4, median 8, max 40 | mean 12.8, median 6, max 40 |
-| Pruned | mean 99.5%, median 99.8% | mean 86.4%, median 93.6% |
+| Reach at least one test | 53 of 60 asked | 171 of 663 |
+| Tests selected | mean 16.4, median 8, max 40 | mean 12.7, median 6, max 40 |
+| Pruned | mean 99.5%, median 99.8% | mean 86.5%, median 93.6% |
 | Mean pairwise Jaccard | 0.01 | 0.08 |
 
 Tree A was measured 2026-08-25 and Tree B 2026-09-11, on the same machine. Tree

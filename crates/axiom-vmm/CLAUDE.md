@@ -73,6 +73,26 @@ may be short for that reason. `tests/process_tree.rs` pins it.
 `tests/eval_deadline.rs` passes its own two-second deadline to `native::evaluate` and never reads
 the environment variable, so raising `AXIOM_EVAL_TIMEOUT_SECS` in CI does not weaken the guard.
 
+## A freshly written binary can be too busy to run, and only under load
+
+Every tier with a build step writes an executable and then runs it: the rustc path, the C and C++
+recipes, and any restore from the artifact cache. On Linux `execve` fails with `ETXTBSY` while any
+process holds that file open for writing, and the holder is a fork of this one: `fs::write` opens
+the file, another thread spawns a compiler in the window before the close, the forked child
+inherits the descriptor, and the file stays busy until that child reaches its own `execve`.
+
+`spawn_retrying_text_file_busy` waits it out, for up to 500 ms in 5 ms steps. Only `ETXTBSY`, because
+only `ETXTBSY` clears on its own; a missing binary or an unwritable directory is reported at once,
+which is `worth_retrying` in axiom-ast wearing different clothes. Windows raises a sharing violation
+for the same situation and never `ETXTBSY`, so the match does not fire there.
+
+Seen as a one-in-four failure of `artifact_cache`'s
+`a_one_byte_change_misses_even_when_a_neighbour_entry_exists` on the CI ubuntu runner and never on a
+developer machine, because the suite evaluates many snippets in parallel there. The symptom was the
+worst kind available: `EvaluatorUnavailable` telling the caller to install a compiler that had just
+run. `tests/spawn_retry.rs` pins it and is Unix-only, so it does not run on the machine most of this
+repository is developed on.
+
 ## Compiled artifacts are cached; verdicts never are
 
 `artifact_cache` keys the build step's output on the wrapped source, the shape of the build
