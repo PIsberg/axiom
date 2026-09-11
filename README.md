@@ -123,26 +123,32 @@ which 3,429 are tests.
 | `axiom bench` (Rust snippet) | 220 ms median with the compile cache off, 125 ms with it on | `rustc` dominates; a cache hit skips it and still runs the binary. 20 iterations. |
 | `axiom swarm --agents 10 --ops 50` | 9.5 ms for 1,000 operations | Zero merge conflicts, replicas converged. |
 
-**Tree B**, this repository: 64 source files, 617 indexed symbols, of which 71
-are tests. `axiom scan` takes 133 ms warm, and the same swarm run completes
+**Tree B**, this repository: 81 source files, 811 indexed symbols, of which 313
+are tests. `axiom scan` takes 169 ms warm, and the same swarm run completes
 1,000 operations in 9.1 ms with zero conflicts.
 
 The blast-radius figures for both trees come from
 [`.github/scripts/blast_radius_stats.py`](.github/scripts/blast_radius_stats.py),
 which asks the shipped CLI about each non-test symbol in turn. Its output on
-this repository on 2026-08-31, at depth 1:
+this repository on 2026-09-11, at depth 1:
 
 ```text
-suite             71 tests
-non-test symbols  546
-reach >= 1 test   141 of 546 asked
-tests selected    mean 11.2, median 4, max 40
-pruned            mean 84.2%, median 94.4%
-mean Jaccard      0.09
+suite             313 tests
+non-test symbols  498
+reach >= 1 test   289 of 498 asked
+tests selected    mean 14.5, median 7, max 40
+pruned            mean 95.4%, median 97.8%
+mean Jaccard      0.03
 ```
 
-The two trees together show how the value scales: a median of 94.4% pruned on a
-71-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
+Figures before 2026-09-11 quoted a 71-test suite for this tree, which was an
+artefact rather than a measurement: a Rust function was only recognised as a
+test when its own name began with `test_`, so 210 of this repository's own
+tests were indexed as ordinary functions. Every percentage taken against that
+count was taken against a denominator a third of the real one.
+
+The two trees together show how the value scales: a median of 97.8% pruned on a
+313-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
 every test the suite adds. A symbol that reaches no test gets that reported as
 the answer, which is the honest result for a helper nothing exercises directly.
 
@@ -348,9 +354,9 @@ for the other.
 
 ## Running Tests
 
-The suite is 302 test functions across 60 integration test files. 43 of those
+The suite is 311 test functions across 61 integration test files. 43 of those
 are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`.
-Windows runs 299 of the 302: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
+Windows runs 308 of the 311: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
 `execve` race that has no Windows equivalent, so it compiles to nothing there.
 The counted figure is the one `docs_quote_the_real_numbers` pins, because it is
 the same on every machine:

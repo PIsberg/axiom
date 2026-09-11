@@ -67,6 +67,27 @@ The stem is validated as an identifier first: an empty owner is exactly the cond
 this parser once wrote machine-absolute paths into symbol names. `tests/jvm_symbols.rs` pins all
 of that, and pins the four failure modes alongside it.
 
+### A Rust test is marked by its attribute, not by its name
+
+`is_test` read only the declaration line, so `name.starts_with("test_") || decl.contains("#[test]")`
+was in practice just the name prefix: `#[test]` sits on the line above. This repository mostly
+names its tests descriptively, so on 2026-09-11 it held 305 test attributes, 95 of them
+`test_`-prefixed, and indexed 94 tests. 210 of its own tests were filed as ordinary functions.
+
+The cost is not mainly the count. `compute_blast_radius` only records a node whose kind is `test`,
+so a test the parser did not recognise could never be selected, and a change would get back a
+small, confident impacted set with the tests that actually cover it missing. That is a recall
+failure, and the fifth idea in the root CLAUDE.md is explicit about which direction is unsafe.
+
+`rust_test_attribute_above` walks up from the declaration over attributes, doc comments and blank
+lines, and stops at the first line that is none of those, so a plain function does not inherit the
+annotation of whatever sits above it. It reads the stripped text, like every other decision here,
+because a fixture in this repository writes `#[test]` inside a string literal often enough to
+matter. The Java parser has read `@Test` this way all along; this is the same rule.
+
+`tests/rust_tests_are_recognised.rs` pins both directions, including the string-literal case and
+that a function following a test is not one.
+
 ### A Go method belongs to its receiver
 
 A Go method declaration has no name before the first parenthesis, only the receiver.
@@ -221,8 +242,11 @@ under its enclosing class.
 
 A test is marked by the SCIP `Test` role where the indexer sets it, as scip-java does.
 rust-analyzer does not mark Rust test functions, so ingestion falls back to `is_test_path_or_file`
-or a `test_` name prefix, the same heuristic the scan uses, or the blast radius would find no
-tests in a SCIP-ingested Rust project. The `relationships` field adds edges an occurrence scan
+or a `test_` name prefix, or the blast radius would find no tests in a SCIP-ingested Rust project.
+That is weaker than what the scan now does: the scan reads `#[test]` off the lines above a
+declaration, and a SCIP index carries no source lines to read, so a descriptively named test in a
+file whose path does not look like a test path is still invisible on this path. It is the reason
+`is_test_path_or_file` stays in the fallback rather than being dropped for the attribute rule. The `relationships` field adds edges an occurrence scan
 misses, an implementation reaching its interface.
 
 `tests/scip_ingest.rs` builds a SCIP index in memory, so it needs no indexer installed.

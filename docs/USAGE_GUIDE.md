@@ -161,12 +161,20 @@ rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
 Measured on this repository on 2026-09-11 with
-`.github/scripts/blast_radius_stats.py`, 702 non-test symbols against 94 tests at
-depth 1: 174 symbols reach at least one test, and those select a mean of 12.5 and
-a median of 6, pruning a mean of 86.7% and a median of 93.6%. Mean pairwise
-Jaccard overlap between two symbols' answers is 0.08. The 528 symbols that reach
+`.github/scripts/blast_radius_stats.py`, 498 non-test symbols against 313 tests at
+depth 1: 289 symbols reach at least one test, and those select a mean of 14.5 and
+a median of 7, pruning a mean of 95.4% and a median of 97.8%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.03. The 209 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a
 claim that changing one is safe.
+
+Figures taken before 2026-09-11 quoted a suite of 94 for this tree and a
+population of around 700. Both were artefacts of the same defect: a Rust
+function counted as a test only when its own name began with `test_`, so 210 of
+this repository's own tests were indexed as ordinary functions, inflating the
+non-test population and deflating the suite the percentages were taken against.
+Recall moves the most: 289 of 498 symbols now reach a test, where 174 of 702
+did.
 
 The population those figures rest on is pinned by
 `crates/axiom-cli/tests/docs_quote_the_real_numbers.rs`, so when the tree grows

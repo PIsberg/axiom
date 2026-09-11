@@ -16,7 +16,7 @@ answer rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test --release --all-targets    # 302 tests over 66 binaries; 299 run on Windows, see README
+cargo test --release --all-targets    # 311 tests over 67 binaries; 308 run on Windows, see README
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -83,8 +83,8 @@ axiom-core  ──► cli            the MCP server: tool schemas and dispatch
 axiom-cli                      clap subcommands, all of which drive AxiomMcpServer
 ```
 
-Source is 14,788 lines over 13 files as of 2026-09-11. Four files hold most of it:
-`axiom-ast/src/lib.rs` (4,956), `axiom-core/src/mcp.rs` (2,114), `axiom-vmm/src/native.rs` (2,025),
+Source is 14,831 lines over 13 files as of 2026-09-11. Four files hold most of it:
+`axiom-ast/src/lib.rs` (4,999), `axiom-core/src/mcp.rs` (2,114), `axiom-vmm/src/native.rs` (2,025),
 `axiom-cli/src/main.rs` (2,007).
 
 The CLI is not a separate code path. Every subcommand constructs an `AxiomMcpServer` and calls the
