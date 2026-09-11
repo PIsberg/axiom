@@ -348,8 +348,12 @@ for the other.
 
 ## Running Tests
 
-The suite is 277 test functions across 55 integration test files. 43 of those
-are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`:
+The suite is 280 test functions across 56 integration test files. 43 of those
+are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`.
+Windows runs 277 of the 280: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
+`execve` race that has no Windows equivalent, so it compiles to nothing there.
+The counted figure is the one `docs_quote_the_real_numbers` pins, because it is
+the same on every machine:
 
 ```bash
 cargo test --release --all-targets
