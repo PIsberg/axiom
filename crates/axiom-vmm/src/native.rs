@@ -1272,10 +1272,19 @@ pub(crate) fn prime(language: &NativeLanguage) {
     }
 }
 
-fn next_task_id(extension: &str) -> String {
+/// An id that names one run and no other, for the life of the process.
+///
+/// An attestation names the run it rests on by this id, and
+/// `axiom_attest_commit` decides whether to seal by looking it up. Two runs
+/// sharing an id therefore lets a later pass overwrite an earlier failure and a
+/// seal be issued for a change whose only check failed, which is why this is a
+/// counter and not a clock reading. The Rust and WASI paths used to derive
+/// theirs from `start.elapsed()` sampled one statement after `Instant::now()`;
+/// twelve consecutive evaluations produced two distinct ids.
+pub(crate) fn next_task_id(prefix: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     format!(
-        "task_native_{extension}_{}_{}",
+        "{prefix}_{}_{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
@@ -1615,7 +1624,7 @@ pub fn evaluate(
     timeout: Duration,
 ) -> CtopReport {
     let start = Instant::now();
-    let task_id = next_task_id(language.extension);
+    let task_id = next_task_id(&format!("task_native_{}", language.extension));
     let ms = |s: &Instant| s.elapsed().as_secs_f64() * 1000.0;
 
     if !native_eval_enabled() {
