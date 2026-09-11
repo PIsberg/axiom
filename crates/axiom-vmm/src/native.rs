@@ -851,6 +851,7 @@ pub fn confine_environment(command: &mut Command) -> &mut Command {
 }
 
 /// What a child process did, once it either finished or was killed.
+#[derive(Debug)]
 pub struct Finished {
     pub status: Option<std::process::ExitStatus>,
     pub stdout: String,
