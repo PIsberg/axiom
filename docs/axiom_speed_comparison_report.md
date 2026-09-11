@@ -13,8 +13,23 @@ tree roughly doubled in between.
 
 * **Tree A**, `async-test-lib`: 898 Java source files, 9,058 indexed symbols, of
   which 3,429 are tests.
-* **Tree B**, this repository: 55 source files, 543 indexed symbols, of which 53
-  are tests.
+* **Tree B**, this repository: 75 source files, 751 indexed symbols, of which 94
+  are tests. Re-measured 2026-09-11; the 2026-08-25 figures were 55 files, 543
+  symbols and 53 tests, and the blast-radius column below moved with them.
+
+![Nine measured axiom operations on a log scale, from a 0.11 ms symbol query to a 3.3 s index scan, with the unbuilt microVM tier called out](images/axiom_speed_comparison.svg)
+
+The figure charts the table below and nothing else. It is an SVG rather than a
+PNG so that it is its own source: the numbers in it are diffable, and a figure
+that disagrees with the table shows up in review. The PNG it replaces charted
+five stages of an agent loop against Git plus CI, two of which were design rather
+than code, and its source was never in the repository, so it could not be
+corrected without redrawing it from nothing (#68).
+
+One of those two stages has since been built. Reuse of compiled artifacts on an
+identical source hash is the artifact cache, measured 2026-09-01 and charted here
+as the two evaluation bars. The other, a microVM sandbox tier, is still not
+built, and the figure says so rather than leaving it to a paragraph beside it.
 
 ## The numbers
 
@@ -35,13 +50,18 @@ Tree A unless noted.
 Blast-radius selection across many symbols, from
 `.github/scripts/blast_radius_stats.py` at depth 1:
 
-| | Tree A (sample of 60) | Tree B (all 490) |
+| | Tree A (sample of 60) | Tree B (all 657) |
 |---|---|---|
-| Suite | 3,429 tests | 53 tests |
-| Reach at least one test | 53 of 60 asked | 103 of 490 |
-| Tests selected | mean 16.4, median 8, max 40 | mean 10.1, median 4, max 31 |
-| Pruned | mean 99.5%, median 99.8% | mean 81.0%, median 92.5% |
-| Mean pairwise Jaccard | 0.01 | 0.11 |
+| Suite | 3,429 tests | 94 tests |
+| Reach at least one test | 53 of 60 asked | 170 of 657 |
+| Tests selected | mean 16.4, median 8, max 40 | mean 12.8, median 6, max 40 |
+| Pruned | mean 99.5%, median 99.8% | mean 86.4%, median 93.6% |
+| Mean pairwise Jaccard | 0.01 | 0.08 |
+
+Tree A was measured 2026-08-25 and Tree B 2026-09-11, on the same machine. Tree
+A's column is not re-derived here because that tree is not in this repository;
+Tree B's is, and the population it rests on is pinned by
+`crates/axiom-cli/tests/docs_quote_the_real_numbers.rs`.
 
 Tree A is sampled because one subprocess per symbol, each loading a 61 MB index,
 makes the full 5,629-symbol sweep take about ninety minutes. The sample is seeded

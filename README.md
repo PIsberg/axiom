@@ -348,8 +348,8 @@ for the other.
 
 ## Running Tests
 
-The suite is 236 tests across 53 test binaries. 40 of those tests are the
-end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`:
+The suite is 277 test functions across 55 integration test files. 43 of those
+are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`:
 
 ```bash
 cargo test --release --all-targets

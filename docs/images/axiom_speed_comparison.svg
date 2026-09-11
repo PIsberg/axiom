@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="600" viewBox="0 0 1040 600" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="1040" height="600" fill="#ffffff"/>
+<text x="40" y="48" font-size="22" font-weight="600" fill="#1b1b1b">Where the time goes, per operation</text>
+<text x="40" y="74" font-size="13.5" fill="#555555">Measured on one Windows machine, release build, against an 898-file Java tree of 9,058 symbols.</text>
+<text x="40" y="93" font-size="13.5" fill="#555555">Latencies taken 2026-08-25; the two evaluation bars re-taken 2026-09-01, once the artifact cache existed.</text>
+<text x="40" y="112" font-size="13.5" fill="#555555">Log scale. Every bar is a number in docs/axiom_speed_comparison_report.md, which carries the commands to reproduce it.</text>
+<line x1="287.2" y1="122" x2="287.2" y2="456" stroke="#e2e2e2" stroke-width="1"/>
+<text x="287.2" y="474" font-size="12" fill="#777777" text-anchor="middle">0.1 ms</text>
+<line x1="411.2" y1="122" x2="411.2" y2="456" stroke="#e2e2e2" stroke-width="1"/>
+<text x="411.2" y="474" font-size="12" fill="#777777" text-anchor="middle">1 ms</text>
+<line x1="535.2" y1="122" x2="535.2" y2="456" stroke="#e2e2e2" stroke-width="1"/>
+<text x="535.2" y="474" font-size="12" fill="#777777" text-anchor="middle">10 ms</text>
+<line x1="659.2" y1="122" x2="659.2" y2="456" stroke="#e2e2e2" stroke-width="1"/>
+<text x="659.2" y="474" font-size="12" fill="#777777" text-anchor="middle">100 ms</text>
+<line x1="783.2" y1="122" x2="783.2" y2="456" stroke="#e2e2e2" stroke-width="1"/>
+<text x="783.2" y="474" font-size="12" fill="#777777" text-anchor="middle">1 s</text>
+<text x="238" y="148.5" font-size="13" fill="#1b1b1b" text-anchor="end">axiom_query_symbol, warm</text>
+<rect x="250" y="132" width="42.3" height="24" fill="#2f6fb3" rx="2"/>
+<text x="302.3" y="148.5" font-size="12" fill="#555555">0.08 to 0.13 ms median</text>
+<text x="238" y="184.5" font-size="13" fill="#1b1b1b" text-anchor="end">axiom_search_regex, warm</text>
+<rect x="250" y="168" width="98.1" height="24" fill="#2f6fb3" rx="2"/>
+<text x="358.1" y="184.5" font-size="12" fill="#555555">0.27 to 0.36 ms median</text>
+<text x="238" y="220.5" font-size="13" fill="#1b1b1b" text-anchor="end">axiom_get_blast_radius, warm</text>
+<rect x="250" y="204" width="261.2" height="24" fill="#2f6fb3" rx="2"/>
+<text x="521.2" y="220.5" font-size="12" fill="#555555">4.7 to 8.1 ms median</text>
+<text x="238" y="256.5" font-size="13" fill="#1b1b1b" text-anchor="end">axiom swarm, 1,000 CRDT ops</text>
+<rect x="250" y="240" width="282.4" height="24" fill="#2f6fb3" rx="2"/>
+<text x="542.4" y="256.5" font-size="12" fill="#555555">9.5 ms, replicas converged</text>
+<text x="238" y="292.5" font-size="13" fill="#1b1b1b" text-anchor="end">grep -rn over the same tree</text>
+<rect x="250" y="276" width="397.2" height="24" fill="#8c8c8c" rx="2"/>
+<text x="657.2" y="292.5" font-size="12" fill="#555555">80 ms, for comparison with search</text>
+<text x="238" y="328.5" font-size="13" fill="#1b1b1b" text-anchor="end">Evaluate a Rust snippet, cached</text>
+<rect x="250" y="312" width="421.2" height="24" fill="#2f6fb3" rx="2"/>
+<text x="681.2" y="328.5" font-size="12" fill="#555555">125 ms median, artifact cache on</text>
+<text x="238" y="364.5" font-size="13" fill="#1b1b1b" text-anchor="end">Evaluate a Rust snippet, cold</text>
+<rect x="250" y="348" width="451.7" height="24" fill="#2f6fb3" rx="2"/>
+<text x="711.7" y="364.5" font-size="12" fill="#555555">220 ms median, cache off</text>
+<text x="238" y="400.5" font-size="13" fill="#1b1b1b" text-anchor="end">Server startup</text>
+<rect x="250" y="384" width="538.3" height="24" fill="#7fa8d4" rx="2"/>
+<text x="798.3" y="400.5" font-size="12" fill="#555555">1.1 to 2.1 s, once per session</text>
+<text x="238" y="436.5" font-size="13" fill="#1b1b1b" text-anchor="end">axiom scan, index the tree</text>
+<rect x="250" y="420" width="597.5" height="24" fill="#7fa8d4" rx="2"/>
+<text x="837.5" y="436.5" font-size="12" fill="#ffffff" text-anchor="end">3.3 s warm, once per tree change</text>
+<rect x="40" y="491" width="13" height="13" fill="#2f6fb3" rx="2"/>
+<text x="59" y="502" font-size="12.5" fill="#444444">axiom, per operation</text>
+<rect x="270" y="491" width="13" height="13" fill="#7fa8d4" rx="2"/>
+<text x="289" y="502" font-size="12.5" fill="#444444">axiom, paid once</text>
+<rect x="460" y="491" width="13" height="13" fill="#8c8c8c" rx="2"/>
+<text x="479" y="502" font-size="12.5" fill="#444444">the tool it replaces</text>
+<rect x="40" y="520" width="960" height="66" fill="#fbf7ec" stroke="#e0d5b8" rx="4"/>
+<text x="54" y="539" font-size="12.5" font-weight="600" fill="#6b5a2a">Not charted, because it is not built</text>
+<text x="54" y="558" font-size="12.5" fill="#6b5a2a">A microVM sandbox tier. Tier 2 runs the real compiler as an ordinary child process with the axiom process&#8217;s own privileges,</text>
+<text x="54" y="575" font-size="12.5" fill="#6b5a2a">bounded by a timeout and an OS job object. docs/axiom_security_framework.md says what that does and does not contain.</text>
+</svg>
