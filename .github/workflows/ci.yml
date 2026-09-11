@@ -65,7 +65,7 @@ jobs:
         uses: fwilhe2/setup-kotlin@9d8379246506bb33a32b386d49868ee8cdc349b1 # main
 
       - name: Install a Scala toolchain
-        uses: coursier/setup-action@039f736548afa5411c1382f40a5bd9c2d30e0383 # v1.3.9
+        uses: coursier/setup-action@9b7939bf01fd1185ce2babe16135168361bf2c62 # v3.0.2
         with:
           apps: scala scalac
 
