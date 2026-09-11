@@ -1366,6 +1366,25 @@ fn timed_out_report(
     }
 }
 
+/// Split a compiler location off its leading Windows drive, if it has one.
+///
+/// Every location the evaluator sees is absolute: it writes the snippet into a
+/// temp directory and hands the compiler that full path, so on Windows the
+/// location starts `C:\`. The colon in the drive is the same character the
+/// `file:line:column` separator uses, so splitting the whole string on `:` read
+/// the drive as the file and shifted the line number into the column, and the
+/// caller was told a compile error on line 8 was at column 8 of a file called
+/// `C`. Returning the drive separately leaves a remainder whose colons are all
+/// separators. A POSIX path has no drive and comes back unchanged.
+fn split_drive(loc: &str) -> (&str, &str) {
+    let b = loc.as_bytes();
+    let is_drive = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    if is_drive { loc.split_at(2) } else { ("", loc) }
+}
+
 /// Parse multi-language compiler errors/warnings into structured DiagnosticSpan items
 pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticSpan> {
     let mut diags = Vec::new();
@@ -1398,13 +1417,14 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
                 let next_t = next_l.trim();
                 if next_t.starts_with("-->") {
                     let loc = next_t.trim_start_matches("-->").trim();
-                    let parts: Vec<&str> = loc.split(':').collect();
+                    let (drive, rest) = split_drive(loc);
+                    let parts: Vec<&str> = rest.split(':').collect();
                     if parts.len() >= 3 {
-                        file = Some(parts[0].to_string());
+                        file = Some(format!("{drive}{}", parts[0]));
                         line_num = parts[1].parse::<usize>().ok();
                         col_num = parts[2].parse::<usize>().ok();
                     } else if parts.len() == 2 {
-                        file = Some(parts[0].to_string());
+                        file = Some(format!("{drive}{}", parts[0]));
                         line_num = parts[1].parse::<usize>().ok();
                     }
                     lines.next();
@@ -1466,9 +1486,10 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
         }
 
         // 3. Javac / Clang / GCC: file:line:col: error: ...
-        let parts: Vec<&str> = trimmed.splitn(4, ':').collect();
+        let (drive, after_drive) = split_drive(trimmed);
+        let parts: Vec<&str> = after_drive.splitn(4, ':').collect();
         if parts.len() >= 4 {
-            let f = parts[0].trim();
+            let f = format!("{drive}{}", parts[0].trim());
             if let Ok(l) = parts[1].trim().parse::<usize>() {
                 if let Ok(c) = parts[2].trim().parse::<usize>() {
                     let rest = parts[3].trim();
@@ -1478,7 +1499,7 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
                         "error"
                     };
                     diags.push(DiagnosticSpan {
-                        file: Some(f.to_string()),
+                        file: Some(f.clone()),
                         line: Some(l),
                         column: Some(c),
                         message: rest.to_string(),
@@ -1494,7 +1515,7 @@ pub fn parse_compiler_diagnostics(stderr: &str, stdout: &str) -> Vec<DiagnosticS
                         "error"
                     };
                     diags.push(DiagnosticSpan {
-                        file: Some(f.to_string()),
+                        file: Some(f),
                         line: Some(l),
                         column: None,
                         message: rest,
