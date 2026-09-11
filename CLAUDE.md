@@ -16,7 +16,7 @@ answer rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test --release --all-targets    # 287 tests over 64 binaries; 284 run on Windows, see README
+cargo test --release --all-targets    # 302 tests over 66 binaries; 299 run on Windows, see README
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -57,6 +57,16 @@ printf '%s\n' \
 `.github/scripts/concurrent_agents_check.py` on ubuntu and windows. Run them before opening a PR;
 the lint job fails the build on a single warning.
 
+**A green run on one host does not type-check the files gated to another.** `--all-targets`
+compiles what the host target selects, and cfg-gated code is skipped before type checking, so a
+file carrying a file-level `#![cfg(unix)]` is neither run nor checked on Windows. Moving the
+attribute onto the individual functions would not change that. One file is gated today,
+`crates/axiom-vmm/tests/spawn_retry.rs`, which pins a Linux `execve` race that has no Windows
+equivalent. It is why #83 went red on CI after three green gates on Windows. Treat the ubuntu job
+as the check that settles anything touching it.
+`crates/axiom-cli/tests/docs_name_the_platform_gated_tests.rs` derives that list from the source
+tree, so another gated file added later fails until this paragraph names it.
+
 CI sets `AXIOM_REQUIRE_TOOLCHAINS=1` and raises `AXIOM_EVAL_TIMEOUT_SECS` to 300. Both matter: see
 `crates/axiom-vmm/CLAUDE.md`.
 
@@ -73,9 +83,9 @@ axiom-core  ──► cli            the MCP server: tool schemas and dispatch
 axiom-cli                      clap subcommands, all of which drive AxiomMcpServer
 ```
 
-Source is 14,700 lines over 13 files as of 2026-09-11. Four files hold most of it:
-`axiom-ast/src/lib.rs` (4,946), `axiom-core/src/mcp.rs` (2,048), `axiom-vmm/src/native.rs` (2,029),
-`axiom-cli/src/main.rs` (1,991).
+Source is 14,788 lines over 13 files as of 2026-09-11. Four files hold most of it:
+`axiom-ast/src/lib.rs` (4,956), `axiom-core/src/mcp.rs` (2,114), `axiom-vmm/src/native.rs` (2,025),
+`axiom-cli/src/main.rs` (2,007).
 
 The CLI is not a separate code path. Every subcommand constructs an `AxiomMcpServer` and calls the
 same crates the MCP tools use, so a bug reproduced through `axiom blast-radius` is the same bug an
