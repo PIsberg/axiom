@@ -10,6 +10,7 @@
 //! that the answer is `EVALUATOR_UNAVAILABLE` and never `PASSED`.
 
 use anyhow::Result;
+use axiom_ast::AstIndex;
 use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest, mcp::JsonRpcResponse};
 use axiom_vmm::native;
 use serde_json::{Value, json};
@@ -87,6 +88,27 @@ fn polyglot_workspace() -> Result<(AxiomMcpServer, PathBuf)> {
     std::fs::write(
         root.join("legacy.py"),
         "def isOpen(depth):\n    return depth > 0\n",
+    )?;
+    std::fs::write(
+        root.join("gate.c"),
+        "#include <stdio.h>
+
+int cIsOpen(int depth) {
+    return depth > 0;
+}
+",
+    )?;
+    std::fs::write(
+        root.join("gate.cpp"),
+        "#include <string>
+
+class CppGate {
+public:
+    bool isOpen(int depth) {
+        return depth > 0;
+    }
+};
+",
     )?;
     std::fs::write(
         root.join("Gate.java"),
@@ -256,33 +278,59 @@ async fn a_javascript_symbol_is_evaluated_by_node() -> Result<()> {
     Ok(())
 }
 
-/// Every language the indexer parses has an evaluator.
+/// Extensions the indexer parses that tier 2 deliberately does not run, each
+/// with the reason it is exempt.
+///
+/// An entry here is a promise that `axiom_eval_patch` answers a symbol from such
+/// a file with `EvaluatorUnavailable`, a refusal rather than a wrong verdict, and
+/// that somebody decided so on purpose.
+const NOT_RUN_BY_TIER_2: &[(&str, &str)] = &[(
+    "rs",
+    "Rust belongs to tier 1; a recipe here would race the rustc path",
+)];
+
+/// Every language the indexer parses has an evaluator, or a named exemption.
 ///
 /// These two lists are edited in different files and nothing made them agree:
 /// `parse_by_language` in axiom-ast decides what gets indexed, and `LANGUAGES`
 /// in axiom-vmm decides what can be run. Kotlin and Scala sat on the first list
 /// and not the second for as long as the tier existed, which is what #4 and #16
-/// were about. Adding a parser without an evaluator should fail here rather than
-/// surface later as a refusal an agent cannot act on.
+/// were about.
 ///
-/// Rust is the exception on purpose: it is compiled by tier 1, not by this tier.
+/// The first version of this test carried its own copy of the indexed list under
+/// a comment saying it mirrored the match arms. C and C++ were then added to the
+/// parser and not to the copy, so the check stayed green while the property it is
+/// named after was false: a C++ symbol could be indexed, queried and have its
+/// blast radius computed, and `axiom_eval_patch` on it refused. A guard that
+/// mirrors the list it guards drifts silently, which is the failure this
+/// repository keeps finding elsewhere and had here.
+///
+/// It now reads `AstIndex::indexed_extensions`, derived from the same table
+/// `parse_by_language` dispatches through, so adding a parser without an
+/// evaluator fails here. Both directions are checked: an exemption that has
+/// quietly acquired a recipe fails too, so a reason cannot outlive itself.
 #[test]
 fn every_indexed_language_has_an_evaluator() {
-    // Mirrors the match arms of parse_by_language.
-    let indexed = ["java", "kt", "scala", "py", "ts", "js", "go"];
+    let mut wrong = Vec::new();
 
-    for extension in indexed {
-        assert!(
-            native::language_for(extension).is_some(),
-            "the indexer parses .{extension} files, so a symbol from one can be \
-             asked about, and this tier has no way to run it"
-        );
+    for extension in AstIndex::indexed_extensions() {
+        let exempt = NOT_RUN_BY_TIER_2.iter().find(|(ext, _)| *ext == extension);
+
+        match (native::language_for(extension).is_some(), exempt) {
+            (true, None) | (false, Some(_)) => {}
+            (false, None) => wrong.push(format!(
+                ".{extension} is indexed, so a symbol from one can be asked about, \
+                 and this tier has no way to run it. Add a recipe to LANGUAGES, or \
+                 add the extension to NOT_RUN_BY_TIER_2 with the reason."
+            )),
+            (true, Some((_, reason))) => wrong.push(format!(
+                ".{extension} has a recipe now, so its exemption is stale and the \
+                 reason on it is no longer true: {reason}"
+            )),
+        }
     }
 
-    assert!(
-        native::language_for("rs").is_none(),
-        "Rust belongs to tier 1; a recipe here would race the rustc path"
-    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// An extension with no recipe is still refused rather than handed to whichever
@@ -594,6 +642,81 @@ async fn a_kotlin_method_can_be_named_and_is_evaluated_as_kotlin() -> Result<()>
         None => {
             assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
         }
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+/// C, and the assertion trap it shares with Java and Kotlin (#79).
+///
+/// C's `assert` is compiled out entirely when `NDEBUG` is defined, so a false
+/// assertion becomes a no-op and the snippet exits zero, which this tier would
+/// report as PASSED. Measured on 2026-09-11 with gcc 14 on Windows before the
+/// recipe was written: the default aborts, and `-DNDEBUG` printed the line after
+/// the assertion and exited 0. The recipe passes `-UNDEBUG`, so the assertion
+/// holds even if the flag arrives from elsewhere.
+///
+/// So the assertion that matters is the failing one, exactly as it is for Java.
+#[tokio::test]
+async fn a_c_assertion_is_checked_with_ndebug_undefined() -> Result<()> {
+    let (server, root) = polyglot_workspace()?;
+
+    let failing = eval(&server, "cIsOpen", "assert(1 + 1 == 3);").await;
+    assert_ne!(
+        status(&failing),
+        "PASSED",
+        "a false C assertion must never come back as a pass; under NDEBUG it is \
+         a no-op and the snippet exits zero: {failing:?}"
+    );
+
+    if toolchain_for("c").is_some() {
+        assert_eq!(status(&failing), "FAILED", "{failing:?}");
+        assert_eq!(engine(&failing), "tier2_native_c");
+
+        let passing = eval(&server, "cIsOpen", "assert(1 + 1 == 2);").await;
+        assert_eq!(status(&passing), "PASSED", "{passing:?}");
+    } else {
+        assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+/// C++ on the same footing, through its own compiler rather than C's.
+///
+/// A C++ snippet handed to a C compiler is the mistake `language_for` exists to
+/// prevent: the error would be filed against the snippet rather than against the
+/// language, which is the reason Kotlin is not handed to javac.
+#[tokio::test]
+async fn a_cpp_assertion_is_checked_and_runs_under_its_own_compiler() -> Result<()> {
+    let (server, root) = polyglot_workspace()?;
+
+    let failing = eval(&server, "CppGate", "assert(1 + 1 == 3);").await;
+    assert_ne!(status(&failing), "PASSED", "{failing:?}");
+
+    if toolchain_for("cpp").is_some() {
+        assert_eq!(status(&failing), "FAILED", "{failing:?}");
+        assert_eq!(
+            engine(&failing),
+            "tier2_native_cpp",
+            "a C++ symbol must reach a C++ compiler, not C's: {failing:?}"
+        );
+
+        let passing = eval(
+            &server,
+            "CppGate",
+            "assert(1 + 1 == 2);\nstd::string s = \"compiled as C++\";\nstd::cout << s << std::endl;",
+        )
+        .await;
+        assert_eq!(
+            status(&passing),
+            "PASSED",
+            "std::string and std::cout compile only as C++: {passing:?}"
+        );
+    } else {
+        assert_eq!(status(&failing), "EVALUATOR_UNAVAILABLE", "{failing:?}");
     }
 
     std::fs::remove_dir_all(&root).ok();

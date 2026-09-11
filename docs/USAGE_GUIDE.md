@@ -160,13 +160,18 @@ mentions in comment-stripped source, attributed to the function they sit in
 rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
-Measured on this repository on 2026-08-25 with
-`.github/scripts/blast_radius_stats.py`, 490 non-test symbols against 53 tests at
-depth 1: 103 symbols reach at least one test, and those select a mean of 10.1 and
-a median of 4, pruning a mean of 81.0% and a median of 92.5%. Mean pairwise
-Jaccard overlap between two symbols' answers is 0.11. The 387 symbols that reach
+Measured on this repository on 2026-09-11 with
+`.github/scripts/blast_radius_stats.py`, 657 non-test symbols against 94 tests at
+depth 1: 170 symbols reach at least one test, and those select a mean of 12.8 and
+a median of 6, pruning a mean of 86.4% and a median of 93.6%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.08. The 487 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a
 claim that changing one is safe.
+
+The population those figures rest on is pinned by
+`crates/axiom-cli/tests/docs_quote_the_real_numbers.rs`, so when the tree grows
+past it the sentence above goes red and the sweep is re-run rather than the
+numbers being edited to fit.
 
 These figures move with the graph. Re-run the script rather than quoting them.
 
