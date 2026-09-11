@@ -16,7 +16,7 @@ answer rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test --release --all-targets    # 267 tests over 60 binaries, all green on 2026-09-11
+cargo test --release --all-targets    # 287 tests over 64 binaries; 284 run on Windows, see README
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -73,9 +73,9 @@ axiom-core  ──► cli            the MCP server: tool schemas and dispatch
 axiom-cli                      clap subcommands, all of which drive AxiomMcpServer
 ```
 
-Source is 14,299 lines over 13 files as of 2026-09-11. Four files hold most of it:
-`axiom-ast/src/lib.rs` (4,916), `axiom-cli/src/main.rs` (1,991), `axiom-core/src/mcp.rs` (1,973),
-`axiom-vmm/src/native.rs` (1,776).
+Source is 14,700 lines over 13 files as of 2026-09-11. Four files hold most of it:
+`axiom-ast/src/lib.rs` (4,946), `axiom-core/src/mcp.rs` (2,048), `axiom-vmm/src/native.rs` (2,029),
+`axiom-cli/src/main.rs` (1,991).
 
 The CLI is not a separate code path. Every subcommand constructs an `AxiomMcpServer` and calls the
 same crates the MCP tools use, so a bug reproduced through `axiom blast-radius` is the same bug an

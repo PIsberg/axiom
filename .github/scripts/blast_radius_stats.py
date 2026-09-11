@@ -37,12 +37,20 @@ from itertools import combinations
 MAX_PAIRS = 200_000
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--binary", default="target/release/axiom", help="the axiom binary to ask")
+# Windows needs the extension, and the guard test that fails points a reader
+# straight at this script, so it has to run on the machine that reads it.
+default_binary = "target/release/axiom" + (".exe" if os.name == "nt" else "")
+parser.add_argument("--binary", default=default_binary, help="the axiom binary to ask")
 parser.add_argument("--path", default=".", help="a tree that has been scanned")
 parser.add_argument("--depth", default="1", help="blast-radius depth")
 parser.add_argument("--sample", type=int, default=0, help="ask about N symbols rather than all")
 parser.add_argument("--seed", type=int, default=1, help="sample seed, so a run is repeatable")
 args = parser.parse_args()
+
+# Resolved before the loop, because each call runs with cwd set to the scanned
+# tree: a relative binary would then be looked for under that tree, and on
+# Windows a forward-slashed relative program name is not found at all.
+binary = os.path.abspath(args.binary)
 
 index_path = os.path.join(args.path, ".axiom", "index.json")
 if not os.path.exists(index_path):
@@ -62,7 +70,7 @@ header = re.compile(r"^\s*(\d+) of (\d+) tests, ([\d.]+)% pruned")
 selected = []
 for done, symbol in enumerate(symbols):
     result = subprocess.run(
-        [args.binary, "blast-radius", "--symbol", symbol, "--depth", args.depth],
+        [binary, "blast-radius", "--symbol", symbol, "--depth", args.depth],
         cwd=args.path, capture_output=True, text=True)
     picked = set()
     for line in result.stdout.splitlines():
