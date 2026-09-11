@@ -6,6 +6,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+/// The signature every line parser shares, so `AstIndex::PARSERS` can hold them
+/// in one table rather than in a `match` nothing else can read.
+type LineParser = fn(&AstIndex, &str, &str, &mut usize);
+
 thread_local! {
     /// The file the calling thread is currently parsing, so `index_node_at`
     /// attributes a symbol to it whichever parser produced the symbol.
@@ -1018,6 +1022,42 @@ impl AstIndex {
         ".gradle",
     ];
 
+    /// Every extension the indexer has a parser for, and the parser that reads it.
+    ///
+    /// This is the one place a language is added. `indexed_extensions` is derived
+    /// from it and `every_indexed_language_has_an_evaluator` in axiom-cli reads
+    /// that, so a parser added here without an evaluator in axiom-vmm goes red
+    /// rather than shipping a language that can be indexed and not run.
+    ///
+    /// The list used to be copied into that test by hand. C and C++ were added to
+    /// the parser and not to the copy, so the check stayed green for a year while
+    /// the invariant it is named after was false. A guard that mirrors the list it
+    /// guards is not a guard.
+    const PARSERS: &[(&[&str], LineParser)] = &[
+        (&["java", "kt", "scala"], Self::parse_java_content),
+        (&["rs"], Self::parse_rust_content),
+        (&["py"], Self::parse_python_content),
+        (
+            &["ts", "js", "tsx", "jsx", "mjs", "cjs"],
+            Self::parse_ts_js_content,
+        ),
+        (&["go"], Self::parse_go_content),
+        (
+            &["c", "cpp", "cc", "cxx", "h", "hpp"],
+            Self::parse_c_cpp_content,
+        ),
+    ];
+
+    /// Every file extension `parse_by_language` will actually parse.
+    ///
+    /// Narrower than `SOURCE_EXTS` on purpose: `json` and `toml` are walked for
+    /// the environment fingerprint and have no parser.
+    pub fn indexed_extensions() -> impl Iterator<Item = &'static str> {
+        Self::PARSERS
+            .iter()
+            .flat_map(|(exts, _)| exts.iter().copied())
+    }
+
     pub const SOURCE_EXTS: &[&str] = &[
         "java", "rs", "py", "js", "ts", "jsx", "tsx", "mjs", "cjs", "go", "kt", "scala", "c",
         "cpp", "cc", "cxx", "h", "hpp", "json", "toml",
@@ -1906,18 +1946,8 @@ impl AstIndex {
         content: &str,
         nodes_count: &mut usize,
     ) {
-        match ext {
-            "java" | "kt" | "scala" => self.parse_java_content(file_path, content, nodes_count),
-            "rs" => self.parse_rust_content(file_path, content, nodes_count),
-            "py" => self.parse_python_content(file_path, content, nodes_count),
-            "ts" | "js" | "tsx" | "jsx" | "mjs" | "cjs" => {
-                self.parse_ts_js_content(file_path, content, nodes_count)
-            }
-            "go" => self.parse_go_content(file_path, content, nodes_count),
-            "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" => {
-                self.parse_c_cpp_content(file_path, content, nodes_count)
-            }
-            _ => {}
+        if let Some((_, parse)) = Self::PARSERS.iter().find(|(exts, _)| exts.contains(&ext)) {
+            parse(self, file_path, content, nodes_count);
         }
     }
 

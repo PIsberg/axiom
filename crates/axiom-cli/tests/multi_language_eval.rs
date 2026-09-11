@@ -10,6 +10,7 @@
 //! that the answer is `EVALUATOR_UNAVAILABLE` and never `PASSED`.
 
 use anyhow::Result;
+use axiom_ast::AstIndex;
 use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest, mcp::JsonRpcResponse};
 use axiom_vmm::native;
 use serde_json::{Value, json};
@@ -256,33 +257,71 @@ async fn a_javascript_symbol_is_evaluated_by_node() -> Result<()> {
     Ok(())
 }
 
-/// Every language the indexer parses has an evaluator.
+/// Extensions the indexer parses that tier 2 deliberately does not run, each
+/// with the reason it is exempt.
+///
+/// An entry here is a promise that `axiom_eval_patch` answers a symbol from such
+/// a file with `EvaluatorUnavailable`, a refusal rather than a wrong verdict, and
+/// that somebody decided so on purpose.
+const NOT_RUN_BY_TIER_2: &[(&str, &str)] = &[
+    (
+        "rs",
+        "Rust belongs to tier 1; a recipe here would race the rustc path",
+    ),
+    (
+        "c",
+        "no C recipe yet: a compiler needs INCLUDE and LIB, which confine_environment \
+         strips, and neither CI runner is known to have one reachable under confinement",
+    ),
+    ("cpp", "as c"),
+    ("cc", "as c"),
+    ("cxx", "as c"),
+    ("h", "as c"),
+    ("hpp", "as c"),
+];
+
+/// Every language the indexer parses has an evaluator, or a named exemption.
 ///
 /// These two lists are edited in different files and nothing made them agree:
 /// `parse_by_language` in axiom-ast decides what gets indexed, and `LANGUAGES`
 /// in axiom-vmm decides what can be run. Kotlin and Scala sat on the first list
 /// and not the second for as long as the tier existed, which is what #4 and #16
-/// were about. Adding a parser without an evaluator should fail here rather than
-/// surface later as a refusal an agent cannot act on.
+/// were about.
 ///
-/// Rust is the exception on purpose: it is compiled by tier 1, not by this tier.
+/// The first version of this test carried its own copy of the indexed list under
+/// a comment saying it mirrored the match arms. C and C++ were then added to the
+/// parser and not to the copy, so the check stayed green while the property it is
+/// named after was false: a C++ symbol could be indexed, queried and have its
+/// blast radius computed, and `axiom_eval_patch` on it refused. A guard that
+/// mirrors the list it guards drifts silently, which is the failure this
+/// repository keeps finding elsewhere and had here.
+///
+/// It now reads `AstIndex::indexed_extensions`, derived from the same table
+/// `parse_by_language` dispatches through, so adding a parser without an
+/// evaluator fails here. Both directions are checked: an exemption that has
+/// quietly acquired a recipe fails too, so a reason cannot outlive itself.
 #[test]
 fn every_indexed_language_has_an_evaluator() {
-    // Mirrors the match arms of parse_by_language.
-    let indexed = ["java", "kt", "scala", "py", "ts", "js", "go"];
+    let mut wrong = Vec::new();
 
-    for extension in indexed {
-        assert!(
-            native::language_for(extension).is_some(),
-            "the indexer parses .{extension} files, so a symbol from one can be \
-             asked about, and this tier has no way to run it"
-        );
+    for extension in AstIndex::indexed_extensions() {
+        let exempt = NOT_RUN_BY_TIER_2.iter().find(|(ext, _)| *ext == extension);
+
+        match (native::language_for(extension).is_some(), exempt) {
+            (true, None) | (false, Some(_)) => {}
+            (false, None) => wrong.push(format!(
+                ".{extension} is indexed, so a symbol from one can be asked about, \
+                 and this tier has no way to run it. Add a recipe to LANGUAGES, or \
+                 add the extension to NOT_RUN_BY_TIER_2 with the reason."
+            )),
+            (true, Some((_, reason))) => wrong.push(format!(
+                ".{extension} has a recipe now, so its exemption is stale and the \
+                 reason on it is no longer true: {reason}"
+            )),
+        }
     }
 
-    assert!(
-        native::language_for("rs").is_none(),
-        "Rust belongs to tier 1; a recipe here would race the rustc path"
-    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// An extension with no recipe is still refused rather than handed to whichever

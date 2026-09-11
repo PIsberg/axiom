@@ -151,3 +151,183 @@ async fn test_mcp_prompts_list_and_get() {
     assert!(prompt_text.contains("Optimize regex and add expiry check"));
     assert!(prompt_text.contains("axiom_get_blast_radius"));
 }
+
+/// Every declared prompt answers a `prompts/get`.
+///
+/// `prompts/list` and the dispatch below it are the same pair as `tools/list` and
+/// its `match`, and carry the same failure: a surface declared and not dispatched
+/// fails at call time, not at startup. `declared_tools_are_dispatched` has pinned
+/// that for tools since the tool set was seven. Nothing pinned it for prompts, and
+/// the test that existed named the three by hand and only ever `get`-ed one of
+/// them, so the other two were declared-and-unexercised.
+#[tokio::test]
+async fn every_declared_prompt_answers_a_get() {
+    let server = AxiomMcpServer::with_index(None).unwrap();
+
+    let listed = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(20)),
+            method: "prompts/list".to_string(),
+            params: None,
+        })
+        .await
+        .result
+        .expect("prompts/list must answer");
+
+    let prompts = listed["prompts"].as_array().expect("prompts array").clone();
+    assert!(
+        !prompts.is_empty(),
+        "a server that advertises no prompt is not what this pins"
+    );
+
+    for prompt in prompts {
+        let name = prompt["name"].as_str().expect("every prompt has a name");
+
+        // Supply every declared argument, so what is under test is the dispatch
+        // and not the required-argument check the next test covers.
+        let mut arguments = serde_json::Map::new();
+        for argument in prompt["arguments"].as_array().into_iter().flatten() {
+            let argument_name = argument["name"]
+                .as_str()
+                .expect("every argument has a name");
+            arguments.insert(argument_name.to_string(), json!("validate_token"));
+        }
+
+        let got = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(21)),
+                method: "prompts/get".to_string(),
+                params: Some(json!({ "name": name, "arguments": arguments })),
+            })
+            .await;
+
+        assert!(
+            got.error.is_none(),
+            "prompt '{name}' is advertised by prompts/list and the dispatch does not \
+             answer it: {:?}",
+            got.error
+        );
+        let messages = got.result.expect("a dispatched prompt returns a result");
+        assert!(
+            !messages["messages"]
+                .as_array()
+                .expect("messages array")
+                .is_empty(),
+            "prompt '{name}' answered with no messages"
+        );
+    }
+}
+
+/// An argument the declaration marks required is refused when it is absent.
+///
+/// Each handler reads its arguments with a default of the empty string. Without a
+/// check, a `prompts/get` that omits `target_symbol` renders "Refactor symbol ''"
+/// and hands an agent an instruction naming nothing, which it has no way to tell
+/// from a real one. This is the tool-schema defect wearing the prompt surface:
+/// the declaration says required, the dispatch accepted absence.
+#[tokio::test]
+async fn a_required_prompt_argument_is_refused_when_absent() {
+    let server = AxiomMcpServer::with_index(None).unwrap();
+
+    let listed = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(30)),
+            method: "prompts/list".to_string(),
+            params: None,
+        })
+        .await
+        .result
+        .expect("prompts/list must answer");
+
+    for prompt in listed["prompts"].as_array().expect("prompts array") {
+        let name = prompt["name"].as_str().expect("every prompt has a name");
+
+        for required in prompt["arguments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|a| a["required"] == json!(true))
+        {
+            let omitted = required["name"]
+                .as_str()
+                .expect("every argument has a name");
+
+            // Every other declared argument is supplied, so the only thing the
+            // refusal can be about is the one left out.
+            let mut arguments = serde_json::Map::new();
+            for argument in prompt["arguments"].as_array().into_iter().flatten() {
+                let argument_name = argument["name"].as_str().unwrap();
+                if argument_name != omitted {
+                    arguments.insert(argument_name.to_string(), json!("validate_token"));
+                }
+            }
+
+            let got = server
+                .handle_request(JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(json!(31)),
+                    method: "prompts/get".to_string(),
+                    params: Some(json!({ "name": name, "arguments": arguments })),
+                })
+                .await;
+
+            assert!(
+                got.error.is_some(),
+                "prompt '{name}' declares '{omitted}' required and answered without it; \
+                 the rendered prompt would carry an empty name an agent cannot detect"
+            );
+        }
+    }
+}
+
+/// Every declared resource answers a `resources/read`.
+///
+/// Same pair, third surface. A URI in `resources/list` that the read arm does not
+/// match is a dead link an agent finds by following it.
+#[tokio::test]
+async fn every_declared_resource_answers_a_read() {
+    let server = AxiomMcpServer::with_index(None).unwrap();
+
+    let listed = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(40)),
+            method: "resources/list".to_string(),
+            params: None,
+        })
+        .await
+        .result
+        .expect("resources/list must answer");
+
+    let resources = listed["resources"]
+        .as_array()
+        .expect("resources array")
+        .clone();
+    assert!(
+        !resources.is_empty(),
+        "a server that advertises no resource is not what this pins"
+    );
+
+    for resource in resources {
+        let uri = resource["uri"].as_str().expect("every resource has a uri");
+
+        let got = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(41)),
+                method: "resources/read".to_string(),
+                params: Some(json!({ "uri": uri })),
+            })
+            .await;
+
+        assert!(
+            got.error.is_none(),
+            "resource '{uri}' is advertised by resources/list and the read arm does not \
+             answer it: {:?}",
+            got.error
+        );
+    }
+}
