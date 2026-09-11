@@ -1299,7 +1299,17 @@ impl AstIndex {
 
         // Fallback: a test whose own name carries the symbol's, for the case
         // where nothing in the graph reaches it.
-        if impacted_tests.is_empty() && !simple_name.is_empty() {
+        //
+        // The guard is `tests_recorded`, the survey, and not `impacted_tests`,
+        // the selection. They differ whenever the graph reached a test that the
+        // requested depth excludes, and most sharply at depth 0, where nothing
+        // is ever selected because a test is recorded at `depth.max(1)` and 1 is
+        // never `<= 0`. Guarding on the selection fired this name matcher there
+        // and pushed its guesses into both the selection and `tests_by_depth`,
+        // so depth 0 reported more tests at depth 1 than depth 1 did, and
+        // answered a request for no traversal with a text heuristic the caller
+        // had no way to tell apart from an edge.
+        if tests_recorded.is_empty() && !simple_name.is_empty() {
             let test_pattern_1 = format!("{}Test", simple_name);
             let test_pattern_2 = format!("test{}", simple_name);
             let call_pattern_1 = format!("{}.", simple_name);

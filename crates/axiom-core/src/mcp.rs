@@ -368,6 +368,18 @@ pub fn configured_signing_key() -> Option<String> {
     None
 }
 
+/// Name a JSON value's type, for an error a caller can act on.
+fn json_type_of(value: &Value) -> &'static str {
+    match value {
+        Value::Number(_) => "a number",
+        Value::Bool(_) => "a boolean",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+        Value::Null => "null",
+        Value::String(_) => "a string",
+    }
+}
+
 /// Read a required string argument, or say why it is unusable.
 ///
 /// Defaulting a missing argument to "" turned a malformed request into a lookup
@@ -379,14 +391,46 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
         Some(Value::String(s)) => Ok(s.as_str()),
         Some(other) => Err(format!(
             "{name} must be a string, got {}",
-            match other {
-                Value::Number(_) => "a number",
-                Value::Bool(_) => "a boolean",
-                Value::Array(_) => "an array",
-                Value::Object(_) => "an object",
-                Value::Null => "null",
-                Value::String(_) => unreachable!(),
-            }
+            json_type_of(other)
+        )),
+    }
+}
+
+/// Read an optional count, distinguishing "absent" from "present and unusable".
+///
+/// The distinction is the whole point. `as_u64()` returns `None` for a negative
+/// number, a float and a string alike, so `.and_then(|v| v.as_u64())
+/// .unwrap_or(default)` gave a caller who asked for `max_depth: -1` the
+/// depth-1 answer with nothing in the reply saying the question had been
+/// rewritten. An absent argument still takes its default; that is what a
+/// default is for.
+fn optional_count(args: &Value, name: &str, default: usize) -> Result<usize, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(v) => Ok(v as usize),
+            None => Err(format!(
+                "{name} must be a whole number of zero or more, got {n}"
+            )),
+        },
+        Some(other) => Err(format!(
+            "{name} must be a whole number of zero or more, got {}",
+            json_type_of(other)
+        )),
+    }
+}
+
+/// Read an optional flag, refusing anything that is not a boolean.
+///
+/// `"true"` is a string, and `as_bool()` reads it as absent, so a caller who
+/// quoted the value was silently given the default and the opposite behaviour.
+fn optional_flag(args: &Value, name: &str, default: bool) -> Result<bool, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(format!(
+            "{name} must be true or false, got {}",
+            json_type_of(other)
         )),
     }
 }
@@ -1395,10 +1439,13 @@ impl AxiomMcpServer {
                     Ok(s) => s,
                     Err(e) => return Ok(json!({ "error": e })),
                 };
-                let token_budget = args
-                    .get("token_budget")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize);
+                let token_budget = match args.get("token_budget") {
+                    None | Some(Value::Null) => None,
+                    _ => match optional_count(&args, "token_budget", 0) {
+                        Ok(n) => Some(n),
+                        Err(e) => return Ok(json!({ "error": e })),
+                    },
+                };
 
                 if let Some(node) = self.ast_index.get_symbol(symbol) {
                     let supertypes = self.ast_index.get_supertypes(symbol);
@@ -1458,11 +1505,17 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let depth = args
-                    .get("depth")
-                    .or_else(|| args.get("max_depth"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1) as usize;
+                // Named for whichever spelling the caller sent, so the refusal
+                // points at the key that is actually in their request.
+                let depth_key = if args.get("depth").is_some() {
+                    "depth"
+                } else {
+                    "max_depth"
+                };
+                let depth = match optional_count(&args, depth_key, 1) {
+                    Ok(d) => d,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
                 if let Some(res) = self.ast_index.compute_blast_radius(symbol, depth) {
                     Ok(json!(res))
                 } else {
@@ -1685,18 +1738,26 @@ impl AxiomMcpServer {
                     Ok(s) => s,
                     Err(e) => return Ok(json!({ "error": e })),
                 };
-                let speculative = args
-                    .get("speculative")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let commit_staged = args
-                    .get("commit_staged")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let rollback_staged = args
-                    .get("rollback_staged")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let (speculative, commit_staged, rollback_staged) = match (
+                    optional_flag(&args, "speculative", false),
+                    optional_flag(&args, "commit_staged", false),
+                    optional_flag(&args, "rollback_staged", false),
+                ) {
+                    (Ok(s), Ok(c), Ok(r)) => (s, c, r),
+                    (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                        return Ok(json!({ "error": e }));
+                    }
+                };
+
+                // Committing and discarding the same staged mutation are
+                // opposites. Taking the rollback branch and reporting
+                // ROLLED_BACK answered a request the caller did not make, and
+                // did it by throwing their work away.
+                if commit_staged && rollback_staged {
+                    return Ok(json!({
+                        "error": "commit_staged and rollback_staged are opposites; set one or the other, not both"
+                    }));
+                }
 
                 if rollback_staged {
                     let mut staged = self.staged_mutations.write().unwrap();
@@ -1917,11 +1978,16 @@ impl AxiomMcpServer {
             }
 
             "axiom_search_regex" => {
-                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                let max = args
-                    .get("max_results")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(20) as usize;
+                // A blank query matches every line, so accepting one answered
+                // "show me the repository" to a caller who had asked nothing.
+                let query = match required_str(&args, "query") {
+                    Ok(q) => q,
+                    Err(e) => return Ok(json!({ "error": e, "matches": [], "matches_count": 0 })),
+                };
+                let max = match optional_count(&args, "max_results", 20) {
+                    Ok(n) => n,
+                    Err(e) => return Ok(json!({ "error": e, "matches": [], "matches_count": 0 })),
+                };
                 let requested = args
                     .get("mode")
                     .and_then(|v| v.as_str())

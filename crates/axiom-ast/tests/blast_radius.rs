@@ -832,3 +832,117 @@ fn java_blast_radius_isolates_unrelated_tests_and_traces_transitive_dependencies
         "PaymentGateway does NOT reach UserServiceTest: {gw_impacted:?}"
     );
 }
+
+// The survey is a property of the graph, not of the depth that was asked for.
+//
+// `impacted_tests` is the selection and narrows with `max_depth`, which is the
+// point. `tests_by_depth` is the survey beside it, walked to `SURVEY_DEPTH` so
+// a caller can see what widening would add. A survey that moves with the depth
+// asked for cannot serve that purpose, and it moved: the name-matching
+// fallback is guarded by `impacted_tests.is_empty()`, while its own comment
+// says it is "for the case where nothing in the graph reaches it". Those are
+// different conditions. At depth 0 nothing is ever selected, because a test is
+// recorded at `depth.max(1)` and 1 is never `<= 0`, so the fallback fired and
+// pushed name-matched tests into both the selection and `tests_by_depth[1]`.
+//
+// Measured on this repository before the fix, for
+// `crates/axiom-vmm/src/native.rs::run_with_timeout`: depth 0 reported four
+// tests at depth 1 where depth 1 reported two, and selected two tests that no
+// edge supports.
+
+/// A graph where a real call edge reaches a test, and the symbol's name is one
+/// the fallback would also match, so the two sources of an answer can be told
+/// apart.
+fn dir_with_a_reachable_test(tag: &str) -> TempDir {
+    let dir = TempDir::new(tag);
+    dir.write(
+        "thing.rs",
+        "pub fn important_calculation(a: i32) -> i32 { a * 2 }
+         pub fn caller(a: i32) -> i32 { important_calculation(a) }
+",
+    );
+    dir.write(
+        "thing_test.rs",
+        "#[test]
+fn test_important_calculation() {
+             assert_eq!(important_calculation(2), 4);
+}
+",
+    );
+    dir
+}
+
+#[test]
+fn the_survey_does_not_move_with_the_depth_asked_for() {
+    let dir = dir_with_a_reachable_test("survey-stable");
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    let baseline = by_depth(&index, "important_calculation", 1);
+    for depth in [0usize, 2, 3, 5] {
+        assert_eq!(
+            by_depth(&index, "important_calculation", depth),
+            baseline,
+            "tests_by_depth moved between depth 1 and depth {depth}; it surveys              the graph, so the depth asked for cannot change it"
+        );
+    }
+}
+
+/// Asking for no traversal selects nothing, rather than falling through to the
+/// name matcher. An empty answer is one a caller can act on; a heuristic
+/// answer presented as a graph answer is not.
+#[test]
+fn depth_zero_selects_nothing_rather_than_guessing() {
+    let dir = dir_with_a_reachable_test("depth-zero");
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    assert!(
+        impacted(&index, "important_calculation", 0).is_empty(),
+        "depth 0 asks for no traversal, so nothing is reachable: {:?}",
+        impacted(&index, "important_calculation", 0)
+    );
+    assert_eq!(
+        impacted(&index, "important_calculation", 1),
+        vec!["test_important_calculation".to_string()],
+        "depth 1 still selects what the edge reaches"
+    );
+}
+
+/// The fallback still earns its place. A symbol no edge reaches, whose name a
+/// test carries by convention, is reported rather than answered with silence.
+///
+/// Written in Java because the two name patterns the fallback carries,
+/// `{Simple}Test` and `test{Simple}`, are JUnit conventions. A Rust function is
+/// only classified as a test when its own name starts with `test_`, so neither
+/// pattern can fire for Rust and a Rust fixture would pin nothing.
+#[test]
+fn a_symbol_no_edge_reaches_still_falls_back_to_its_name() {
+    let dir = TempDir::new("orphan-fallback");
+    // Nothing in WidgetTest calls Widget; only the class name carries it.
+    dir.write(
+        "Widget.java",
+        "package app;
+public class Widget {
+    public int value() { return 1; }
+}
+",
+    );
+    dir.write(
+        "WidgetTest.java",
+        "package app;
+public class WidgetTest {
+    @Test
+             public void testWidget() { assertTrue(true); }
+}
+",
+    );
+
+    let index = AstIndex::new();
+    index.scan_directory(dir.path()).expect("scan");
+
+    assert!(
+        !impacted(&index, "app.Widget", 1).is_empty(),
+        "the name fallback is still the honest answer when no edge reaches a symbol"
+    );
+}
