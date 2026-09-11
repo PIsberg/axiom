@@ -26,7 +26,7 @@
 use crate::artifact_cache;
 use axiom_proto::{CtopReport, CtopStatus, DiagnosticSpan, FailedCheck};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -432,6 +432,165 @@ static SCALA: NativeLanguage = NativeLanguage {
     }],
 };
 
+/// Hoist the preprocessor directives a snippet brings, then wrap the rest in a
+/// `main`, the way `java_wrap` hoists imports.
+///
+/// An `#include` inside a function body is legal and almost never what was
+/// meant, and a `#define` there would not reach the headers above it.
+fn c_family_wrap(snippet: &str, headers: &str) -> String {
+    let mut directives = Vec::new();
+    let mut body = Vec::new();
+
+    for line in snippet.lines() {
+        if line.trim_start().starts_with('#') {
+            directives.push(line);
+        } else {
+            body.push(line);
+        }
+    }
+
+    let brought = if directives.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", directives.join("\n"))
+    };
+    let body_str = body.join("\n");
+
+    format!("{headers}{brought}\nint main(void) {{\n{body_str}\n    return 0;\n}}\n")
+}
+
+fn c_wrap(snippet: &str) -> String {
+    c_family_wrap(
+        snippet,
+        "#include <assert.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n",
+    )
+}
+
+fn cpp_wrap(snippet: &str) -> String {
+    c_family_wrap(
+        snippet,
+        "#include <cassert>\n#include <cstdio>\n#include <cstring>\n#include <iostream>\n#include <string>\n",
+    )
+}
+
+/// Where a compiled C or C++ snippet is written, with the platform's suffix.
+///
+/// MinGW appends `.exe` to an extensionless `-o` argument, so naming the output
+/// and then running a different path is a way to run the previous evaluation's
+/// binary. Both halves ask for the same name.
+fn c_family_binary(dir: &Path) -> PathBuf {
+    dir.join(format!("axiom_eval{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// `-UNDEBUG` is this family's `-ea`, and it is not optional.
+///
+/// C's `assert` is compiled out entirely when `NDEBUG` is defined, so a false
+/// assertion becomes a no-op and the snippet exits zero, which this tier would
+/// report as PASSED. Measured on 2026-09-11 with gcc 14 on Windows:
+/// `assert(1 + 1 == 3)` aborted with a non-zero status by default, and with
+/// `-DNDEBUG` printed the line after it and exited 0. `-U` after a `-D` wins, so
+/// this holds even if a flag arrives from elsewhere.
+///
+/// It is the same trap as Java's and Kotlin's, asked and answered per language
+/// rather than copied: Scala needs no flag because `Predef.assert` throws
+/// unconditionally, and a recipe copied from there would have lost this one.
+const C_FAMILY_ASSERTIONS_ON: &str = "-UNDEBUG";
+
+fn c_family_build(program: &str, src: &Path, dir: &Path) -> CommandSpec {
+    (
+        program.to_string(),
+        vec![
+            src.display().to_string(),
+            C_FAMILY_ASSERTIONS_ON.to_string(),
+            "-o".to_string(),
+            c_family_binary(dir).display().to_string(),
+        ],
+    )
+}
+
+fn c_family_run(_src: &Path, dir: &Path) -> CommandSpec {
+    (c_family_binary(dir).display().to_string(), Vec::new())
+}
+
+/// C, indexed since the C/C++ parser landed and unrunnable until now (#79).
+///
+/// Three recipes rather than one because the name a C compiler answers to is not
+/// portable: `cc` is the POSIX spelling and is absent on Windows, MinGW installs
+/// `gcc`, and an LLVM install brings `clang` and often neither of the others.
+/// MSVC's `cl` is deliberately not here: it reads `INCLUDE` and `LIB`, which
+/// `confine_environment` strips, so it would read as a broken toolchain rather
+/// than a missing one. Verified on 2026-09-11 that gcc needs nothing outside the
+/// existing allowlist: it compiled and ran with only PATH, PATHEXT, SYSTEMROOT,
+/// TEMP and TMP set.
+static C: NativeLanguage = NativeLanguage {
+    extension: "c",
+    engine: "tier2_native_c",
+    assertion_tokens: &["assert("],
+    is_self_contained: |s| s.contains("int main("),
+    wrap: c_wrap,
+    recipes: &[
+        Recipe {
+            probe: "cc",
+            probe_args: &["--version"],
+            version_args: &["--version"],
+            file_name: "axiom_eval.c",
+            build: Some(|src, dir| c_family_build("cc", src, dir)),
+            run: c_family_run,
+        },
+        Recipe {
+            probe: "gcc",
+            probe_args: &["--version"],
+            version_args: &["--version"],
+            file_name: "axiom_eval.c",
+            build: Some(|src, dir| c_family_build("gcc", src, dir)),
+            run: c_family_run,
+        },
+        Recipe {
+            probe: "clang",
+            probe_args: &["--version"],
+            version_args: &["--version"],
+            file_name: "axiom_eval.c",
+            build: Some(|src, dir| c_family_build("clang", src, dir)),
+            run: c_family_run,
+        },
+    ],
+};
+
+/// C++, on the same footing as C and with the same assertion trap.
+static CPP: NativeLanguage = NativeLanguage {
+    extension: "cpp",
+    engine: "tier2_native_cpp",
+    assertion_tokens: &["assert(", "throw "],
+    is_self_contained: |s| s.contains("int main("),
+    wrap: cpp_wrap,
+    recipes: &[
+        Recipe {
+            probe: "c++",
+            probe_args: &["--version"],
+            version_args: &["--version"],
+            file_name: "axiom_eval.cpp",
+            build: Some(|src, dir| c_family_build("c++", src, dir)),
+            run: c_family_run,
+        },
+        Recipe {
+            probe: "g++",
+            probe_args: &["--version"],
+            version_args: &["--version"],
+            file_name: "axiom_eval.cpp",
+            build: Some(|src, dir| c_family_build("g++", src, dir)),
+            run: c_family_run,
+        },
+        Recipe {
+            probe: "clang++",
+            probe_args: &["--version"],
+            version_args: &["--version"],
+            file_name: "axiom_eval.cpp",
+            build: Some(|src, dir| c_family_build("clang++", src, dir)),
+            run: c_family_run,
+        },
+    ],
+};
+
 static LANGUAGES: &[&NativeLanguage] = &[
     &PYTHON,
     &JAVASCRIPT,
@@ -440,6 +599,8 @@ static LANGUAGES: &[&NativeLanguage] = &[
     &JAVA,
     &KOTLIN,
     &SCALA,
+    &C,
+    &CPP,
 ];
 
 /// The driver for a file extension, if this tier has one.
@@ -456,6 +617,11 @@ pub fn language_for(extension: &str) -> Option<&'static NativeLanguage> {
         "tsx" => "ts",
         "kts" => "kt",
         "sc" => "scala",
+        // Every spelling the indexer parses reaches the one recipe set for its
+        // language; `h` and `hpp` are headers, and a snippet from a symbol in
+        // one still compiles as a translation unit.
+        "cc" | "cxx" | "hpp" | "hh" => "cpp",
+        "h" => "c",
         other => other,
     };
     LANGUAGES
