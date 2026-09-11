@@ -69,6 +69,30 @@ jobs:
         with:
           apps: scala scalac
 
+      # C and C++ for the same reason (#79). Both runners ship a compiler:
+      # ubuntu has cc and c++, the windows image has MinGW gcc and g++. This step
+      # does not install one, it proves one is reachable, because
+      # AXIOM_REQUIRE_TOOLCHAINS turns a missing compiler into a hard failure in
+      # the Test step below and a failure there reads as a broken recipe rather
+      # than as a runner without a compiler.
+      - name: A C and C++ toolchain is reachable (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          (cc --version || gcc --version || clang --version)
+          (c++ --version || g++ --version || clang++ --version)
+
+      - name: A C and C++ toolchain is reachable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $c = @('cc','gcc','clang') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+          $cxx = @('c++','g++','clang++') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+          if (-not $c) { throw 'no C compiler on PATH; the C recipe would assert only its refusal branch' }
+          if (-not $cxx) { throw 'no C++ compiler on PATH; the C++ recipe would assert only its refusal branch' }
+          & $c --version
+          & $cxx --version
+
       - name: Test
         run: cargo test --release --all-targets
 

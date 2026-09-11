@@ -443,6 +443,13 @@ pub struct StagedMutation {
     pub timestamp: u64,
 }
 
+/// One argument of a declared prompt: name, description, and whether a
+/// `prompts/get` without it is refused.
+type PromptArgument = (&'static str, &'static str, bool);
+
+/// One entry of `AxiomMcpServer::PROMPTS`: name, description, arguments.
+type DeclaredPrompt = (&'static str, &'static str, &'static [PromptArgument]);
+
 pub struct AxiomMcpServer {
     /// Verifications this server knows about, by task id.
     ///
@@ -817,58 +824,7 @@ impl AxiomMcpServer {
             "prompts/list" => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id,
-                result: Some(json!({
-                    "prompts": [
-                        {
-                            "name": "axiom_review_patch",
-                            "description": "Review a proposed code patch against AST blast radius and security rules",
-                            "arguments": [
-                                {
-                                    "name": "symbol_path",
-                                    "description": "Symbol path being reviewed",
-                                    "required": true
-                                }
-                            ]
-                        },
-                        {
-                            "name": "axiom_targeted_refactor",
-                            "description": "Safely refactor a code symbol using blast radius test selection and atomic mutations",
-                            "arguments": [
-                                {
-                                    "name": "target_symbol",
-                                    "description": "The symbol to refactor",
-                                    "required": true
-                                },
-                                {
-                                    "name": "goal",
-                                    "description": "Refactoring objective",
-                                    "required": true
-                                }
-                            ]
-                        },
-                        {
-                            "name": "axiom_attest_task",
-                            "description": "Attest a task completion with cryptographic Merkle proof",
-                            "arguments": [
-                                {
-                                    "name": "prompt",
-                                    "description": "The user task prompt",
-                                    "required": true
-                                },
-                                {
-                                    "name": "symbol_path",
-                                    "description": "The modified symbol",
-                                    "required": true
-                                },
-                                {
-                                    "name": "ctop_task_id",
-                                    "description": "CTOP task ID",
-                                    "required": false
-                                }
-                            ]
-                        }
-                    ]
-                })),
+                result: Some(json!({ "prompts": Self::declared_prompts() })),
                 error: None,
             },
 
@@ -1186,7 +1142,100 @@ impl AxiomMcpServer {
         Err(format!("Resource URI '{uri}' is not supported"))
     }
 
+    /// Every prompt this server advertises, with its arguments.
+    ///
+    /// `prompts/list` renders this and `prompts/get` validates against it, so the
+    /// declaration and the dispatch cannot disagree about a name or about which
+    /// arguments are required. They used to be two hand-kept copies, which is the
+    /// shape that produced the tool-schema bugs `declared_tools_are_dispatched`
+    /// now pins: a schema is all an agent has to go on, and a mismatch is answered
+    /// with a complaint about a name the agent was never shown.
+    const PROMPTS: &[DeclaredPrompt] = &[
+        (
+            "axiom_review_patch",
+            "Review a proposed code patch against AST blast radius and security rules",
+            &[("symbol_path", "Symbol path being reviewed", true)],
+        ),
+        (
+            "axiom_targeted_refactor",
+            "Safely refactor a code symbol using blast radius test selection and atomic mutations",
+            &[
+                ("target_symbol", "The symbol to refactor", true),
+                ("goal", "Refactoring objective", true),
+            ],
+        ),
+        (
+            "axiom_attest_task",
+            "Attest a task completion with cryptographic Merkle proof",
+            &[
+                ("prompt", "The user task prompt", true),
+                ("symbol_path", "The modified symbol", true),
+                ("ctop_task_id", "CTOP task ID", false),
+            ],
+        ),
+    ];
+
+    /// `PROMPTS` as the JSON `prompts/list` returns.
+    fn declared_prompts() -> Value {
+        Value::Array(
+            Self::PROMPTS
+                .iter()
+                .map(|(name, description, arguments)| {
+                    json!({
+                        "name": name,
+                        "description": description,
+                        "arguments": arguments
+                            .iter()
+                            .map(|(arg, arg_description, required)| json!({
+                                "name": arg,
+                                "description": arg_description,
+                                "required": required,
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// Refuse a `prompts/get` that omits an argument the declaration marks required.
+    ///
+    /// Each handler below reads its arguments with a default of the empty string,
+    /// which without this check renders a missing required argument into the
+    /// prompt text: an agent is handed an instruction to refactor a symbol with no
+    /// name, or to review a patch to nothing, and cannot tell that from a real
+    /// request. It is the same defect as a tool schema that advertises an argument
+    /// the dispatch does not read, and it belongs to the same rule: never answer
+    /// with something the caller has no way to know is wrong.
+    fn check_required_prompt_arguments(name: &str, args: &Value) -> Result<(), String> {
+        let (_, _, arguments) = Self::PROMPTS
+            .iter()
+            .find(|(prompt, _, _)| *prompt == name)
+            .ok_or_else(|| format!("Unknown prompt: {name}"))?;
+
+        let missing: Vec<&str> = arguments
+            .iter()
+            .filter(|(_, _, required)| *required)
+            .map(|(arg, _, _)| *arg)
+            .filter(|arg| {
+                args.get(arg)
+                    .and_then(|v| v.as_str())
+                    .is_none_or(|v| v.trim().is_empty())
+            })
+            .collect();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Prompt '{name}' requires {missing:?}; without them the rendered prompt                  would name no symbol at all"
+            ))
+        }
+    }
+
     fn handle_prompt_get(&self, name: &str, args: &Value) -> Result<Value, String> {
+        Self::check_required_prompt_arguments(name, args)?;
+
         match name {
             "axiom_review_patch" => {
                 let symbol_path = args

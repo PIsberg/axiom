@@ -15,5 +15,5 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 rayon.workspace = true
-scip = "0.9.0"
+scip = "0.10.0"
 protobuf = "3.7.2"

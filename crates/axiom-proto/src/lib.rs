@@ -239,6 +239,31 @@ fn seal_over(
     format!("blake3_seal_{}", hasher.finalize().to_hex())
 }
 
+/// The stored digest of the prompt a record was issued for.
+///
+/// One function so `generate` and `verify` cannot disagree about how it is
+/// computed, which is the same reason `seal_over` is one function.
+fn prompt_digest_of(prompt: &str) -> String {
+    format!("blake3:{}", &blake3::hash(prompt.as_bytes()).to_hex()[..32])
+}
+
+/// The stored digest of what was checked and how.
+///
+/// Every input is a field the seal covers, which is what lets `verify` re-derive
+/// it rather than the seal having to cover it too.
+fn sandbox_trace_hash_of(
+    verified_by: &str,
+    verification_detail: &str,
+    ctop_task_id: &str,
+) -> String {
+    let mut trace = blake3::Hasher::new();
+    for part in [verified_by, verification_detail, ctop_task_id] {
+        trace.update(&(part.len() as u64).to_le_bytes());
+        trace.update(part.as_bytes());
+    }
+    format!("trace:{}", &trace.finalize().to_hex()[..32])
+}
+
 impl ProvenanceAttestation {
     pub fn generate(details: NewAttestation<'_>) -> Self {
         let NewAttestation {
@@ -261,17 +286,13 @@ impl ProvenanceAttestation {
         // records for one prompt share it; two for different prompts do not,
         // which is what lets a reader group records by prompt without holding
         // the prompt text.
-        let prompt_digest = format!("blake3:{}", &blake3::hash(prompt.as_bytes()).to_hex()[..32]);
+        let prompt_digest = prompt_digest_of(prompt);
 
         // A digest of what was checked and how: the kind, the detail, and the
         // task id it rests on. It used to be a slice of the same combined
         // digest as everything else, so it named no trace in particular.
-        let mut trace = blake3::Hasher::new();
-        for part in [verified_by, verification_detail, ctop_task_id] {
-            trace.update(&(part.len() as u64).to_le_bytes());
-            trace.update(part.as_bytes());
-        }
-        let sandbox_trace_hash = format!("trace:{}", &trace.finalize().to_hex()[..32]);
+        let sandbox_trace_hash =
+            sandbox_trace_hash_of(verified_by, verification_detail, ctop_task_id);
 
         let seal = seal_over(
             parent_merkle_root,
@@ -340,7 +361,29 @@ impl ProvenanceAttestation {
             &self.previous_seal,
             prompt,
         );
-        self.seal == expected
+        if self.seal != expected {
+            return false;
+        }
+
+        // Both of these are stored, published, and outside the seal. They are
+        // also pure functions of fields the seal does cover, so they do not need
+        // to go into `seal_over`, which would invalidate every record ever
+        // issued. Re-deriving them here rejects a record whose stored digest
+        // disagrees with the fields it is supposed to be a digest of.
+        //
+        // Without this, editing `sandbox_trace_hash` in a ledger left a record
+        // that still printed VALID while naming a verification that never
+        // happened, and `prompt_digest` is exported as
+        // `externalParameters.promptDigest` in the SLSA statement, so an edited
+        // one is published as though the seal vouched for it. That is the defect
+        // that widened `seal_over` to cover `verified_by`, one field along.
+        self.prompt_digest == prompt_digest_of(prompt)
+            && self.sandbox_trace_hash
+                == sandbox_trace_hash_of(
+                    &self.verified_by,
+                    &self.verification_detail,
+                    &self.ctop_proof_hash,
+                )
     }
 
     /// Convert this attestation into a standardized SLSA v1.0 / in-toto Provenance statement
