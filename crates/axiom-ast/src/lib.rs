@@ -2725,6 +2725,48 @@ impl AstIndex {
     /// of one file still share a key. `symbol_lines` keeps every declaration
     /// line for exactly that case, so the calls inside each are still charged
     /// to the right key even when the key cannot tell them apart.
+    /// Whether a test attribute sits above the declaration on `line_no`.
+    ///
+    /// `#[test]` is conventionally written on its own line, so reading only the
+    /// declaration meant a Rust function counted as a test solely because its
+    /// name began with `test_`. This repository mostly does not name them that
+    /// way: 305 attributes over `crates/`, 95 with that prefix, so 210 of its
+    /// own tests were indexed as ordinary functions. That understated
+    /// `total_tests_in_repo` by a factor of three, and worse, made those tests
+    /// unselectable, because the blast-radius walk only records a node whose
+    /// kind is `test`. A test the selector cannot see is a recall failure, and
+    /// recall is the direction that reports a pass for code that never ran.
+    ///
+    /// The walk stops at the first line that is neither an attribute, a doc
+    /// comment, nor blank, so a function does not inherit the annotation of
+    /// whatever happens to sit above it. `lines` is the comment- and
+    /// string-stripped text, which is what keeps an attribute written inside a
+    /// fixture string from counting; this repository writes a great deal of
+    /// Rust inside string literals.
+    ///
+    /// The JVM parser has read its `@Test` this way all along; this is the same
+    /// rule for Rust.
+    fn rust_test_attribute_above(lines: &[&str], line_no: usize) -> bool {
+        const ATTRIBUTES: [&str; 4] = ["#[test]", "#[tokio::test]", "#[bench]", "#[actix"];
+
+        let mut idx = line_no;
+        while idx > 0 {
+            idx -= 1;
+            let prev = lines.get(idx).copied().unwrap_or("").trim();
+            if prev.is_empty() || prev.starts_with("///") || prev.starts_with("//") {
+                continue;
+            }
+            if prev.starts_with("#[") || prev.starts_with("#![") {
+                if ATTRIBUTES.iter().any(|a| prev.starts_with(a)) {
+                    return true;
+                }
+                continue;
+            }
+            break;
+        }
+        false
+    }
+
     fn parse_rust_content(&self, file_path: &str, content: &str, nodes_count: &mut usize) {
         let mut uses = Vec::new();
 
@@ -2848,7 +2890,8 @@ impl AstIndex {
                         let name = words[words.len() - 1].trim();
                         if Self::is_valid_identifier(name) {
                             let symbol = Self::rust_symbol_in(file_path, &owner_stack, name);
-                            let is_test = name.starts_with("test_") || decl.contains("#[test]");
+                            let is_test = name.starts_with("test_")
+                                || Self::rust_test_attribute_above(&counted, line_no);
                             let kind = if is_test { "test" } else { "function" };
 
                             self.index_node_at(
