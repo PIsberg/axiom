@@ -112,3 +112,103 @@ fn the_prompt_digest_is_a_digest_of_the_prompt() {
     });
     assert_ne!(record().prompt_digest, other_prompt.prompt_digest);
 }
+
+// The three fields below are hashed by `seal_over` and had no edited-field test,
+// so a change that quietly dropped one from the digest would not have been
+// caught by this file, which is the file named after catching exactly that.
+
+#[test]
+fn editing_the_agent_identity_breaks_the_seal() {
+    let mut r = record();
+    r.agent_identity = "agent-B".to_string();
+    assert!(
+        !r.verify(SYMBOL, PROMPT),
+        "the identity a record is issued under must not be editable afterwards; \
+         it is unverified when it arrives, and the seal is the only thing that \
+         makes storing it acceptable"
+    );
+}
+
+#[test]
+fn editing_the_task_id_breaks_the_seal() {
+    let mut r = record();
+    r.ctop_proof_hash = "eval_8".to_string();
+    assert!(
+        !r.verify(SYMBOL, PROMPT),
+        "the task id names the evaluation the record rests on; pointing it at a \
+         different one is the whole forgery"
+    );
+}
+
+#[test]
+fn editing_the_previous_seal_breaks_the_seal() {
+    let mut r = record();
+    r.previous_seal = "blake3_seal_somethingelse".to_string();
+    assert!(
+        !r.verify(SYMBOL, PROMPT),
+        "the chain is what makes a deleted record visible; a repairable link is \
+         no link"
+    );
+}
+
+// Two stored fields are outside `seal_over` and always were. Both are pure
+// functions of fields it does cover, so `verify` re-derives them rather than the
+// seal format changing, which would invalidate every record ever issued.
+
+#[test]
+fn editing_the_sandbox_trace_hash_is_rejected() {
+    let mut r = record();
+    r.sandbox_trace_hash = "trace:0000000000000000000000000000000f".to_string();
+    assert!(
+        !r.verify(SYMBOL, PROMPT),
+        "the trace digest names what was checked and how; a record that still \
+         verifies with an edited one vouches for a verification that did not \
+         happen, which is the defect that widened seal_over one field along"
+    );
+}
+
+#[test]
+fn editing_the_prompt_digest_is_rejected() {
+    let mut r = record();
+    r.prompt_digest = "blake3:0000000000000000000000000000000f".to_string();
+    assert!(
+        !r.verify(SYMBOL, PROMPT),
+        "prompt_digest is published as externalParameters.promptDigest in the \
+         SLSA statement, so an edited one is exported as though the seal \
+         vouched for it"
+    );
+}
+
+/// The derived digests are re-derived, not merely compared to a copy.
+///
+/// If `verify` compared `prompt_digest` against a second stored copy, or against
+/// itself, both tests above would pass and neither would establish anything.
+/// This pins that the value actually tracks its inputs.
+#[test]
+fn the_derived_digests_track_the_fields_they_digest() {
+    let a = record();
+
+    let b = ProvenanceAttestation::generate(NewAttestation {
+        parent_merkle_root: "root_parent",
+        commit_merkle_root: "root_commit",
+        agent_identity: "agent-A",
+        prompt: "Tighten the guard",
+        symbol_path: SYMBOL,
+        ctop_task_id: "eval_7",
+        // The one difference, and it is an input to the trace digest.
+        verified_by: "sandbox",
+        verification_detail: "cargo test",
+        previous_seal: "",
+    });
+
+    assert_ne!(
+        a.sandbox_trace_hash, b.sandbox_trace_hash,
+        "a record checked by the sandbox and one merely reported must not share \
+         a trace digest"
+    );
+    assert_eq!(
+        a.prompt_digest, b.prompt_digest,
+        "two records for one prompt share its digest, which is what lets a \
+         reader group them without holding the prompt text"
+    );
+}
