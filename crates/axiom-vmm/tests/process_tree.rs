@@ -32,30 +32,52 @@ fn a_grandchild_does_not_outlive_the_deadline() {
         .to_string()
         .replace(char::from(92u8), "/");
 
-    // The grandchild appends to the heartbeat file ten times a second for a
-    // minute. The child itself then sleeps past the deadline so the evaluator
-    // has to kill it.
+    // The grandchild writes once the moment it is alive, then keeps appending
+    // ten times a second for a minute. That first write is separate from the
+    // loop because the whole test rests on it: `before > 0` below is what
+    // separates "the tree was killed" from "nothing ever ran".
+    //
+    // The child waits for that write before sleeping past the deadline. It
+    // does not make the grandchild start any sooner, but it keeps the child
+    // alive for exactly as long as the grandchild has not started, so the two
+    // are killed as one tree rather than the child having already moved on.
+    //
     // Python reads the grandchild's program from a string, and that string
-    // needs newlines spelled as escapes: `chr(10)` keeps the escaping out of
-    // this file.
+    // needs newlines spelled as escapes: the `{:?}` on `grandchild` keeps the
+    // escaping out of this file.
     let grandchild = format!(
-        "import time\nfor _ in range(600):\n    open('{path_literal}', 'a').write('x')\n    time.sleep(0.1)\n"
+        "import time\nopen('{path_literal}', 'a').write('x')\nfor _ in range(600):\n    open('{path_literal}', 'a').write('x')\n    time.sleep(0.1)\n"
     );
     let snippet = format!(
-        "import subprocess, sys, time\nprogram = {grandchild:?}\nsubprocess.Popen([sys.executable, '-c', program])\ntime.sleep(60)\n"
+        "import os, subprocess, sys, time\nprogram = {grandchild:?}\nsubprocess.Popen([sys.executable, '-c', program])\nwhile not os.path.exists('{path_literal}'):\n    time.sleep(0.02)\ntime.sleep(60)\n"
     );
 
+    // The deadline has to outlast a cold interpreter start, because the
+    // grandchild is a fresh `sys.executable` that must reach its first write
+    // before the evaluator kills the tree. At the two seconds this used to
+    // allow, a loaded windows runner could spend the whole budget getting
+    // Python up, leaving an empty heartbeat file and a failure that said
+    // nothing about process trees: seen on CI on 2026-09-11, green on a rerun
+    // of the same commit. An idle interpreter start measures 30 to 72 ms here,
+    // so the two seconds were not tight in themselves; what exhausts them is a
+    // runner already compiling several snippets in parallel. Ten seconds is
+    // two orders of magnitude above the idle figure and still a sixth of the
+    // sixty the grandchild would otherwise live for, which is the gap every
+    // assertion below rests on.
+    const DEADLINE: Duration = Duration::from_secs(10);
+
     let started = std::time::Instant::now();
-    let report = native::evaluate(python, "gate.py::is_open", &snippet, Duration::from_secs(2));
+    let report = native::evaluate(python, "gate.py::is_open", &snippet, DEADLINE);
     let elapsed = started.elapsed();
     assert_eq!(report.status, CtopStatus::Timeout, "{report:?}");
 
     // The grandchild inherited the stdout pipe. Draining that pipe to EOF
     // after killing the child waited for the grandchild instead, which turned
-    // a two-second deadline into a sixty-second one. The deadline bounds the
-    // whole call, not only the child.
+    // the deadline into a sixty-second one. The deadline bounds the whole
+    // call, not only the child, which is why the bound here is written
+    // relative to DEADLINE rather than as its own number.
     assert!(
-        elapsed < Duration::from_secs(8),
+        elapsed < DEADLINE + Duration::from_secs(15),
         "evaluate must return near its deadline, not when the grandchild feels like exiting: {elapsed:?}"
     );
 
@@ -69,7 +91,7 @@ fn a_grandchild_does_not_outlive_the_deadline() {
 
     assert!(
         before > 0,
-        "the grandchild never started, so this test established nothing"
+        "the grandchild never started in {DEADLINE:?}, so this test established nothing; raise the deadline rather than this assertion"
     );
     assert_eq!(
         before, after,
