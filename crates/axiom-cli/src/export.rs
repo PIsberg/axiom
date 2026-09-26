@@ -47,7 +47,9 @@ pub fn blast_radius_dot(answer: &Value) -> String {
         for pair in path.windows(2) {
             edges.insert((pair[0].clone(), pair[1].clone()));
         }
-        for step in &path[1..path.len() - 1] {
+        // A test's own blast radius includes itself, and its path is then one
+        // element long, so this is a skip and a take rather than a slice.
+        for step in path.iter().skip(1).take(path.len().saturating_sub(2)) {
             between.insert(step.clone());
         }
     }

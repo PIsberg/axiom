@@ -123,7 +123,7 @@ which 3,429 are tests.
 | `axiom bench` (Rust snippet) | 220 ms median with the compile cache off, 125 ms with it on | `rustc` dominates; a cache hit skips it and still runs the binary. 20 iterations. |
 | `axiom swarm --agents 10 --ops 50` | 9.5 ms for 1,000 operations | Zero merge conflicts, replicas converged. |
 
-**Tree B**, this repository: 86 source files, 867 indexed symbols, of which 343
+**Tree B**, this repository: 86 source files, 868 indexed symbols, of which 344
 are tests, as of 2026-09-26. On 2026-08-31 `axiom scan` took 169 ms warm, and
 the same swarm run completed 1,000 operations in 9.1 ms with zero conflicts.
 
@@ -133,10 +133,10 @@ which asks the shipped CLI about each non-test symbol in turn. Its output on
 this repository on 2026-09-26, at depth 1:
 
 ```text
-suite             343 tests
+suite             344 tests
 non-test symbols  524
 reach >= 1 test   306 of 524 asked
-tests selected    mean 14.5, median 8, max 40
+tests selected    mean 14.6, median 8, max 40
 pruned            mean 95.8%, median 97.8%
 mean Jaccard      0.03
 ```
@@ -148,7 +148,7 @@ tests were indexed as ordinary functions. Every percentage taken against that
 count was taken against a denominator a third of the real one.
 
 The two trees together show how the value scales: a median of 97.8% pruned on a
-343-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
+344-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
 every test the suite adds. A symbol that reaches no test gets that reported as
 the answer, which is the honest result for a helper nothing exercises directly.
 
@@ -354,9 +354,9 @@ for the other.
 
 ## Running Tests
 
-The suite is 341 test functions across 65 integration test files. 43 of those
+The suite is 342 test functions across 65 integration test files. 43 of those
 are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`.
-Windows runs 338 of the 341: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
+Windows runs 339 of the 342: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
 `execve` race that has no Windows equivalent, so it compiles to nothing there.
 The counted figure is the one `docs_quote_the_real_numbers` pins, because it is
 the same on every machine:

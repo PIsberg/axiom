@@ -176,3 +176,25 @@ fn an_unknown_format_is_refused() {
     assert!(!out.status.success(), "svg is not a format: {out:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A test's own blast radius holds the test itself, reached along a path one
+/// symbol long. The export sliced the steps between the ends of every path as
+/// `path[1..len - 1]`, which for that path is `[1..0]` and panics, so asking
+/// for any test as DOT crashed the command.
+#[test]
+fn a_tests_own_blast_radius_draws_rather_than_crashing() {
+    let dir = workspace();
+    let out = axiom(
+        &dir,
+        &[
+            "blast-radius",
+            "--symbol",
+            "helper_adds_one",
+            "--format",
+            "dot",
+        ],
+    );
+    let dot = stdout(&out);
+    assert!(dot.trim_start().starts_with("digraph"), "{dot}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

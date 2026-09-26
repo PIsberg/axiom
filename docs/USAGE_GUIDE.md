@@ -171,8 +171,8 @@ rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
 Measured on this repository on 2026-09-26 with
-`.github/scripts/blast_radius_stats.py`, 524 non-test symbols against 343 tests at
-depth 1: 306 symbols reach at least one test, and those select a mean of 14.5 and
+`.github/scripts/blast_radius_stats.py`, 524 non-test symbols against 344 tests at
+depth 1: 306 symbols reach at least one test, and those select a mean of 14.6 and
 a median of 8, pruning a mean of 95.8% and a median of 97.8%. Mean pairwise
 Jaccard overlap between two symbols' answers is 0.03. The 218 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a

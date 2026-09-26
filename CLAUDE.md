@@ -16,7 +16,7 @@ answer rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test --release --all-targets    # 341 tests over 71 binaries; 338 run on Windows, see README
+cargo test --release --all-targets    # 342 tests over 71 binaries; 339 run on Windows, see README
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
