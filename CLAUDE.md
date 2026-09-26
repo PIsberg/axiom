@@ -16,7 +16,7 @@ answer rather than about coverage.
 
 ```bash
 cargo build --release --bin axiom     # Windows needs the MSVC env loaded first, see below
-cargo test --release --all-targets    # 311 tests over 67 binaries; 308 run on Windows, see README
+cargo test --release --all-targets    # 338 tests over 70 binaries; 335 run on Windows, see README
 cargo test --test e2e_test            # one test file
 cargo test test_e2e_same_package      # one test by name substring
 ```
@@ -78,7 +78,7 @@ Dependencies run one way. `axiom-proto` is the leaf; nothing depends on `axiom-c
 axiom-proto ──► everything     wire types only: AstNode, CtopReport, ProvenanceAttestation
 axiom-ast   ──► core, crdt     the indexer: parsers, symbol graph, blast radius, Zoekt, disk I/O
 axiom-vmm   ──► core           the evaluator: wasmtime (a sandbox) and native toolchains (not)
-axiom-crdt  ──► core           Tree-CRDT plus swarm simulation
+axiom-crdt  ──► core           Tree-CRDT, the 3-way merge source writes use, swarm simulation
 axiom-core  ──► cli            the MCP server: tool schemas and dispatch
 axiom-cli                      clap subcommands, all of which drive AxiomMcpServer
 ```

@@ -54,10 +54,35 @@ nothing rather than answering a fixture.
 
 `axiom_query_symbol` returns `total_symbols_in_index` only on its not-found branch, beside the
 error; a successful lookup returns `dependencies`, `docstring`, `hash`, `id`, `kind`, `signature`,
-`source_range` and `symbol_path` and no count. So the count is there to read when a symbol misses,
+`source_range`, `symbol_path` and `source_text` (or `source_text_unavailable` with the reason)
+and no count. So the count is there to read when a symbol misses,
 which is exactly when telling a real index from an empty one matters, but do not expect it on a
 hit. To check the index directly, run `axiom scan` and read the symbol count it prints, or look
 for `.axiom/index.json` above the working directory.
+
+## A source write merges or refuses; it never writes what it was sent
+
+`axiom_apply_mutation` changed only the index and the op log until `write_source`, so two agents
+on one symbol had nothing to merge: the second overwrote the first in the index and the code saw
+neither. `write_symbol_source` now takes the caller's `base_content` (the `source_text` a query
+returned) and its `content`, finds the symbol in the file as it reads now through
+`AstIndex::locate_source`, and runs `merge_statements_3way(base, current, content)`. A clean
+merge is written; a conflict is returned with `current_content` and the file untouched.
+
+Three things hold it together, and each has a test that goes red without it:
+
+- **The workspace lock** (`.axiom/source_writes.lock`), held from the read through the op-log
+  append. Without it, `edited` in `concurrent_agents_check.py` lost 4 or 5 of 8 edits in every
+  repeat, and `many_agents_editing_one_function_at_once_lose_nothing` failed 5 runs in 5.
+- **Locating in the current text**, never from `source_range`, whose line numbers date from the
+  scan. `a_symbol_moved_by_an_edit_since_the_scan_is_still_the_one_written` pins it.
+- **A merge that refuses what it cannot order.** Writing `content` as sent, the obvious shortcut,
+  fails three of the tests in `tests/mutation_writes_source.rs`; the merge's own cases are in
+  `axiom-crdt/tests/merge_refuses_what_it_cannot_order.rs`.
+
+The op log is replayed before the write's operation is stamped, so its Lamport time is later than
+every recorded one and last-writer-wins agrees with the file. Other symbols' positions in a
+written file are left stale in the index; nothing that writes relies on them.
 
 ## A caller-supplied field that is printed is an injection surface
 

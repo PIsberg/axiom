@@ -5,10 +5,15 @@ the way an agent does, because the bugs that took longest to find in this
 repository lived between processes rather than inside one: two servers both
 wrote the index whole and the second silently dropped the first one's node.
 
-Two scenarios run here.
+Four scenarios run here.
 
 `uniform` is the original: N agents each apply one mutation. It covers the
 read-modify-write on the index and the operation log.
+
+`edited` is several agents working on one function: each read it once, then
+all of them write their own one-line change to its source file at the same
+moment. Every change has to be in the file afterwards. A writer that wrote its
+text as sent would put back the lines the others had already changed.
 
 `chained` covers the provenance ledger: agents attest at once, and the records
 must come out as one chain rather than a fork. Every agent sends the same
@@ -20,7 +25,7 @@ operation with the widest write, and it runs beside agents persisting single
 symbols. This is the shape that broke before, and the uniform scenario does not
 reach it.
 
-Both are repeated. A race that is lost only sometimes is missed by a single
+Each is repeated. A race that is lost only sometimes is missed by a single
 run: with the merge deliberately removed, one measured run in three still
 reported every symbol intact. REPEATS is what turns this from a coin flip into
 a gate, and any repeat losing work fails the check.
@@ -37,6 +42,7 @@ AGENTS = 6
 MUTATORS = 8
 SCANNERS = 3
 ATTESTERS = 10
+EDITORS = 8
 REPEATS = 5
 
 INIT = ('{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
@@ -242,9 +248,86 @@ def chained(binary):
     return f"{len(records)}/{ATTESTERS} records, {distinct} distinct seals", problems
 
 
+def tool_call(id_, name, arguments):
+    return json.dumps({"jsonrpc": "2.0", "id": id_, "method": "tools/call",
+                       "params": {"name": name, "arguments": arguments}})
+
+
+def tool_result(stdout, id_):
+    """The payload of the response with this id in a serve session's output,
+    and whether it was flagged as an error. A missing response is an error."""
+    for line in stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get("id") == id_ and "result" in message:
+            result = message["result"]
+            text = result["content"][0]["text"]
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                payload = text
+            return payload, bool(result.get("isError"))
+    return f"no response with id {id_}", True
+
+
+def edited(binary):
+    """Agents change different lines of one function at once, from one read."""
+    work = Path(tempfile.mkdtemp())
+    (work / "src").mkdir()
+    body = "".join(f"    let v{i} = {i};\n" for i in range(EDITORS))
+    source = work / "src" / "lib.rs"
+    source.write_bytes(f"pub fn target() {{\n{body}}}\n".encode("utf-8"))
+    run(binary, work, "scan", "--path", ".")
+
+    query = subprocess.run([binary, "serve"], cwd=work, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           input=INIT + "\n" + tool_call(2, "axiom_query_symbol",
+                                                         {"symbol_path": "target"}) + "\n")
+    answer, is_error = tool_result(query.stdout, 2)
+    if is_error or "source_text" not in answer:
+        return "no base", [f"the query returned no source_text: {answer}"]
+    base = answer["source_text"]
+
+    start = threading.Barrier(EDITORS)
+    problems = []
+
+    def editor(i):
+        write = tool_call(3, "axiom_apply_mutation", {
+            "symbol_path": "target",
+            "write_source": True,
+            "base_content": base,
+            "content": base.replace(f"= {i};", f"= {100 + i};"),
+        })
+        start.wait()
+        p = subprocess.Popen([binary, "serve"], cwd=work, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             text=True, encoding="utf-8", errors="replace")
+        out, _ = p.communicate(INIT + "\n" + write + "\n")
+        reply, failed = tool_result(out, 3)
+        if failed:
+            problems.append(f"editor {i} was refused: {reply}")
+
+    threads = [threading.Thread(target=editor, args=(i,)) for i in range(EDITORS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    text = source.read_bytes().decode("utf-8")
+    landed = [i for i in range(EDITORS) if f"let v{i} = {100 + i};" in text]
+    if len(landed) != EDITORS:
+        lost = [i for i in range(EDITORS) if i not in landed]
+        problems.append(f"edits lost from the file: kept {len(landed)} of {EDITORS}, "
+                        f"lost {lost}")
+    return f"{len(landed)}/{EDITORS} edits in the file", problems
+
+
 def main(binary: str) -> int:
     failures = []
-    for name, scenario in (("uniform", uniform), ("mixed", mixed), ("chained", chained)):
+    for name, scenario in (("uniform", uniform), ("edited", edited), ("mixed", mixed),
+                           ("chained", chained)):
         for attempt in range(1, REPEATS + 1):
             summary, problems = scenario(binary)
             status = "ok" if not problems else "FAILED"
