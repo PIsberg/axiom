@@ -942,6 +942,183 @@ impl AstIndex {
         Some(self.resolve_path(&rel))
     }
 
+    /// Where a symbol's source sits in `content`, the text of its file as it
+    /// reads now: a zero-based, end-exclusive range of lines from its
+    /// declaration through the end of its body. Attributes, annotations,
+    /// decorators and doc comments above the declaration are outside it.
+    ///
+    /// This is what `axiom_apply_mutation` replaces when it writes a symbol, so
+    /// it is found in the text being written rather than read from the index,
+    /// whose positions date from the last scan and move the moment anyone
+    /// edits the file. The file is parsed again with the same parser, so the
+    /// symbol is recognised by the key the index gave it.
+    ///
+    /// It refuses rather than guesses: a symbol no longer declared, declared
+    /// more than once (the `cfg` twins that share one key), or with a body
+    /// whose end it cannot find. A wrong extent does not fail; it overwrites
+    /// lines of the next function, or leaves the old body under the new one.
+    pub fn locate_source(
+        &self,
+        symbol_path: &str,
+        content: &str,
+    ) -> Result<(usize, usize), String> {
+        let canonical = self
+            .get_symbol(symbol_path)
+            .ok_or_else(|| {
+                format!("{symbol_path} is not in the index, or names more than one symbol")
+            })?
+            .symbol_path;
+        let file = self
+            .symbol_to_file
+            .read()
+            .unwrap()
+            .get(&canonical)
+            .cloned()
+            .ok_or_else(|| format!("{canonical} was not indexed from a file"))?;
+        let ext = Path::new(&file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        let now = AstIndex::new();
+        now.parse_file_content(&file, ext, content, &mut 0);
+        let declared = now
+            .symbol_lines
+            .read()
+            .unwrap()
+            .get(&canonical)
+            .cloned()
+            .unwrap_or_default();
+        let start = match declared.as_slice() {
+            [] => {
+                return Err(format!(
+                    "{canonical} is not declared in {file} as it reads now: it was renamed, moved or deleted since the index was built"
+                ));
+            }
+            [line] => *line,
+            lines => {
+                let shown: Vec<String> = lines.iter().map(|l| (l + 1).to_string()).collect();
+                return Err(format!(
+                    "{canonical} is declared {} times in {file}, on lines {}, and one key cannot say which is meant",
+                    lines.len(),
+                    shown.join(", ")
+                ));
+            }
+        };
+
+        let clean = Self::strip_comments_and_strings(content, Self::single_quotes_are_strings(ext));
+        let structure: Vec<&str> = clean.lines().collect();
+        let mut end = Self::source_span(&structure, start, ext == "py").ok_or_else(|| {
+            format!(
+                "cannot tell where {canonical} ends in {file}: its brackets do not close the way a declaration's do"
+            )
+        })?;
+        let raw: Vec<&str> = content.lines().collect();
+        while end > start + 1 && raw.get(end - 1).is_some_and(|l| l.trim().is_empty()) {
+            end -= 1;
+        }
+        Ok((start, end))
+    }
+
+    /// Where the declaration on line `start` ends, end-exclusive, read from
+    /// `structure`: the file with comments and string literals blanked, so a
+    /// bracket inside either is not counted.
+    ///
+    /// A brace language ends when the braces its declaration opened close, at a
+    /// `;` when it opens none, or with the indentation after an `=` for an
+    /// expression body. The header may run over several lines, as a wrapped
+    /// parameter list, a brace on its own line or a `where` clause do; any
+    /// other line back at the declaration's depth is the next declaration, and
+    /// this one had no body. With `indented` set, which is Python, a colon at
+    /// the end of the header opens a body that runs while lines are deeper.
+    fn source_span(structure: &[&str], start: usize, indented: bool) -> Option<usize> {
+        let indent_of = |l: &str| l.len() - l.trim_start().len();
+        let decl_indent = indent_of(structure.get(start)?);
+        let deeper_until = |from: usize| {
+            let mut end = from;
+            while end < structure.len() {
+                let line = structure[end];
+                if !line.trim().is_empty() && indent_of(line) <= decl_indent {
+                    break;
+                }
+                end += 1;
+            }
+            end
+        };
+
+        let (mut nesting, mut braces) = (0i64, 0i64);
+        let (mut opened, mut assigned) = (false, false);
+        for (i, line) in structure.iter().enumerate().skip(start) {
+            let trimmed = line.trim();
+            if i > start && !indented && !opened && nesting == 0 {
+                let continues = trimmed.is_empty()
+                    || indent_of(line) > decl_indent
+                    || trimmed.starts_with('{')
+                    || trimmed.starts_with("where");
+                if !continues {
+                    return Some(i);
+                }
+            }
+
+            let chars: Vec<char> = line.chars().collect();
+            for (k, &c) in chars.iter().enumerate() {
+                match c {
+                    '(' | '[' => nesting += 1,
+                    ')' | ']' => nesting -= 1,
+                    '{' if indented => nesting += 1,
+                    '}' if indented => nesting -= 1,
+                    '{' => {
+                        braces += 1;
+                        opened = true;
+                    }
+                    '}' => braces -= 1,
+                    '=' if nesting == 0 && !opened => {
+                        let before = if k > 0 { chars[k - 1] } else { ' ' };
+                        let after = chars.get(k + 1).copied().unwrap_or(' ');
+                        if !matches!(before, '=' | '!' | '<' | '>') && !matches!(after, '=' | '>') {
+                            assigned = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if nesting < 0 || braces < 0 {
+                    return None;
+                }
+            }
+
+            if nesting > 0 {
+                continue;
+            }
+            if indented {
+                return Some(if trimmed.ends_with(':') {
+                    deeper_until(i + 1)
+                } else {
+                    i + 1
+                });
+            }
+            if opened {
+                if braces == 0 {
+                    return Some(i + 1);
+                }
+                continue;
+            }
+            if trimmed.ends_with(';') {
+                return Some(i + 1);
+            }
+            if assigned {
+                return Some(deeper_until(i + 1));
+            }
+        }
+        None
+    }
+
+    /// Whether an apostrophe opens a string in this language, as opposed to a
+    /// character literal or a Rust lifetime, which is what
+    /// `strip_comments_and_strings` has to be told.
+    fn single_quotes_are_strings(ext: &str) -> bool {
+        matches!(ext, "py" | "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs")
+    }
+
     /// Join a stored, root-relative file path back onto the scan root, giving an
     /// absolute path a caller can open. An already-absolute path, or a missing
     /// scan root, is returned unchanged.
@@ -1914,10 +2091,7 @@ impl AstIndex {
             return;
         }
 
-        let clean = Self::strip_comments_and_strings(
-            content,
-            matches!(ext, "py" | "js" | "ts" | "jsx" | "tsx" | "mjs" | "cjs"),
-        );
+        let clean = Self::strip_comments_and_strings(content, Self::single_quotes_are_strings(ext));
         let mut refs: Vec<(usize, String)> = Vec::new();
 
         for (line_no, line) in clean.lines().enumerate() {

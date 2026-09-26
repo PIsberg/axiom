@@ -87,7 +87,8 @@ Look up one symbol.
     "signature": "pub fn validate_token(token: &str) -> bool {",
     "docstring": null,
     "source_range": [42, 42],
-    "dependencies": []
+    "dependencies": [],
+    "source_text": "pub fn validate_token(token: &str) -> bool {\n    token.len() > 10\n}"
   }
   ```
 
@@ -95,8 +96,17 @@ Look up one symbol.
 one-based inclusive line range in the file `symbol_path` names, so
 `sed -n '42,42p' C:/work/src/lib.rs` prints it. A wrapped parameter list spans
 several lines and the range covers all of them. `[0, 0]` means the parser
-recorded no position, which is what a node inserted through
+recorded no position, which is what a node inserted by hand through
 `axiom_apply_mutation` has.
+
+`source_text` is the symbol as its file reads now, from the declaration line to
+the end of its body, found again in the file rather than taken from the index's
+line numbers. Attributes, annotations, decorators and doc comments above the
+declaration are not part of it. It is what `axiom_apply_mutation` expects back
+as `base_content` when it writes the file. When the symbol cannot be located,
+because it was renamed or deleted since the scan, is declared twice under one
+key, or has a body whose end the brackets do not show, `source_text_unavailable`
+says which instead.
 
 A shorter name resolves when it identifies exactly one symbol: `validate_token`
 finds `pkg.Class::validate_token`. A name matching several returns the candidates
@@ -160,11 +170,11 @@ mentions in comment-stripped source, attributed to the function they sit in
 rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
-Measured on this repository on 2026-09-11 with
-`.github/scripts/blast_radius_stats.py`, 498 non-test symbols against 313 tests at
-depth 1: 289 symbols reach at least one test, and those select a mean of 14.5 and
-a median of 7, pruning a mean of 95.4% and a median of 97.8%. Mean pairwise
-Jaccard overlap between two symbols' answers is 0.03. The 209 symbols that reach
+Measured on this repository on 2026-09-26 with
+`.github/scripts/blast_radius_stats.py`, 518 non-test symbols against 340 tests at
+depth 1: 301 symbols reach at least one test, and those select a mean of 14.8 and
+a median of 9, pruning a mean of 95.7% and a median of 97.4%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.03. The 217 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a
 claim that changing one is safe.
 
@@ -173,8 +183,8 @@ population of around 700. Both were artefacts of the same defect: a Rust
 function counted as a test only when its own name began with `test_`, so 210 of
 this repository's own tests were indexed as ordinary functions, inflating the
 non-test population and deflating the suite the percentages were taken against.
-Recall moves the most: 289 of 498 symbols now reach a test, where 174 of 702
-did.
+Recall moved the most: on 2026-09-11, with the fix, 289 of 498 symbols reached
+a test, where 174 of 702 had.
 
 The population those figures rest on is pinned by
 `crates/axiom-cli/tests/docs_quote_the_real_numbers.rs`, so when the tree grows
@@ -324,6 +334,51 @@ Apply a Tree-CRDT mutation and persist the symbol.
 
 Only the mutated symbol is written, under a lock, so an agent sharing the
 workspace does not lose its work to this one.
+
+#### Writing the source file
+
+By default a mutation changes axiom's own records, the index and the op log,
+and no source file. With `write_source` it rewrites the symbol in its file too,
+and this is the mode for several agents working on the same code:
+
+* **Request**: `{"symbol_path": "validate_token", "write_source": true, "base_content": "<source_text as you read it>", "content": "<the whole symbol as you want it>"}`
+* **Response**, written:
+  ```json
+  {
+    "status": "WRITTEN",
+    "symbol_path": "src/lib.rs::validate_token",
+    "file": "C:/work/src/lib.rs",
+    "lines": [42, 44],
+    "merged_with_changes_since_read": true,
+    "new_merkle_root": "...",
+    "crdt_op": { "Insert": { "...": "..." } }
+  }
+  ```
+* **Response**, refused, flagged `isError`:
+  ```json
+  {
+    "status": "CONFLICT",
+    "error": "CONFLICT: src/lib.rs::validate_token changed since you read it, on the lines you are changing. C:/work/src/lib.rs was not written.",
+    "current_content": "<the symbol as the file holds it now>",
+    "conflict_preview": "<both versions between <<<<<<< LOCAL and >>>>>>> REMOTE markers>",
+    "how_to_resolve": "..."
+  }
+  ```
+
+`base_content` is required. The symbol is found again in the file as it reads
+now and your change is merged with whatever changed there since you read it:
+edits to different lines are both kept, in the order the lines already had, and
+edits to the same lines, or an insertion touching another agent's edit, are
+refused with the file untouched. Writing `content` as sent would put back every
+line another agent changed in between, which is the loss this exists to
+prevent. On `CONFLICT`, make your change to `current_content` and send it again
+with `current_content` as the new `base_content`.
+
+Writes to source files are serialised per workspace, so a second writer always
+merges against the first one's result. The file keeps its line endings. The
+index's line numbers for other symbols in the same file are not recomputed,
+since a write never relies on them; `axiom scan` refreshes them. `write_source`
+cannot be combined with `speculative`, `commit_staged` or `rollback_staged`.
 
 ---
 

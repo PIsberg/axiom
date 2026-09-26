@@ -352,11 +352,25 @@ fn lcs_align(a: &[&str], b: &[&str]) -> Vec<(usize, usize)> {
     matches
 }
 
-/// 3-way Statement-level AST Merge Algorithm
+/// 3-way merge at line granularity, on the shape of diff3.
 ///
-/// Merges `local` and `remote` content against common ancestor `base`.
-/// Preserves non-overlapping statement additions, deletions, and modifications.
-/// If conflicting edits occur on the same statement line, returns conflict markers and `has_conflicts = true`.
+/// `local` and `remote` are each aligned against `base`. A base line both of
+/// them kept is stable; between two stable lines lies a chunk, and each chunk
+/// is settled on its own: taken from whichever side changed it, taken once
+/// when both changed it the same way, taken with both sides' edits when those
+/// touch different base lines, and otherwise returned between conflict markers
+/// with `has_conflicts` set.
+///
+/// The last case is the one that matters. Two edits at one place have an order
+/// this function cannot know, and it used to invent one: both rewrites of a
+/// line were kept, a change was kept over a deletion of the same line, and a
+/// remote line was dropped whenever the local side already held an identical
+/// one, which cut the closing brace off one of two added blocks. None of that
+/// was reported. It went unnoticed while only tests called this; it now decides
+/// the text of a source file, so it refuses instead.
+/// `tests/merge_refuses_what_it_cannot_order.rs` pins each case.
+///
+/// Conflict markers label the `local` argument `LOCAL` and `remote` `REMOTE`.
 pub fn merge_statements_3way(base: &str, local: &str, remote: &str) -> (String, bool) {
     if local == remote || local == base {
         return (remote.to_string(), false);
@@ -369,116 +383,136 @@ pub fn merge_statements_3way(base: &str, local: &str, remote: &str) -> (String, 
     let local_lines: Vec<&str> = local.lines().collect();
     let remote_lines: Vec<&str> = remote.lines().collect();
 
-    if base_lines.is_empty() {
-        let mut merged = Vec::new();
-        for l in &local_lines {
-            merged.push(l.to_string());
-        }
-        for r in &remote_lines {
-            if !merged.iter().any(|m| m == r) {
-                merged.push(r.to_string());
-            }
-        }
-        return (merged.join("\n"), false);
+    // Where each base line sits on either side, when that side kept it.
+    let mut in_local = vec![None; base_lines.len()];
+    for (b, l) in lcs_align(&base_lines, &local_lines) {
+        in_local[b] = Some(l);
+    }
+    let mut in_remote = vec![None; base_lines.len()];
+    for (b, r) in lcs_align(&base_lines, &remote_lines) {
+        in_remote[b] = Some(r);
     }
 
-    let matches_l = lcs_align(&base_lines, &local_lines);
-    let matches_r = lcs_align(&base_lines, &remote_lines);
-
-    let mut local_before: Vec<Vec<String>> = vec![Vec::new(); base_lines.len() + 1];
-    let mut local_has_base = vec![false; base_lines.len()];
-    let mut prev_l = 0;
-    for &(b_i, l_i) in &matches_l {
-        for line in &local_lines[prev_l..l_i] {
-            local_before[b_i].push((*line).to_string());
-        }
-        local_has_base[b_i] = true;
-        prev_l = l_i + 1;
-    }
-    for line in &local_lines[prev_l..] {
-        local_before[base_lines.len()].push((*line).to_string());
-    }
-
-    let mut remote_before: Vec<Vec<String>> = vec![Vec::new(); base_lines.len() + 1];
-    let mut remote_has_base = vec![false; base_lines.len()];
-    let mut prev_r = 0;
-    for &(b_i, r_i) in &matches_r {
-        for line in &remote_lines[prev_r..r_i] {
-            remote_before[b_i].push((*line).to_string());
-        }
-        remote_has_base[b_i] = true;
-        prev_r = r_i + 1;
-    }
-    for line in &remote_lines[prev_r..] {
-        remote_before[base_lines.len()].push((*line).to_string());
-    }
-
-    let mut result = Vec::new();
+    let owned = |lines: &[&str]| lines.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut out: Vec<String> = Vec::new();
     let mut has_conflicts = false;
+    let (mut b, mut l, mut r) = (0, 0, 0);
 
-    let base_had_no_matches =
-        !local_has_base.iter().any(|&b| b) && !remote_has_base.iter().any(|&b| b);
+    loop {
+        // The next base line both sides kept, and where it sits in each. The
+        // alignments are monotone, so everything before it on either side
+        // belongs to this chunk.
+        let stable = (b..base_lines.len()).find_map(|k| Some((k, in_local[k]?, in_remote[k]?)));
+        let (b_end, l_end, r_end) =
+            stable.unwrap_or((base_lines.len(), local_lines.len(), remote_lines.len()));
 
-    for k in 0..base_lines.len() {
-        let ins_l = &local_before[k];
-        let ins_r = &remote_before[k];
+        let chunk_base = &base_lines[b..b_end];
+        let chunk_local = &local_lines[l..l_end];
+        let chunk_remote = &remote_lines[r..r_end];
 
-        if ins_l == ins_r {
-            result.extend(ins_l.clone());
-        } else if ins_l.is_empty() {
-            result.extend(ins_r.clone());
-        } else if ins_r.is_empty() {
-            result.extend(ins_l.clone());
-        } else if !local_has_base[k] && !remote_has_base[k] {
-            has_conflicts = true;
-            result.push(format!(
-                "<<<<<<< LOCAL\n{}\n=======\n{}\n>>>>>>> REMOTE",
-                ins_l.join("\n"),
-                ins_r.join("\n")
-            ));
+        if chunk_local == chunk_base {
+            out.extend(owned(chunk_remote));
+        } else if chunk_remote == chunk_base || chunk_local == chunk_remote {
+            out.extend(owned(chunk_local));
+        } else if let Some(both) = apply_apart(
+            chunk_base,
+            &hunks(&in_local[b..b_end], l, chunk_local),
+            &hunks(&in_remote[b..b_end], r, chunk_remote),
+        ) {
+            out.extend(both);
         } else {
-            result.extend(ins_l.clone());
-            for line in ins_r {
-                if !ins_l.contains(line) {
-                    result.push(line.clone());
-                }
-            }
+            has_conflicts = true;
+            out.push("<<<<<<< LOCAL".to_string());
+            out.extend(owned(chunk_local));
+            out.push("=======".to_string());
+            out.extend(owned(chunk_remote));
+            out.push(">>>>>>> REMOTE".to_string());
         }
 
-        // Base line k status
-        let in_l = local_has_base[k];
-        let in_r = remote_has_base[k];
-        if in_l && in_r {
-            result.push(base_lines[k].to_string());
+        match stable {
+            Some((k, lk, rk)) => {
+                out.push(base_lines[k].to_string());
+                (b, l, r) = (k + 1, lk + 1, rk + 1);
+            }
+            None => break,
         }
     }
 
-    // Trailing insertions
-    let ins_l = &local_before[base_lines.len()];
-    let ins_r = &remote_before[base_lines.len()];
-    if ins_l == ins_r {
-        result.extend(ins_l.clone());
-    } else if ins_l.is_empty() {
-        result.extend(ins_r.clone());
-    } else if ins_r.is_empty() {
-        result.extend(ins_l.clone());
-    } else if base_had_no_matches {
-        has_conflicts = true;
-        result.push(format!(
-            "<<<<<<< LOCAL\n{}\n=======\n{}\n>>>>>>> REMOTE",
-            ins_l.join("\n"),
-            ins_r.join("\n")
-        ));
-    } else {
-        result.extend(ins_l.clone());
-        for line in ins_r {
-            if !ins_l.contains(line) {
-                result.push(line.clone());
+    (out.join("\n"), has_conflicts)
+}
+
+/// One side's edit to a chunk: base lines `start..end` replaced by `lines`.
+/// An empty range is an insertion before base line `start`.
+#[derive(PartialEq)]
+struct Hunk<'a> {
+    start: usize,
+    end: usize,
+    lines: &'a [&'a str],
+}
+
+/// One side's edits to a chunk, read off its alignment with base: `kept[k]`
+/// is where base line `k` of the chunk sits on this side, if it kept it, as
+/// an index into the whole side, which starts at `offset`.
+fn hunks<'a>(kept: &[Option<usize>], offset: usize, side: &'a [&'a str]) -> Vec<Hunk<'a>> {
+    let mut out = Vec::new();
+    let (mut base_from, mut side_from) = (0, 0);
+    for k in 0..=kept.len() {
+        let anchor = if k < kept.len() {
+            kept[k].map(|at| at - offset)
+        } else {
+            Some(side.len())
+        };
+        if let Some(at) = anchor {
+            if base_from < k || side_from < at {
+                out.push(Hunk {
+                    start: base_from,
+                    end: k,
+                    lines: &side[side_from..at],
+                });
+            }
+            (base_from, side_from) = (k + 1, at + 1);
+        }
+    }
+    out
+}
+
+/// Both sides' edits to a chunk applied together, when base alone says how
+/// they are ordered, which is when they touch different base lines. Edits to
+/// adjacent lines qualify; diff3 as git runs it refuses those only because no
+/// unchanged line separates them. An insertion has no line of its own, so one
+/// that touches the other side's edit, or lands where the other side inserts
+/// too, could go either side of it, and that is `None`.
+fn apply_apart(base: &[&str], local: &[Hunk], remote: &[Hunk]) -> Option<Vec<String>> {
+    for x in local {
+        for y in remote {
+            if x == y {
+                continue;
+            }
+            let clash = if x.start == x.end || y.start == y.end {
+                x.start <= y.end && y.start <= x.end
+            } else {
+                x.start < y.end && y.start < x.end
+            };
+            if clash {
+                return None;
             }
         }
     }
 
-    (result.join("\n"), has_conflicts)
+    let mut all: Vec<&Hunk> = local
+        .iter()
+        .chain(remote.iter().filter(|h| !local.contains(h)))
+        .collect();
+    all.sort_by_key(|h| (h.start, h.end));
+    let mut out = Vec::new();
+    let mut at = 0;
+    for h in all {
+        out.extend(base[at..h.start].iter().map(|s| s.to_string()));
+        out.extend(h.lines.iter().map(|s| s.to_string()));
+        at = h.end;
+    }
+    out.extend(base[at..].iter().map(|s| s.to_string()));
+    Some(out)
 }
 
 /// Live Swarm Broadcast Relay for real-time multi-agent sync

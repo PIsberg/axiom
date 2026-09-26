@@ -123,21 +123,21 @@ which 3,429 are tests.
 | `axiom bench` (Rust snippet) | 220 ms median with the compile cache off, 125 ms with it on | `rustc` dominates; a cache hit skips it and still runs the binary. 20 iterations. |
 | `axiom swarm --agents 10 --ops 50` | 9.5 ms for 1,000 operations | Zero merge conflicts, replicas converged. |
 
-**Tree B**, this repository: 81 source files, 811 indexed symbols, of which 313
-are tests. `axiom scan` takes 169 ms warm, and the same swarm run completes
-1,000 operations in 9.1 ms with zero conflicts.
+**Tree B**, this repository: 84 source files, 858 indexed symbols, of which 340
+are tests, as of 2026-09-26. On 2026-08-31 `axiom scan` took 169 ms warm, and
+the same swarm run completed 1,000 operations in 9.1 ms with zero conflicts.
 
 The blast-radius figures for both trees come from
 [`.github/scripts/blast_radius_stats.py`](.github/scripts/blast_radius_stats.py),
 which asks the shipped CLI about each non-test symbol in turn. Its output on
-this repository on 2026-09-11, at depth 1:
+this repository on 2026-09-26, at depth 1:
 
 ```text
-suite             313 tests
-non-test symbols  498
-reach >= 1 test   289 of 498 asked
-tests selected    mean 14.5, median 7, max 40
-pruned            mean 95.4%, median 97.8%
+suite             340 tests
+non-test symbols  518
+reach >= 1 test   301 of 518 asked
+tests selected    mean 14.8, median 9, max 40
+pruned            mean 95.7%, median 97.4%
 mean Jaccard      0.03
 ```
 
@@ -147,8 +147,8 @@ test when its own name began with `test_`, so 210 of this repository's own
 tests were indexed as ordinary functions. Every percentage taken against that
 count was taken against a denominator a third of the real one.
 
-The two trees together show how the value scales: a median of 97.8% pruned on a
-313-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
+The two trees together show how the value scales: a median of 97.4% pruned on a
+340-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
 every test the suite adds. A symbol that reaches no test gets that reported as
 the answer, which is the honest result for a helper nothing exercises directly.
 
@@ -307,10 +307,10 @@ For Claude Code, Cursor and custom agents:
 
 | Tool | What it does |
 |---|---|
-| `axiom_query_symbol` | Symbol metadata: kind, signature, docstring, hash, line range, direct dependencies. On a miss it also returns `total_symbols_in_index`, which tells a real index from an empty one |
+| `axiom_query_symbol` | Symbol metadata: kind, signature, docstring, hash, line range, direct dependencies, and `source_text`, the symbol as its file reads now. On a miss it also returns `total_symbols_in_index`, which tells a real index from an empty one |
 | `axiom_get_blast_radius` | The tests that can reach a symbol, with deeper layers surveyed and reported separately |
 | `axiom_eval_patch` | Compiles and runs a snippet in the symbol's own language and reports the real outcome |
-| `axiom_apply_mutation` | Records a mutation to the shared, commutative operation log |
+| `axiom_apply_mutation` | Records a mutation to the shared, commutative operation log. With `write_source` it also writes the symbol's file, merging with other agents' edits to that symbol and refusing as `CONFLICT` when both changed the same lines |
 | `axiom_run_tests` | Runs the project's own test command and records the exit code as an `executed` verification |
 | `axiom_record_verification` | Records a check an agent ran elsewhere, as a `reported` verification |
 | `axiom_attest_commit` | Writes a sealed, chained provenance record against a check that passed |
@@ -354,9 +354,9 @@ for the other.
 
 ## Running Tests
 
-The suite is 311 test functions across 61 integration test files. 43 of those
+The suite is 338 test functions across 64 integration test files. 43 of those
 are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`.
-Windows runs 308 of the 311: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
+Windows runs 335 of the 338: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
 `execve` race that has no Windows equivalent, so it compiles to nothing there.
 The counted figure is the one `docs_quote_the_real_numbers` pins, because it is
 the same on every machine:

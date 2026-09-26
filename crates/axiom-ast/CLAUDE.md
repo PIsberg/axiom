@@ -178,6 +178,15 @@ node is where a symbol ends: the range brackets the declaration, not the body, a
 the file as it was scanned. Anything mutating a symbol has to find it in the file as it is now, as
 `mutate::symbol_lines` in axiom-cli does.
 
+`locate_source` is the one that decides which lines of somebody's file a source write replaces. It
+parses the current text again with the same parser, so the symbol is recognised by its index key
+rather than by a first name match, and refuses a symbol that is gone, declared twice under one
+key, or whose end its brackets do not show. It does not reuse `body_span`: that follows
+indentation when the declaration line opens no brace, which is right for Python and stops a
+rustfmt-wrapped signature at its parameters, leaving the body out. For a hash that only loses a
+little coverage; for a write it leaves the old body under the new one. `tests/source_extent.rs`
+pins the shapes, including that one.
+
 ## Dependency edges
 
 ### Java has three mechanisms and everything else has a fourth

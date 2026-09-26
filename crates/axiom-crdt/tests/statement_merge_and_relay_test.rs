@@ -145,13 +145,15 @@ fn test_statement_merge_concurrent_deletions_and_empty_base() {
     assert!(!has_conflicts_same);
     assert_eq!(merged_same, "line1\nline3\nline4");
 
-    // 3. Empty base with disjoint additions
+    // 3. Empty base with two different additions. Both land at the same
+    // place and nothing says which goes first, so it is a conflict that keeps
+    // every line of both, not a union picked in argument order.
     let empty_base = "";
     let local_add = "fn alpha() {}\nfn beta() {}";
     let remote_add = "fn gamma() {}";
     let (merged_empty, has_conflicts_empty) =
         merge_statements_3way(empty_base, local_add, remote_add);
-    assert!(!has_conflicts_empty);
+    assert!(has_conflicts_empty);
     assert!(merged_empty.contains("fn alpha() {}"));
     assert!(merged_empty.contains("fn beta() {}"));
     assert!(merged_empty.contains("fn gamma() {}"));

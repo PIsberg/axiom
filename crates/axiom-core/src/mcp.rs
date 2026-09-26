@@ -599,6 +599,169 @@ impl AxiomMcpServer {
         self.axiom_dir.join("fix_cache.json")
     }
 
+    /// Add a symbol's source, as its file reads now, to a query answer.
+    ///
+    /// This is the `base_content` a write with `write_source` needs, so it is
+    /// cut by the same `locate_source` the write uses. A symbol that cannot be
+    /// located gets the reason instead, which is also why a write would refuse.
+    fn attach_source_text(&self, answer: &mut Value, symbol: &str) {
+        let located = self
+            .ast_index
+            .file_of_symbol(symbol)
+            .ok_or_else(|| format!("{symbol} was not indexed from a file"))
+            .and_then(|file| {
+                let text = std::fs::read_to_string(&file)
+                    .map_err(|e| format!("could not read {file}: {e}"))?
+                    .replace("\r\n", "\n");
+                let (start, end) = self.ast_index.locate_source(symbol, &text)?;
+                Ok(text.lines().collect::<Vec<_>>()[start..end].join("\n"))
+            });
+        match located {
+            Ok(source) => answer["source_text"] = json!(source),
+            Err(why) => answer["source_text_unavailable"] = json!(why),
+        }
+    }
+
+    /// Write one symbol's new text into its file, merged with whatever changed
+    /// there since the caller read it.
+    ///
+    /// `base` is the symbol's text as the caller read it, `content` the text it
+    /// wants. The symbol is found again in the file as it reads now, and the
+    /// caller's change is merged with every change made there since: applied
+    /// when the two touch different lines, refused with both versions when they
+    /// touch the same ones. Writing `content` as sent would discard whatever
+    /// another agent wrote in between, silently, which is the one outcome this
+    /// exists to prevent.
+    ///
+    /// Writes to source are serialised through one lock per workspace, held
+    /// from the read through the op-log append, so a second writer always reads
+    /// the first one's result and the op log orders the writes as the file did.
+    fn write_symbol_source(
+        &self,
+        symbol: &str,
+        base: &str,
+        content: &str,
+        node_id: Option<&str>,
+    ) -> Value {
+        let Some(node) = self.ast_index.get_symbol(symbol) else {
+            let candidates = self.ast_index.candidates_for(symbol);
+            return json!({
+                "error": format!("{symbol} is not in the index, or names more than one symbol; a write needs exactly one"),
+                "candidates": candidates.iter().take(10).collect::<Vec<_>>()
+            });
+        };
+        let canonical = node.symbol_path.clone();
+        let Some(file) = self.ast_index.file_of_symbol(&canonical) else {
+            return json!({ "error": format!("{canonical} was not indexed from a file, so there is nothing to write") });
+        };
+
+        let _lock = match axiom_ast::IndexLock::acquire(&self.axiom_dir.join("source_writes")) {
+            Ok(lock) => lock,
+            Err(e) => {
+                return json!({ "error": format!("could not lock the workspace for a source write: {e}") });
+            }
+        };
+
+        let raw = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) => return json!({ "error": format!("could not read {file}: {e}") }),
+        };
+        // A file is written back with the line endings it had. One that mixes
+        // them cannot be, without rewriting lines nobody touched.
+        let crlf = raw.contains("\r\n");
+        let text = raw.replace("\r\n", "\n");
+        if crlf && raw.matches("\r\n").count() != raw.matches('\n').count() {
+            return json!({ "error": format!("{file} mixes CRLF and LF line endings; writing it would change lines outside {canonical}") });
+        }
+
+        let (start, end) = match self.ast_index.locate_source(&canonical, &text) {
+            Ok(range) => range,
+            Err(why) => return json!({ "error": why }),
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let current = lines[start..end].join("\n");
+        let norm = |s: &str| s.replace("\r\n", "\n").trim_end_matches('\n').to_string();
+        let (base, content) = (norm(base), norm(content));
+
+        let (merged, has_conflicts) = axiom_crdt::merge_statements_3way(&base, &current, &content);
+        if has_conflicts {
+            return json!({
+                "error": format!("CONFLICT: {canonical} changed since you read it, on the lines you are changing. {file} was not written."),
+                "status": "CONFLICT",
+                "symbol_path": canonical,
+                "file": file,
+                "current_content": current,
+                "conflict_preview": merged,
+                "how_to_resolve": "In conflict_preview, LOCAL is the file as it reads now and REMOTE is your content. Make your change to current_content and send it again with base_content set to current_content."
+            });
+        }
+        let merged_since_read = base != current;
+
+        if merged != current {
+            let mut out: Vec<&str> = lines[..start].to_vec();
+            out.extend(merged.lines());
+            out.extend(&lines[end..]);
+            let mut written = out.join("\n");
+            if text.ends_with('\n') {
+                written.push('\n');
+            }
+            if crlf {
+                written = written.replace('\n', "\r\n");
+            }
+            if let Err(e) =
+                axiom_ast::write_atomically(std::path::Path::new(&file), written.as_bytes())
+            {
+                return json!({ "error": format!("could not write {file}: {e}") });
+            }
+        }
+
+        // Catch up with what other agents recorded, so this operation's Lamport
+        // stamp is later than theirs and last-writer-wins agrees with the file.
+        for op in load_crdt_ops(&self.op_log_path()) {
+            self.tree_crdt.apply_op(op);
+        }
+        let op = self.tree_crdt.insert_node(
+            "root",
+            node_id.unwrap_or(&canonical),
+            &canonical,
+            &node.kind,
+            &merged,
+        );
+        if let Err(e) = append_crdt_op(&self.op_log_path(), &op) {
+            return json!({
+                "error": format!("{file} was written, but the mutation could not be recorded in the op log: {e}"),
+                "status": "WRITTEN",
+                "file": file
+            });
+        }
+
+        let declaration = merged.lines().next().unwrap_or_default().trim().to_string();
+        self.ast_index.index_node_at(
+            &canonical,
+            &node.kind,
+            &declaration,
+            &merged,
+            node.dependencies.clone(),
+            Some((start, start)),
+        );
+        let mut answer = json!({
+            "status": "WRITTEN",
+            "symbol_path": canonical,
+            "file": file,
+            "lines": [start + 1, start + merged.lines().count().max(1)],
+            "merged_with_changes_since_read": merged_since_read,
+            "crdt_op": op,
+            "new_merkle_root": self.tree_crdt.compute_tree_merkle_root()
+        });
+        if let Err(e) = self
+            .ast_index
+            .persist_symbol(&self.index_path(), &canonical)
+        {
+            answer["index_not_saved"] = json!(e.to_string());
+        }
+        answer
+    }
+
     /// Resolve a symbol candidate (exact match or single unambiguous prefix match)
     pub fn resolve_symbol_candidate(&self, symbol: &str) -> Option<String> {
         if let Some(node) = self.ast_index.get_symbol(symbol) {
@@ -989,13 +1152,15 @@ impl AxiomMcpServer {
                         },
                         {
                             "name": "axiom_apply_mutation",
-                            "description": "Apply a Tree-CRDT mutation to one symbol and persist it, or stage/commit/rollback speculative in-memory mutations. Only that symbol is written, so a concurrent agent sharing the workspace does not lose its work.",
+                            "description": "Apply a Tree-CRDT mutation to one symbol and persist it, or stage/commit/rollback speculative in-memory mutations. Only that symbol is written, so a concurrent agent sharing the workspace does not lose its work. With write_source, the symbol's source file is rewritten too: your change is merged with whatever other agents changed in that symbol since you read it, and refused as CONFLICT, file untouched, when both changed the same lines.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "node_id": { "type": "string", "description": "Tree-CRDT node identifier" },
                                     "symbol_path": { "type": "string", "description": "Symbol path being modified" },
                                     "content": { "type": "string", "description": "New source content of the symbol" },
+                                    "write_source": { "type": "boolean", "description": "If true, write content into the symbol's source file, from its declaration line to the end of its body, merged with changes made there since base_content was read. Requires base_content." },
+                                    "base_content": { "type": "string", "description": "With write_source: the symbol's text as you read it, the source_text returned by axiom_query_symbol. On CONFLICT, resend with the current_content the refusal returned." },
                                     "speculative": { "type": "boolean", "description": "If true, stage mutation in memory without persisting to disk or CRDT log" },
                                     "commit_staged": { "type": "boolean", "description": "If true, commit a previously staged speculative mutation" },
                                     "rollback_staged": { "type": "boolean", "description": "If true, discard a staged speculative mutation and restore previous AST state" }
@@ -1460,6 +1625,7 @@ impl AxiomMcpServer {
                     if let Some(slice) = self.ast_index.get_symbol_slice(symbol, token_budget) {
                         val["context_slice"] = json!(slice);
                     }
+                    self.attach_source_text(&mut val, symbol);
                     return Ok(val);
                 }
 
@@ -1481,6 +1647,7 @@ impl AxiomMcpServer {
                         {
                             val["context_slice"] = json!(slice);
                         }
+                        self.attach_source_text(&mut val, resolved);
                         return Ok(val);
                     }
                 }
@@ -1757,6 +1924,35 @@ impl AxiomMcpServer {
                     return Ok(json!({
                         "error": "commit_staged and rollback_staged are opposites; set one or the other, not both"
                     }));
+                }
+
+                let write_source = match optional_flag(&args, "write_source", false) {
+                    Ok(w) => w,
+                    Err(e) => return Ok(json!({ "error": e })),
+                };
+                if write_source {
+                    // A source write is final: staging, committing and rolling
+                    // back describe an in-memory overlay it never goes through.
+                    if speculative || commit_staged || rollback_staged {
+                        return Ok(json!({
+                            "error": "write_source writes the file now; it cannot be combined with speculative, commit_staged or rollback_staged"
+                        }));
+                    }
+                    let content = match args.get("content").and_then(|v| v.as_str()) {
+                        Some(c) => c,
+                        None => {
+                            return Ok(
+                                json!({ "error": "content is required with write_source: it is the symbol's new text" }),
+                            );
+                        }
+                    };
+                    let Some(base) = args.get("base_content").and_then(|v| v.as_str()) else {
+                        return Ok(json!({
+                            "error": "base_content is required with write_source: it is the symbol's text as you read it, the source_text axiom_query_symbol returns. Without it, a change another agent made since cannot be told apart from one you are making, and writing over it would lose it."
+                        }));
+                    };
+                    let node_id = args.get("node_id").and_then(|v| v.as_str());
+                    return Ok(self.write_symbol_source(symbol, base, content, node_id));
                 }
 
                 if rollback_staged {
