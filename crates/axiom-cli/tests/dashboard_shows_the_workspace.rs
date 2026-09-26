@@ -226,3 +226,20 @@ fn an_untouched_workspace_says_so_rather_than_showing_nothing() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Colour follows the terminal unless asked for: `always` keeps it through a
+/// pipe, for a pager or a recording, and `never` drops it in a terminal.
+#[test]
+fn colour_can_be_asked_for_through_a_pipe() {
+    let dir = workspace("colour");
+    let coloured = frame(&dir, &["--color", "always"]);
+    assert!(
+        coloured.contains("\x1b[1mWRITES") || coloured.contains("\x1b[90mWRITES"),
+        "--color always must colour a piped frame:\n{coloured:?}"
+    );
+    let plain = frame(&dir, &["--color", "never"]);
+    assert!(!plain.contains('\x1b'), "{plain:?}");
+    let refused = axiom(&dir, &["dashboard", "--color", "sometimes"]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

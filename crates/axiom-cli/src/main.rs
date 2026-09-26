@@ -119,6 +119,10 @@ enum Commands {
         /// Seconds between two frames of the live view
         #[arg(long, default_value_t = 2)]
         interval: u64,
+        /// auto colours a terminal only, and honours NO_COLOR; always keeps
+        /// colour through a pipe, for a pager or a recording
+        #[arg(long, default_value = "auto", value_parser = ["auto", "always", "never"])]
+        color: String,
     },
     /// Generate an Ed25519 keypair for signing provenance records
     Keygen {
@@ -1293,6 +1297,7 @@ async fn main() -> Result<()> {
             symbol,
             depth,
             interval,
+            color,
         } => {
             // This once printed a fixed panel under the heading LIVE METRICS:
             // "100+ Indexed Symbols" whatever the index held, and activity lines
@@ -1305,7 +1310,11 @@ async fn main() -> Result<()> {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from(".axiom"));
             let live = !once && io::stdout().is_terminal();
-            let color = live && std::env::var_os("NO_COLOR").is_none();
+            let color = match color.as_str() {
+                "always" => true,
+                "never" => false,
+                _ => live && std::env::var_os("NO_COLOR").is_none(),
+            };
             let width = std::env::var("COLUMNS")
                 .ok()
                 .and_then(|c| c.parse::<usize>().ok())

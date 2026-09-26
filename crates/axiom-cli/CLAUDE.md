@@ -53,6 +53,11 @@ same paths the DOT export writes, so the two pictures cannot disagree.
 `tests/dashboard_shows_the_workspace.rs` drives real writes, cuts a ledger record out, and reads
 the piped frame.
 
+The README's animation, `docs/images/dashboard.svg`, is recorded rather than drawn:
+`.github/scripts/record_dashboard.py` replays six agents through `axiom serve` and captures
+`dashboard --once --color always` after each step. A change to the dashboard's layout makes it
+stale, so re-run the script in the same change.
+
 ## Driving the server by hand is often faster than writing a test
 
 It is a stdio program, so piping JSON-RPC lines into `axiom serve` gives a full session. See the
