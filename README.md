@@ -20,6 +20,11 @@ iteration: instead of pushing and waiting minutes to learn that a change broke
 something, the agent asks which tests can reach the symbol it touched, runs a
 snippet in that symbol's own language, and gets an answer in milliseconds.
 
+<p align="center">
+  <img src="docs/images/dashboard.svg" alt="axiom dashboard while six agents write one workspace: alice, carol and bob change one function, bob is refused and his row turns red until he redoes his change on the current file, frank is refused on another function, and deleting a ledger record makes the ledger report where its chain breaks; below, the paths from helper to each of its tests" width="880">
+</p>
+<p align="center"><sub><code>axiom dashboard</code> while six agents write one workspace. Every frame is the dashboard's own output, captured after real <code>axiom serve</code> sessions by <a href=".github/scripts/record_dashboard.py">record_dashboard.py</a>.</sub></p>
+
 ---
 
 ## Three Strengths
@@ -123,7 +128,7 @@ which 3,429 are tests.
 | `axiom bench` (Rust snippet) | 220 ms median with the compile cache off, 125 ms with it on | `rustc` dominates; a cache hit skips it and still runs the binary. 20 iterations. |
 | `axiom swarm --agents 10 --ops 50` | 9.5 ms for 1,000 operations | Zero merge conflicts, replicas converged. |
 
-**Tree B**, this repository: 88 source files, 907 indexed symbols, of which 350
+**Tree B**, this repository: 88 source files, 908 indexed symbols, of which 351
 are tests, as of 2026-09-26. On 2026-08-31 `axiom scan` took 169 ms warm, and
 the same swarm run completed 1,000 operations in 9.1 ms with zero conflicts.
 
@@ -133,11 +138,11 @@ which asks the shipped CLI about each non-test symbol in turn. Its output on
 this repository on 2026-09-26, at depth 1:
 
 ```text
-suite             350 tests
+suite             351 tests
 non-test symbols  557
 reach >= 1 test   314 of 557 asked
-tests selected    mean 14.5, median 7, max 40
-pruned            mean 95.9%, median 98.0%
+tests selected    mean 14.5, median 8, max 40
+pruned            mean 95.9%, median 97.9%
 mean Jaccard      0.03
 ```
 
@@ -147,8 +152,8 @@ test when its own name began with `test_`, so 210 of this repository's own
 tests were indexed as ordinary functions. Every percentage taken against that
 count was taken against a denominator a third of the real one.
 
-The two trees together show how the value scales: a median of 98.0% pruned on a
-350-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
+The two trees together show how the value scales: a median of 97.9% pruned on a
+351-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
 every test the suite adds. A symbol that reaches no test gets that reported as
 the answer, which is the honest result for a helper nothing exercises directly.
 
@@ -348,15 +353,15 @@ for the other.
 | `axiom git-export` | Writes `.axiom/export.md` summarising the index and Merkle root |
 | `axiom export-slsa [--symbol <SYM>] [--out <PATH>]` | Exports cryptographic provenance ledger attestations as in-toto / SLSA v1.0 statement JSON |
 | `axiom git-hook [--install] [--verify] [--strict] [--trusted-key K] [--slsa FILE]` | Installs or executes Git and CI cryptographic attestation provenance verification |
-| `axiom dashboard [--symbol <SYM>] [--depth N] [--once]` | Agents' source writes and where they collided, the provenance ledger's chain, and with `--symbol` the paths from that symbol to each test it reaches. Redraws every 2 s in a terminal, prints one frame in a pipe |
+| `axiom dashboard [--symbol <SYM>] [--depth N] [--once] [--color auto\|always\|never]` | Agents' source writes and where they collided, the provenance ledger's chain, and with `--symbol` the paths from that symbol to each test it reaches. Redraws every 2 s in a terminal, prints one frame in a pipe |
 
 ---
 
 ## Running Tests
 
-The suite is 348 test functions across 66 integration test files. 43 of those
+The suite is 349 test functions across 66 integration test files. 43 of those
 are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`.
-Windows runs 345 of the 348: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
+Windows runs 346 of the 349: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
 `execve` race that has no Windows equivalent, so it compiles to nothing there.
 The counted figure is the one `docs_quote_the_real_numbers` pins, because it is
 the same on every machine:
