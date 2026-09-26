@@ -171,10 +171,10 @@ rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
 Measured on this repository on 2026-09-26 with
-`.github/scripts/blast_radius_stats.py`, 518 non-test symbols against 340 tests at
-depth 1: 301 symbols reach at least one test, and those select a mean of 14.8 and
-a median of 9, pruning a mean of 95.7% and a median of 97.4%. Mean pairwise
-Jaccard overlap between two symbols' answers is 0.03. The 217 symbols that reach
+`.github/scripts/blast_radius_stats.py`, 524 non-test symbols against 343 tests at
+depth 1: 306 symbols reach at least one test, and those select a mean of 14.5 and
+a median of 8, pruning a mean of 95.8% and a median of 97.8%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.03. The 218 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a
 claim that changing one is safe.
 
@@ -535,7 +535,7 @@ carries a claim.
 | `axiom serve` | Starts the native MCP server over `stdio` (JSON-RPC 2.0) |
 | `axiom eval --symbol <SYM> -c <CODE>` | Compiles and runs a snippet in the symbol's own language, exiting non-zero if it fails or if nothing could be run. Not a sandbox outside WebAssembly |
 | `axiom symbol --path <SYM>` | Queries AST node metadata and type signatures |
-| `axiom blast-radius --symbol <SYM> [--depth N]` | The tests that can reach a symbol, and the percentage pruned |
+| `axiom blast-radius --symbol <SYM> [--depth N] [--format text\|json\|dot]` | The tests that can reach a symbol, and the percentage pruned. `json` is the whole answer with its causal paths; `dot` draws those paths for Graphviz, `\| dot -Tsvg > radius.svg` |
 | `axiom cache-validate --samples <N> --depth <N>` | Breaks symbols on purpose, runs the project's own suite, and checks the blast radius selected every test that really failed |
 | `axiom cache-audit --path <DIR>` | Measures what a verdict cache would decide against what the blast radius selects, without caching anything or skipping any test |
 | `axiom bench --iterations <N>` | Measures how long one Rust evaluation takes on this machine, reporting min, median, max and mean |

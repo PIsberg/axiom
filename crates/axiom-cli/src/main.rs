@@ -3,6 +3,7 @@ use axiom_ast::SearchMode;
 use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest};
 use clap::{Parser, Subcommand};
 
+mod export;
 mod mutate;
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
@@ -41,6 +42,10 @@ enum Commands {
         symbol: String,
         #[arg(short, long, default_value_t = 1)]
         depth: usize,
+        /// text lists the tests; json is the tool's whole answer, causal paths
+        /// included; dot draws those paths for Graphviz (`| dot -Tsvg`)
+        #[arg(long, default_value = "text", value_parser = ["text", "json", "dot"])]
+        format: String,
     },
     /// Break symbols on purpose and check the graph predicted what really failed
     CacheValidate {
@@ -508,7 +513,11 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::BlastRadius { symbol, depth } => {
+        Commands::BlastRadius {
+            symbol,
+            depth,
+            format,
+        } => {
             let req = JsonRpcRequest {
                 jsonrpc: "2.0".into(),
                 id: Some(serde_json::json!(1)),
@@ -522,6 +531,17 @@ async fn main() -> Result<()> {
                 })),
             };
             let radius = payload_or_exit(tool_payload(&server.handle_request(req).await));
+            match format.as_str() {
+                "json" => {
+                    println!("{}", serde_json::to_string_pretty(&radius)?);
+                    return Ok(());
+                }
+                "dot" => {
+                    print!("{}", export::blast_radius_dot(&radius));
+                    return Ok(());
+                }
+                _ => {}
+            }
 
             let tests = radius["impacted_tests"]
                 .as_array()
