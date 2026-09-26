@@ -42,6 +42,17 @@ as it stands. `mutate::symbol_lines` re-finds the declaration rather than trusti
 range, and keeps every declaration line for a key, because two declarations can genuinely share
 one (mutually exclusive `cfg` spellings of one function being the honest case).
 
+## The dashboard shows only what a file in the workspace says
+
+`dashboard.rs` is a pure `render` over a `View` that `gather` reads from `.axiom`: the index, the
+source-write log, the ledger. It replaced a panel that printed constants as measurements ("100+
+Indexed Symbols"), so a panel that cannot know something says so rather than showing a number. The
+ledger panel checks that each record links to the one before it and does not claim to check seals,
+which need the prompt the ledger does not hold. The blast tree draws `export::paths_to_tests`, the
+same paths the DOT export writes, so the two pictures cannot disagree.
+`tests/dashboard_shows_the_workspace.rs` drives real writes, cuts a ledger record out, and reads
+the piped frame.
+
 ## Driving the server by hand is often faster than writing a test
 
 It is a stdio program, so piping JSON-RPC lines into `axiom serve` gives a full session. See the

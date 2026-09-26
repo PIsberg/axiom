@@ -123,7 +123,7 @@ which 3,429 are tests.
 | `axiom bench` (Rust snippet) | 220 ms median with the compile cache off, 125 ms with it on | `rustc` dominates; a cache hit skips it and still runs the binary. 20 iterations. |
 | `axiom swarm --agents 10 --ops 50` | 9.5 ms for 1,000 operations | Zero merge conflicts, replicas converged. |
 
-**Tree B**, this repository: 84 source files, 858 indexed symbols, of which 340
+**Tree B**, this repository: 88 source files, 907 indexed symbols, of which 350
 are tests, as of 2026-09-26. On 2026-08-31 `axiom scan` took 169 ms warm, and
 the same swarm run completed 1,000 operations in 9.1 ms with zero conflicts.
 
@@ -133,11 +133,11 @@ which asks the shipped CLI about each non-test symbol in turn. Its output on
 this repository on 2026-09-26, at depth 1:
 
 ```text
-suite             340 tests
-non-test symbols  518
-reach >= 1 test   301 of 518 asked
-tests selected    mean 14.8, median 9, max 40
-pruned            mean 95.7%, median 97.4%
+suite             350 tests
+non-test symbols  557
+reach >= 1 test   314 of 557 asked
+tests selected    mean 14.5, median 7, max 40
+pruned            mean 95.9%, median 98.0%
 mean Jaccard      0.03
 ```
 
@@ -147,8 +147,8 @@ test when its own name began with `test_`, so 210 of this repository's own
 tests were indexed as ordinary functions. Every percentage taken against that
 count was taken against a denominator a third of the real one.
 
-The two trees together show how the value scales: a median of 97.4% pruned on a
-340-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
+The two trees together show how the value scales: a median of 98.0% pruned on a
+350-test suite, 99.8% on a 3,429-test one, and the wall-clock saving grows with
 every test the suite adds. A symbol that reaches no test gets that reported as
 the answer, which is the honest result for a helper nothing exercises directly.
 
@@ -334,7 +334,7 @@ for the other.
 | `axiom scan --scip <FILE> --path <DIR>` | Ingests a precise SCIP index (scip-java, rust-analyzer scip, and the rest) instead of the heuristic scan |
 | `axiom search --query <STR> [--mode literal\|regex\|auto]` | Text search across the repository. Literal by default, so `.` and `(` match themselves; `--mode regex` compiles the query as a pattern, `--mode auto` picks regex only for queries that cannot be meant as literal text |
 | `axiom eval --symbol <SYM> -c <CODE>` | Compiles and runs a snippet in the symbol's own language and reports the real outcome |
-| `axiom blast-radius --symbol <SYM> [--depth N]` | The tests that can reach a symbol, and the percentage pruned |
+| `axiom blast-radius --symbol <SYM> [--depth N] [--format text\|json\|dot]` | The tests that can reach a symbol, and the percentage pruned. `json` is the whole answer with its causal paths; `dot` draws those paths for Graphviz, `\| dot -Tsvg > radius.svg` |
 | `axiom symbol --path <SYM>` | AST node metadata, signature and direct dependencies |
 | `axiom cache-validate --samples <N> --depth <N>` | Breaks symbols on purpose, runs the project's own suite, and checks the blast radius selected every test that really failed |
 | `axiom cache-audit --path <DIR>` | Measures what a verdict cache would decide against what the blast radius selects, without caching anything or skipping any test. See [docs/verdict_cache_audit.md](docs/verdict_cache_audit.md) |
@@ -348,15 +348,15 @@ for the other.
 | `axiom git-export` | Writes `.axiom/export.md` summarising the index and Merkle root |
 | `axiom export-slsa [--symbol <SYM>] [--out <PATH>]` | Exports cryptographic provenance ledger attestations as in-toto / SLSA v1.0 statement JSON |
 | `axiom git-hook [--install] [--verify] [--strict] [--trusted-key K] [--slsa FILE]` | Installs or executes Git and CI cryptographic attestation provenance verification |
-| `axiom dashboard` | Prints a one-shot snapshot of the workspace: symbol counts by kind, index file size, CRDT node count, Merkle root, provenance record count |
+| `axiom dashboard [--symbol <SYM>] [--depth N] [--once]` | Agents' source writes and where they collided, the provenance ledger's chain, and with `--symbol` the paths from that symbol to each test it reaches. Redraws every 2 s in a terminal, prints one frame in a pipe |
 
 ---
 
 ## Running Tests
 
-The suite is 338 test functions across 64 integration test files. 43 of those
+The suite is 348 test functions across 66 integration test files. 43 of those
 are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`.
-Windows runs 335 of the 338: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
+Windows runs 345 of the 348: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
 `execve` race that has no Windows equivalent, so it compiles to nothing there.
 The counted figure is the one `docs_quote_the_real_numbers` pins, because it is
 the same on every machine:

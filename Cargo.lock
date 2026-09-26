@@ -152,6 +152,7 @@ dependencies = [
  "axiom-crdt",
  "axiom-proto",
  "axiom-vmm",
+ "chrono",
  "clap",
  "serde_json",
  "tokio",

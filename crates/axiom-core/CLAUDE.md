@@ -80,6 +80,11 @@ Three things hold it together, and each has a test that goes red without it:
   fails three of the tests in `tests/mutation_writes_source.rs`; the merge's own cases are in
   `axiom-crdt/tests/merge_refuses_what_it_cannot_order.rs`.
 
+Every outcome, a refusal included, is appended to `.axiom/source_writes.jsonl` under the same
+lock, with the caller's `agent_identity` run through `agent_identity_of`: it is caller-set and
+`axiom dashboard` prints it, so the control-character rule below applies. A refusal changes no
+file, index or op log, so without this log a collision is seen by one agent and nobody else.
+
 The op log is replayed before the write's operation is stamped, so its Lamport time is later than
 every recorded one and last-writer-wins agrees with the file. Other symbols' positions in a
 written file are left stale in the index; nothing that writes relies on them.
