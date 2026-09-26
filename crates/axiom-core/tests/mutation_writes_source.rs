@@ -343,3 +343,85 @@ fn the_file_named_is_the_one_written() {
         ws.file("lib.rs").canonicalize().unwrap()
     );
 }
+
+fn write_as(server: &AxiomMcpServer, agent: &str, base: &str, content: &str) -> (Value, bool) {
+    call(
+        server,
+        "axiom_apply_mutation",
+        json!({
+            "symbol_path": "target",
+            "write_source": true,
+            "base_content": base,
+            "content": content,
+            "agent_identity": agent,
+        }),
+    )
+}
+
+fn logged(ws: &Workspace) -> Vec<Value> {
+    let path = ws.0.join(".axiom").join("source_writes.jsonl");
+    std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("each log line is one JSON record"))
+        .collect()
+}
+
+/// Who wrote what, and where two agents collided, is only visible afterwards if
+/// the outcome is recorded: a refused write leaves no trace in the file, the
+/// index or the op log, so without this a conflict is seen by the one agent
+/// that received it and by nobody else.
+#[test]
+fn every_write_and_every_conflict_is_logged_with_its_agent() {
+    let ws = Workspace::with("lib.rs", LIB);
+    let (alice, bob, carol) = (ws.agent(), ws.agent(), ws.agent());
+    let base = source_text(&alice, "target");
+
+    let (a, _) = write_as(&alice, "alice", &base, &base.replace("x + 1", "x + 10"));
+    assert_eq!(a["status"], "WRITTEN", "{a}");
+    let (b, _) = write_as(&bob, "bob", &base, &base.replace("x + 1", "x + 20"));
+    assert_eq!(b["status"], "CONFLICT", "{b}");
+    let (c, _) = write_as(&carol, "carol", &base, &base.replace("b - 3", "b - 30"));
+    assert_eq!(c["status"], "WRITTEN", "{c}");
+
+    let log = logged(&ws);
+    let seen: Vec<(&str, &str)> = log
+        .iter()
+        .map(|r| (r["agent"].as_str().unwrap(), r["outcome"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("alice", "written"),
+            ("bob", "conflict"),
+            ("carol", "merged")
+        ],
+        "{log:?}"
+    );
+    assert!(
+        log.iter().all(|r| r["symbol"] == "lib.rs::target"
+            || r["symbol"].as_str().unwrap().ends_with("::target")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn an_agent_name_that_could_forge_a_log_line_is_refused() {
+    let ws = Workspace::with("lib.rs", LIB);
+    let agent = ws.agent();
+    let base = source_text(&agent, "target");
+    let (reply, is_error) = write_as(
+        &agent,
+        "alice\n● bob  merged",
+        &base,
+        &base.replace("x + 1", "x + 10"),
+    );
+    assert!(is_error, "{reply}");
+    assert_eq!(
+        ws.read("lib.rs"),
+        LIB,
+        "a refused write must not touch the file"
+    );
+    assert!(logged(&ws).is_empty());
+}

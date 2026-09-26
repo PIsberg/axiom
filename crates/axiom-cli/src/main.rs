@@ -3,6 +3,7 @@ use axiom_ast::SearchMode;
 use axiom_core::{AxiomMcpServer, mcp::JsonRpcRequest};
 use clap::{Parser, Subcommand};
 
+mod dashboard;
 mod export;
 mod mutate;
 use std::io::{self, BufRead, Write};
@@ -105,8 +106,20 @@ enum Commands {
         #[arg(long)]
         scip: Option<String>,
     },
-    /// Print a one-shot snapshot of the workspace: symbol counts, index size, Merkle root, provenance records
-    Dashboard,
+    /// Show agents' source writes and conflicts, the ledger chain, and a symbol's blast radius; live in a terminal
+    Dashboard {
+        /// Print one frame and exit. Also what happens in a pipe or a file
+        #[arg(long, default_value_t = false)]
+        once: bool,
+        /// Add this symbol's blast radius, drawn as the paths to each test
+        #[arg(short, long)]
+        symbol: Option<String>,
+        #[arg(short, long, default_value_t = 1)]
+        depth: usize,
+        /// Seconds between two frames of the live view
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+    },
     /// Generate an Ed25519 keypair for signing provenance records
     Keygen {
         /// Where to write the private key. Keep it outside the workspace.
@@ -1275,58 +1288,57 @@ async fn main() -> Result<()> {
             );
         }
 
-        Commands::Dashboard => {
-            // This used to print a fixed panel under the heading LIVE METRICS:
-            // "100+ Indexed Symbols" whatever the index held, a blast-radius
-            // ratio, an attestation level, and five activity lines with invented
-            // timings for calls nobody had made. Everything below is read from
-            // the workspace.
-            let symbols = server.ast_index.list_symbols();
-            let mut by_kind: std::collections::BTreeMap<String, usize> =
-                std::collections::BTreeMap::new();
-            for n in &symbols {
-                *by_kind.entry(n.kind.clone()).or_default() += 1;
-            }
+        Commands::Dashboard {
+            once,
+            symbol,
+            depth,
+            interval,
+        } => {
+            // This once printed a fixed panel under the heading LIVE METRICS:
+            // "100+ Indexed Symbols" whatever the index held, and activity lines
+            // with invented timings for calls nobody had made. Every panel is
+            // now read from a file the workspace keeps; see `dashboard.rs`.
+            use std::io::IsTerminal;
+            let axiom_dir = server
+                .index_path()
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from(".axiom"));
+            let live = !once && io::stdout().is_terminal();
+            let color = live && std::env::var_os("NO_COLOR").is_none();
+            let width = std::env::var("COLUMNS")
+                .ok()
+                .and_then(|c| c.parse::<usize>().ok())
+                .unwrap_or(100)
+                .clamp(60, 160);
 
-            let index_path = std::path::Path::new(".axiom/index.json");
-            let attestations = axiom_core::mcp::load_attestations().unwrap_or_default();
+            let index_file = axiom_dir.join("index.json");
+            let modified =
+                |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            let mut index = server.ast_index.clone();
+            let mut seen = modified(&index_file);
+            loop {
+                let view = dashboard::gather(&index, &axiom_dir, symbol.as_deref(), depth);
+                let frame = dashboard::render(&view, width, color, live.then_some(interval));
+                if !live {
+                    print!("{frame}");
+                    break;
+                }
+                print!("\x1b[H\x1b[2J{frame}");
+                io::stdout().flush()?;
+                tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
 
-            println!("AXIOM WORKSPACE");
-            println!("===============");
-            println!();
-            if symbols.is_empty() {
-                println!("  No symbols indexed. Run `axiom scan --path .` first.");
-            } else {
-                println!("  Indexed symbols: {}", symbols.len());
-                for (kind, count) in &by_kind {
-                    println!("    {:<10} {}", kind, count);
+                // A scan rewrites the index. Showing the counts and the blast
+                // radius the dashboard started with would be a stale frame
+                // presented as a live one, so a changed index is read again.
+                let now = modified(&index_file);
+                if now != seen {
+                    if let Ok(fresh) = axiom_ast::AstIndex::load_from_disk(&index_file) {
+                        index = Arc::new(fresh);
+                    }
+                    seen = now;
                 }
             }
-            println!();
-            println!(
-                "  Index file:      {}",
-                if index_path.exists() {
-                    format!(
-                        "{:?} ({} bytes)",
-                        index_path,
-                        std::fs::metadata(index_path).map(|m| m.len()).unwrap_or(0)
-                    )
-                } else {
-                    "not written yet".to_string()
-                }
-            );
-            println!(
-                "  CRDT nodes:      {}",
-                server.tree_crdt.active_nodes_count()
-            );
-            println!(
-                "  Merkle root:     {}",
-                server.tree_crdt.compute_tree_merkle_root()
-            );
-            println!("  Provenance:      {} record(s)", attestations.len());
-            println!();
-            println!("  This is a snapshot of the workspace as it is now, not a live feed.");
-            println!("  Run `axiom bench` to measure sandbox latency on this machine.");
         }
 
         Commands::Watch {

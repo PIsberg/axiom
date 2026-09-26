@@ -171,10 +171,10 @@ rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
 Measured on this repository on 2026-09-26 with
-`.github/scripts/blast_radius_stats.py`, 524 non-test symbols against 344 tests at
-depth 1: 306 symbols reach at least one test, and those select a mean of 14.6 and
-a median of 8, pruning a mean of 95.8% and a median of 97.8%. Mean pairwise
-Jaccard overlap between two symbols' answers is 0.03. The 218 symbols that reach
+`.github/scripts/blast_radius_stats.py`, 557 non-test symbols against 350 tests at
+depth 1: 314 symbols reach at least one test, and those select a mean of 14.5 and
+a median of 7, pruning a mean of 95.9% and a median of 98.0%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.03. The 243 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a
 claim that changing one is safe.
 
@@ -375,7 +375,10 @@ prevent. On `CONFLICT`, make your change to `current_content` and send it again
 with `current_content` as the new `base_content`.
 
 Writes to source files are serialised per workspace, so a second writer always
-merges against the first one's result. The file keeps its line endings. The
+merges against the first one's result. Every outcome, `CONFLICT` included, is
+appended to `.axiom/source_writes.jsonl` with the caller's `agent_identity`
+(checked where it enters, as for attestations), which is what `axiom dashboard`
+shows. The file keeps its line endings. The
 index's line numbers for other symbols in the same file are not recomputed,
 since a write never relies on them; `axiom scan` refreshes them. `write_source`
 cannot be combined with `speculative`, `commit_staged` or `rollback_staged`.
@@ -549,4 +552,53 @@ carries a claim.
 | `axiom search --query <STR> [--mode literal\|regex\|auto]` | Trigram text search across the repository. Literal by default |
 | `axiom watch --path <DIR> [--interval-ms N] [--once]` | Re-indexes the tree when it changes, polling a cheap fingerprint between scans |
 | `axiom git-export` | Writes .axiom/export.md summarising the index. It does not touch git |
-| `axiom dashboard` | Prints a one-shot snapshot of the workspace: symbol counts by kind, index file size, CRDT node count, Merkle root, provenance record count. Not a TUI and not a live feed |
+| `axiom dashboard [--symbol <SYM>] [--depth N] [--once]` | Agents' source writes and where they collided, the provenance ledger's chain, and with `--symbol` the paths from that symbol to each test it reaches. Live in a terminal, one frame in a pipe; see [the dashboard](#the-dashboard) |
+
+### The dashboard
+
+`axiom dashboard` puts what agents did to the workspace on one screen. In a
+terminal it redraws every 2 seconds (`--interval`) until Ctrl-C, reloading the
+index when a scan rewrites it; in a pipe, a file or an agent's shell, and with
+`--once`, it prints one frame without colour. It is as wide as `COLUMNS`, else
+100 columns, between 60 and 160. Three agents on one function, a ledger with a
+record cut out of it, and `--symbol helper --depth 2`, at `COLUMNS=110` (the
+path and the ages are illustrative):
+
+```text
+ axiom  /work/shop                                                                  18:25:23
+ 6 symbols · 2 tests · root 838af721ef50 · index scanned 4m ago
+
+WRITES  4 agents · 3 writes landed · 1 symbol contended · 1 conflict, 1 change not landed
+  ● src/lib.rs::parse  dave  1 written  2m ago
+  ● src/lib.rs::target  not landed: bob  alice, bob, carol  1 written, 1 merged, 1 conflict  1m ago
+
+LEDGER  3 records · chain breaks at #2 · none signed · 3 reported
+  ✓ #1  target  reported  unsigned  alice  9m ago
+  ✗ #2  target  reported  unsigned  alice  8m ago
+      names predecessor 2b32c1a129, but #1 seals as 2b32fe4773: a record was removed or reordered
+  ✓ #3  target  reported  unsigned  alice  7m ago
+    links are checked here; a seal needs its prompt: axiom verify --symbol S --prompt P
+
+BLAST  src/lib.rs::helper  2 of 2 tests · 0.0% pruned
+  helper  src/lib.rs
+  ├─ middle  src/lib.rs
+  │  └─ tests::middle_doubles  src/lib.rs
+  └─ tests::helper_adds_one  src/lib.rs
+
+ ● open conflict  ● several agents  ● one agent
+```
+
+* **Writes** reads `.axiom/source_writes.jsonl`, where every `write_source`
+  mutation records its agent (`agent_identity`) and its outcome: `written`,
+  `merged` or `conflict`. A row is red while some agent's latest attempt on the
+  symbol was refused, and names them: Carol's write landed after Bob's was
+  refused, but Bob's change is still not in the file. Yellow means several
+  agents wrote the symbol; green, one.
+* **Ledger** reads `.axiom/attestations.json` and checks that each record names
+  the seal of the one before it, which is how a removed or reordered record
+  shows. It does not check seals or signatures: both are computed over the
+  prompt, which the ledger does not store, so that stays with `axiom verify
+  --prompt`.
+* **Blast**, with `--symbol`, draws the path from the symbol to each test within
+  `--depth`, from the same paths `axiom blast-radius --format dot` exports, and
+  counts the tests that reach it deeper.

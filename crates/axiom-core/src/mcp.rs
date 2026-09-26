@@ -477,6 +477,24 @@ pub struct Verification {
     pub detail: String,
 }
 
+/// One outcome of a source write, as `.axiom/source_writes.jsonl` records it:
+/// `written`, `merged` (written after merging with changes made since the
+/// caller read the symbol) or `conflict` (refused, file untouched).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceWrite {
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+    /// The caller's `agent_identity`, checked where it enters, or `unattributed`.
+    pub agent: String,
+    pub symbol: String,
+    pub outcome: String,
+}
+
+/// Every source write recorded so far. A missing log is an empty one.
+pub fn load_source_writes(path: &std::path::Path) -> Vec<SourceWrite> {
+    load_records(path).unwrap_or_default()
+}
+
 /// An in-memory speculative mutation overlay before disk persistence or CRDT commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedMutation {
@@ -642,6 +660,7 @@ impl AxiomMcpServer {
         base: &str,
         content: &str,
         node_id: Option<&str>,
+        agent: &str,
     ) -> Value {
         let Some(node) = self.ast_index.get_symbol(symbol) else {
             let candidates = self.ast_index.candidates_for(symbol);
@@ -685,7 +704,7 @@ impl AxiomMcpServer {
 
         let (merged, has_conflicts) = axiom_crdt::merge_statements_3way(&base, &current, &content);
         if has_conflicts {
-            return json!({
+            let mut answer = json!({
                 "error": format!("CONFLICT: {canonical} changed since you read it, on the lines you are changing. {file} was not written."),
                 "status": "CONFLICT",
                 "symbol_path": canonical,
@@ -694,6 +713,8 @@ impl AxiomMcpServer {
                 "conflict_preview": merged,
                 "how_to_resolve": "In conflict_preview, LOCAL is the file as it reads now and REMOTE is your content. Make your change to current_content and send it again with base_content set to current_content."
             });
+            self.log_source_write(&mut answer, &canonical, agent, "conflict");
+            return answer;
         }
         let merged_since_read = base != current;
 
@@ -759,7 +780,42 @@ impl AxiomMcpServer {
         {
             answer["index_not_saved"] = json!(e.to_string());
         }
+        let outcome = if merged_since_read {
+            "merged"
+        } else {
+            "written"
+        };
+        self.log_source_write(&mut answer, &canonical, agent, outcome);
         answer
+    }
+
+    /// Where every source write and every refusal is recorded, one JSON line
+    /// each, for `axiom dashboard` to show where agents collided.
+    pub fn source_writes_path(&self) -> PathBuf {
+        self.axiom_dir.join("source_writes.jsonl")
+    }
+
+    /// Record one outcome of `write_symbol_source`. Called under the source
+    /// lock, so the log's order is the order the writes happened in.
+    ///
+    /// A refused write leaves no trace in the file, the index or the op log, so
+    /// without this a conflict is known to the one agent that received it and
+    /// to nobody else. The write has already happened or been refused by the
+    /// time this runs, so a failure to log is reported beside the answer
+    /// rather than turned into one.
+    fn log_source_write(&self, answer: &mut Value, symbol: &str, agent: &str, outcome: &str) {
+        let record = SourceWrite {
+            at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            agent: agent.to_string(),
+            symbol: symbol.to_string(),
+            outcome: outcome.to_string(),
+        };
+        if let Err(e) = append_record(&self.source_writes_path(), &record) {
+            answer["write_not_logged"] = json!(e.to_string());
+        }
     }
 
     /// Resolve a symbol candidate (exact match or single unambiguous prefix match)
@@ -1161,6 +1217,7 @@ impl AxiomMcpServer {
                                     "content": { "type": "string", "description": "New source content of the symbol" },
                                     "write_source": { "type": "boolean", "description": "If true, write content into the symbol's source file, from its declaration line to the end of its body, merged with changes made there since base_content was read. Requires base_content." },
                                     "base_content": { "type": "string", "description": "With write_source: the symbol's text as you read it, the source_text returned by axiom_query_symbol. On CONFLICT, resend with the current_content the refusal returned." },
+                                    "agent_identity": { "type": "string", "description": "With write_source: who is writing, recorded in .axiom/source_writes.jsonl beside the outcome so axiom dashboard can show which agents collided. Omit to be recorded as unattributed." },
                                     "speculative": { "type": "boolean", "description": "If true, stage mutation in memory without persisting to disk or CRDT log" },
                                     "commit_staged": { "type": "boolean", "description": "If true, commit a previously staged speculative mutation" },
                                     "rollback_staged": { "type": "boolean", "description": "If true, discard a staged speculative mutation and restore previous AST state" }
@@ -1952,7 +2009,11 @@ impl AxiomMcpServer {
                         }));
                     };
                     let node_id = args.get("node_id").and_then(|v| v.as_str());
-                    return Ok(self.write_symbol_source(symbol, base, content, node_id));
+                    let agent = match agent_identity_of(&args) {
+                        Ok(a) => a,
+                        Err(e) => return Ok(json!({ "error": e })),
+                    };
+                    return Ok(self.write_symbol_source(symbol, base, content, node_id, &agent));
                 }
 
                 if rollback_staged {
