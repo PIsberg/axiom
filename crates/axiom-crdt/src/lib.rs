@@ -35,6 +35,190 @@ pub enum TreeOp {
     },
 }
 
+fn write_bin_string(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+fn read_bin_string(bytes: &[u8], offset: &mut usize) -> Result<String, &'static str> {
+    if *offset + 4 > bytes.len() {
+        return Err("truncated string length");
+    }
+    let len = u32::from_le_bytes([
+        bytes[*offset],
+        bytes[*offset + 1],
+        bytes[*offset + 2],
+        bytes[*offset + 3],
+    ]) as usize;
+    *offset += 4;
+    if *offset + len > bytes.len() {
+        return Err("truncated string body");
+    }
+    let s = std::str::from_utf8(&bytes[*offset..*offset + len])
+        .map_err(|_| "invalid utf8 string")?;
+    *offset += len;
+    Ok(s.to_string())
+}
+
+fn write_bin_time(buf: &mut Vec<u8>, ts: LamportTime) {
+    buf.extend_from_slice(&ts.time.to_le_bytes());
+    buf.extend_from_slice(&ts.agent_id.to_le_bytes());
+}
+
+fn read_bin_time(bytes: &[u8], offset: &mut usize) -> Result<LamportTime, &'static str> {
+    if *offset + 12 > bytes.len() {
+        return Err("truncated lamport timestamp");
+    }
+    let time = u64::from_le_bytes(bytes[*offset..*offset + 8].try_into().unwrap());
+    *offset += 8;
+    let agent_id = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    *offset += 4;
+    Ok(LamportTime { time, agent_id })
+}
+
+impl TreeOp {
+    /// Encode a single TreeOp into compact binary wire representation
+    pub fn encode_binary(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(128);
+        buf.extend_from_slice(b"AX");
+        self.encode_into(&mut buf);
+        buf
+    }
+
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            TreeOp::Insert {
+                op_id,
+                parent_id,
+                node_id,
+                symbol,
+                kind,
+                content,
+                timestamp,
+            } => {
+                buf.push(1);
+                write_bin_string(buf, op_id);
+                write_bin_string(buf, parent_id);
+                write_bin_string(buf, node_id);
+                write_bin_string(buf, symbol);
+                write_bin_string(buf, kind);
+                write_bin_string(buf, content);
+                write_bin_time(buf, *timestamp);
+            }
+            TreeOp::Update {
+                op_id,
+                node_id,
+                new_content,
+                timestamp,
+            } => {
+                buf.push(2);
+                write_bin_string(buf, op_id);
+                write_bin_string(buf, node_id);
+                write_bin_string(buf, new_content);
+                write_bin_time(buf, *timestamp);
+            }
+            TreeOp::Delete {
+                op_id,
+                node_id,
+                timestamp,
+            } => {
+                buf.push(3);
+                write_bin_string(buf, op_id);
+                write_bin_string(buf, node_id);
+                write_bin_time(buf, *timestamp);
+            }
+        }
+    }
+
+    /// Decode a single TreeOp from compact binary wire representation
+    pub fn decode_binary(bytes: &[u8]) -> anyhow::Result<Self> {
+        if bytes.len() < 3 || &bytes[0..2] != b"AX" {
+            anyhow::bail!("invalid binary wire magic or truncated payload");
+        }
+        let mut offset = 2;
+        Self::decode_from(bytes, &mut offset).map_err(|e| anyhow::anyhow!(e))
+    }
+
+    fn decode_from(bytes: &[u8], offset: &mut usize) -> Result<Self, &'static str> {
+        if *offset >= bytes.len() {
+            return Err("unexpected end of binary stream");
+        }
+        let tag = bytes[*offset];
+        *offset += 1;
+        match tag {
+            1 => {
+                let op_id = read_bin_string(bytes, offset)?;
+                let parent_id = read_bin_string(bytes, offset)?;
+                let node_id = read_bin_string(bytes, offset)?;
+                let symbol = read_bin_string(bytes, offset)?;
+                let kind = read_bin_string(bytes, offset)?;
+                let content = read_bin_string(bytes, offset)?;
+                let timestamp = read_bin_time(bytes, offset)?;
+                Ok(TreeOp::Insert {
+                    op_id,
+                    parent_id,
+                    node_id,
+                    symbol,
+                    kind,
+                    content,
+                    timestamp,
+                })
+            }
+            2 => {
+                let op_id = read_bin_string(bytes, offset)?;
+                let node_id = read_bin_string(bytes, offset)?;
+                let new_content = read_bin_string(bytes, offset)?;
+                let timestamp = read_bin_time(bytes, offset)?;
+                Ok(TreeOp::Update {
+                    op_id,
+                    node_id,
+                    new_content,
+                    timestamp,
+                })
+            }
+            3 => {
+                let op_id = read_bin_string(bytes, offset)?;
+                let node_id = read_bin_string(bytes, offset)?;
+                let timestamp = read_bin_time(bytes, offset)?;
+                Ok(TreeOp::Delete {
+                    op_id,
+                    node_id,
+                    timestamp,
+                })
+            }
+            _ => Err("unknown TreeOp variant tag"),
+        }
+    }
+
+    /// Encode a slice of operations into a compact binary batch
+    pub fn encode_batch(ops: &[TreeOp]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(ops.len() * 96 + 6);
+        buf.extend_from_slice(b"AX");
+        buf.extend_from_slice(&(ops.len() as u32).to_le_bytes());
+        for op in ops {
+            op.encode_into(&mut buf);
+        }
+        buf
+    }
+
+    /// Decode a compact binary batch into a vector of operations
+    pub fn decode_batch(bytes: &[u8]) -> anyhow::Result<Vec<Self>> {
+        if bytes.len() < 6 || &bytes[0..2] != b"AX" {
+            anyhow::bail!("invalid binary batch magic or header");
+        }
+        let count = u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
+        let mut offset = 6;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let op = Self::decode_from(bytes, &mut offset).map_err(|e| anyhow::anyhow!(e))?;
+            out.push(op);
+        }
+        Ok(out)
+    }
+}
+
+
 /// CRDT AST Node in the Replicated Tree
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtNode {
@@ -660,6 +844,84 @@ impl SwarmEngine {
         Ok(SwarmConvergenceReport {
             agent_count: self.agents.len(),
             total_operations: total_ops_generated,
+            merkle_root: baseline_root,
+            converged,
+            merge_conflicts_count: 0,
+            duration_ms: elapsed_ms,
+            active_ast_nodes: self.agents[0].active_nodes_count(),
+        })
+    }
+
+    /// Run concurrent simulated swarm mutations serialized over binary wire and verify 100% convergence
+    pub async fn simulate_concurrent_swarm_binary(
+        &mut self,
+        operations_per_agent: usize,
+    ) -> Result<SwarmConvergenceReport> {
+        let start = std::time::Instant::now();
+        let mut all_ops = Vec::new();
+
+        for agent in &self.agents {
+            let agent_id = agent.agent_id;
+            for op_idx in 1..=operations_per_agent {
+                let node_id = format!("func_bin_{}_fn_{}", agent_id % 5, op_idx);
+                let symbol = format!("billing::bin_{}::calc_tax_{}", agent_id % 5, op_idx);
+
+                let op1 = agent.insert_node(
+                    "root",
+                    &node_id,
+                    &symbol,
+                    "function",
+                    &format!("pub fn calc_{}() -> u64 {{ {} }}", op_idx, agent_id * 10),
+                );
+                all_ops.push(op1);
+
+                if let Some(op2) = agent.update_node(
+                    &node_id,
+                    &format!(
+                        "pub fn calc_{}() -> u64 {{ {} }} // bin update",
+                        op_idx,
+                        agent_id * 20
+                    ),
+                ) {
+                    all_ops.push(op2);
+                }
+            }
+        }
+
+        // Serialize all generated operations into the compact binary wire batch
+        let wire_batch = TreeOp::encode_batch(&all_ops);
+
+        // Agents deserialize from binary wire and apply
+        let received_ops = TreeOp::decode_batch(&wire_batch)?;
+
+        for op in received_ops {
+            for agent in &self.agents {
+                agent.apply_op(op.clone());
+            }
+        }
+
+        // Verify Convergence
+        let baseline_root = self.agents[0].compute_tree_merkle_root();
+        let mut converged = true;
+
+        for (idx, agent) in self.agents.iter().enumerate() {
+            let root = agent.compute_tree_merkle_root();
+            if root != baseline_root {
+                converged = false;
+                eprintln!(
+                    "Mismatch on agent {}: expected {}, got {}",
+                    idx + 1,
+                    baseline_root,
+                    root
+                );
+            }
+        }
+
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok(SwarmConvergenceReport {
+            agent_count: self.agents.len(),
+            total_operations: all_ops.len(),
             merkle_root: baseline_root,
             converged,
             merge_conflicts_count: 0,

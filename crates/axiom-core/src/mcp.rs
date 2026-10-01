@@ -440,29 +440,87 @@ pub fn crdt_op_log_path() -> PathBuf {
     find_axiom_dir().join("crdt_ops.json")
 }
 
-/// Every operation recorded so far. A missing log is an empty one.
+/// Where the binary Tree-CRDT operation log lives, beside the index it describes.
+pub fn crdt_op_log_binary_path() -> PathBuf {
+    find_axiom_dir().join("crdt_ops.bin")
+}
+
+/// Load binary operations from length-prefixed stream.
+pub fn load_crdt_ops_binary(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let mut offset = 0;
+    let mut ops = Vec::new();
+    while offset + 4 <= bytes.len() {
+        let len = u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + len > bytes.len() {
+            break;
+        }
+        if let Ok(op) = axiom_crdt::TreeOp::decode_binary(&bytes[offset..offset + len]) {
+            ops.push(op);
+        }
+        offset += len;
+    }
+    ops
+}
+
+/// Every operation recorded so far. Checks binary op log first, falling back to JSON.
 pub fn load_crdt_ops(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
+    let bin_path = path.with_extension("bin");
+    if bin_path.exists() {
+        let bin_ops = load_crdt_ops_binary(&bin_path);
+        if !bin_ops.is_empty() {
+            return bin_ops;
+        }
+    }
     load_records(path).unwrap_or_default()
 }
 
-/// Append one operation.
-///
-/// Without this the CRDT never leaves the process that produced it. Each server
-/// started with an empty tree and saw only its own operations, so two agents
-/// working the same workspace reported different Merkle roots and neither could
-/// see the other's nodes. There were no merge conflicts because there was no
-/// merge: the convergence the type provides was only ever exercised by the
-/// in-process swarm simulation.
-///
-/// The operations are commutative, so replaying them in whatever order the file
-/// happens to hold converges to the same tree. That is the property the CRDT was
-/// chosen for, and it is what makes appending to a shared file enough.
+fn append_crdt_op_binary_unlocked(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let bin = op.encode_binary();
+    file.write_all(&(bin.len() as u32).to_le_bytes())?;
+    file.write_all(&bin)?;
+    file.flush()?;
+    Ok(())
+}
+
+/// Append one operation to the binary op log.
+pub fn append_crdt_op_binary(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _lock = axiom_ast::IndexLock::acquire(path)?;
+    append_crdt_op_binary_unlocked(path, op)
+}
+
+/// Append one operation. Writes both JSON and high-speed binary wire logs.
 pub fn append_crdt_op(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _lock = axiom_ast::IndexLock::acquire(path)?;
     append_record(path, op)?;
+    let bin_path = path.with_extension("bin");
+    let _ = append_crdt_op_binary_unlocked(&bin_path, op);
     Ok(())
 }
 
