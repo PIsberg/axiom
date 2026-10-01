@@ -1412,7 +1412,10 @@ impl AxiomMcpServer {
         }
 
         if let Some(symbol_raw) = uri.strip_prefix("axiom://symbols/") {
-            let (symbol, expected_hash) = match symbol_raw.split_once('#').or_else(|| symbol_raw.split_once('@')) {
+            let (symbol, expected_hash) = match symbol_raw
+                .split_once('#')
+                .or_else(|| symbol_raw.split_once('@'))
+            {
                 Some((s, h)) if !h.is_empty() => (s, Some(h)),
                 _ => (symbol_raw, None),
             };
@@ -1479,8 +1482,12 @@ impl AxiomMcpServer {
         }
 
         if let Some(symbol_query) = uri.strip_prefix("axiom://slice/") {
-            let (symbol_and_hash, query) = symbol_query.split_once('?').unwrap_or((symbol_query, ""));
-            let (symbol, expected_hash) = match symbol_and_hash.split_once('#').or_else(|| symbol_and_hash.split_once('@')) {
+            let (symbol_and_hash, query) =
+                symbol_query.split_once('?').unwrap_or((symbol_query, ""));
+            let (symbol, expected_hash) = match symbol_and_hash
+                .split_once('#')
+                .or_else(|| symbol_and_hash.split_once('@'))
+            {
                 Some((s, h)) if !h.is_empty() => (s, Some(h)),
                 _ => (symbol_and_hash, None),
             };
@@ -1497,7 +1504,9 @@ impl AxiomMcpServer {
                     if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
                         (candidates[0].clone(), node)
                     } else {
-                        return Err(format!("Context slice could not be computed for '{symbol}'"));
+                        return Err(format!(
+                            "Context slice could not be computed for '{symbol}'"
+                        ));
                     }
                 } else if candidates.len() > 1 {
                     return Err(format!(
@@ -1792,7 +1801,10 @@ impl AxiomMcpServer {
                     },
                 };
 
-                let (symbol, expected_hash) = match raw_symbol.split_once('#').or_else(|| raw_symbol.rsplit_once('@')) {
+                let (symbol, expected_hash) = match raw_symbol
+                    .split_once('#')
+                    .or_else(|| raw_symbol.rsplit_once('@'))
+                {
                     Some((s, h)) if !h.is_empty() => (s, Some(h)),
                     _ => (raw_symbol, None),
                 };

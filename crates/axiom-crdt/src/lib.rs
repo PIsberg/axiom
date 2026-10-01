@@ -55,8 +55,8 @@ fn read_bin_string(bytes: &[u8], offset: &mut usize) -> Result<String, &'static 
     if *offset + len > bytes.len() {
         return Err("truncated string body");
     }
-    let s = std::str::from_utf8(&bytes[*offset..*offset + len])
-        .map_err(|_| "invalid utf8 string")?;
+    let s =
+        std::str::from_utf8(&bytes[*offset..*offset + len]).map_err(|_| "invalid utf8 string")?;
     *offset += len;
     Ok(s.to_string())
 }
@@ -217,7 +217,6 @@ impl TreeOp {
         Ok(out)
     }
 }
-
 
 /// CRDT AST Node in the Replicated Tree
 #[derive(Debug, Clone, Serialize, Deserialize)]

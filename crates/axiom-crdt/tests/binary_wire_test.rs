@@ -94,6 +94,9 @@ async fn test_swarm_simulation_over_binary_wire() {
 
     assert_eq!(report.agent_count, 10);
     assert!(report.total_operations > 0);
-    assert!(report.converged, "all agents must reach 100% Merkle convergence");
+    assert!(
+        report.converged,
+        "all agents must reach 100% Merkle convergence"
+    );
     assert_eq!(report.merge_conflicts_count, 0);
 }

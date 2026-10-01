@@ -138,13 +138,9 @@ impl CasSymbolRef {
 
         // URI schemes: axiom://... or cas://...
         if let Some(rest) = trimmed.strip_prefix("axiom://") {
-            let path_part = if let Some(syms) = rest.strip_prefix("symbols/") {
-                syms
-            } else if let Some(slices) = rest.strip_prefix("slice/") {
-                slices
-            } else {
-                return None;
-            };
+            let path_part = rest
+                .strip_prefix("symbols/")
+                .or_else(|| rest.strip_prefix("slice/"))?;
 
             let (sym, hash) = path_part.split_once('#')?;
             let sym = sym.trim();
@@ -274,8 +270,6 @@ impl AgentHandoff {
         )
     }
 }
-
-
 
 /// Evaluation request payload for instant sandboxes
 #[derive(Debug, Clone, Serialize, Deserialize)]

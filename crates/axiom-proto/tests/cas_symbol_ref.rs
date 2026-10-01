@@ -5,7 +5,10 @@ fn test_cas_symbol_ref_parsing_and_formatting() {
     let raw = "auth::service::validate_token@3f8a42bc11223344556677889900aabbccddeeff11223344556677889900aabb";
     let cas_ref = CasSymbolRef::parse(raw).expect("must parse valid symbol@hash");
     assert_eq!(cas_ref.symbol_path, "auth::service::validate_token");
-    assert_eq!(cas_ref.hash, "3f8a42bc11223344556677889900aabbccddeeff11223344556677889900aabb");
+    assert_eq!(
+        cas_ref.hash,
+        "3f8a42bc11223344556677889900aabbccddeeff11223344556677889900aabb"
+    );
     assert_eq!(cas_ref.to_pointer(), raw);
     assert_eq!(
         cas_ref.to_uri(),

@@ -47,7 +47,9 @@ async fn test_dense_symbolic_prompts_format() {
         .to_string();
 
     assert!(refactor_text.starts_with("ACTION: TARGETED_REFACTOR | TARGET: auth::service::validate_token | GOAL: Migrate to argon2 password hashing\nSTEPS: axiom_query_symbol -> axiom_get_blast_radius -> axiom_apply_mutation -> axiom_eval_patch/axiom_run_tests -> axiom_attest_commit"));
-    assert!(!refactor_text.contains("Refactor symbol 'auth::service::validate_token' to accomplish:"));
+    assert!(
+        !refactor_text.contains("Refactor symbol 'auth::service::validate_token' to accomplish:")
+    );
 
     // 3. axiom_attest_task should use dense ACTION / TASK / SYM format
     let attest_req = JsonRpcRequest {
