@@ -101,6 +101,108 @@ pub struct AstNode {
     pub dependencies: Vec<String>,
 }
 
+impl AstNode {
+    /// Return the canonical compact CAS pointer string: `symbol_path@hash`
+    pub fn cas_ref(&self) -> String {
+        format!("{}@{}", self.symbol_path, self.hash)
+    }
+
+    /// Return the canonical MCP slice URI: `axiom://slice/{symbol_path}#{hash}`
+    pub fn cas_slice_uri(&self) -> String {
+        format!("axiom://slice/{}#{}", self.symbol_path, self.hash)
+    }
+}
+
+/// Compact CAS Symbol Reference for inter-agent communication
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CasSymbolRef {
+    pub symbol_path: String,
+    pub hash: String,
+}
+
+impl CasSymbolRef {
+    pub fn new(symbol_path: impl Into<String>, hash: impl Into<String>) -> Self {
+        Self {
+            symbol_path: symbol_path.into(),
+            hash: hash.into(),
+        }
+    }
+
+    /// Parse compact string reference: `symbol_path@hash` or URI `axiom://symbols/{symbol}#{hash}`,
+    /// `axiom://slice/{symbol}#{hash}`, or `cas://{symbol}#{hash}`
+    pub fn parse(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // URI schemes: axiom://... or cas://...
+        if let Some(rest) = trimmed.strip_prefix("axiom://") {
+            let path_part = if let Some(syms) = rest.strip_prefix("symbols/") {
+                syms
+            } else if let Some(slices) = rest.strip_prefix("slice/") {
+                slices
+            } else {
+                return None;
+            };
+
+            let (sym, hash) = path_part.split_once('#')?;
+            let sym = sym.trim();
+            let hash = hash.trim();
+            if !sym.is_empty() && !hash.is_empty() {
+                return Some(Self {
+                    symbol_path: sym.to_string(),
+                    hash: hash.to_string(),
+                });
+            }
+            return None;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("cas://") {
+            let (sym, hash) = rest.split_once('#').or_else(|| rest.split_once('@'))?;
+            let sym = sym.trim();
+            let hash = hash.trim();
+            if !sym.is_empty() && !hash.is_empty() {
+                return Some(Self {
+                    symbol_path: sym.to_string(),
+                    hash: hash.to_string(),
+                });
+            }
+            return None;
+        }
+
+        // Compact format: `symbol_path@hash`
+        if let Some((sym, hash)) = trimmed.rsplit_once('@') {
+            let sym = sym.trim();
+            let hash = hash.trim();
+            if !sym.is_empty() && !hash.is_empty() {
+                return Some(Self {
+                    symbol_path: sym.to_string(),
+                    hash: hash.to_string(),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Canonical pointer string: `symbol_path@hash`
+    pub fn to_pointer(&self) -> String {
+        format!("{}@{}", self.symbol_path, self.hash)
+    }
+
+    /// Canonical URI: `axiom://symbols/{symbol_path}#{hash}`
+    pub fn to_uri(&self) -> String {
+        format!("axiom://symbols/{}#{}", self.symbol_path, self.hash)
+    }
+
+    /// Canonical slice URI: `axiom://slice/{symbol_path}#{hash}`
+    pub fn to_slice_uri(&self) -> String {
+        format!("axiom://slice/{}#{}", self.symbol_path, self.hash)
+    }
+}
+
+
 /// Evaluation request payload for instant sandboxes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalRequest {

@@ -818,14 +818,30 @@ impl AxiomMcpServer {
         }
     }
 
-    /// Resolve a symbol candidate (exact match or single unambiguous prefix match)
+    /// Resolve a symbol candidate (exact match or single unambiguous prefix match, with optional CAS hash verification)
     pub fn resolve_symbol_candidate(&self, symbol: &str) -> Option<String> {
-        if let Some(node) = self.ast_index.get_symbol(symbol) {
+        let (sym, exp_hash) = match symbol.split_once('#').or_else(|| symbol.rsplit_once('@')) {
+            Some((s, h)) if !h.is_empty() => (s, Some(h)),
+            _ => (symbol, None),
+        };
+        if let Some(node) = self.ast_index.get_symbol(sym) {
+            if let Some(exp) = exp_hash {
+                if node.hash != exp {
+                    return None;
+                }
+            }
             return Some(node.symbol_path);
         }
-        let candidates = self.ast_index.candidates_for(symbol);
+        let candidates = self.ast_index.candidates_for(sym);
         if candidates.len() == 1 {
-            return Some(candidates[0].clone());
+            if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
+                if let Some(exp) = exp_hash {
+                    if node.hash != exp {
+                        return None;
+                    }
+                }
+                return Some(candidates[0].clone());
+            }
         }
         None
     }
@@ -1337,21 +1353,37 @@ impl AxiomMcpServer {
             }));
         }
 
-        if let Some(symbol) = uri.strip_prefix("axiom://symbols/") {
-            if let Some(node) = self.ast_index.get_symbol(symbol) {
-                return Ok(json!(node));
-            }
-            let candidates = self.ast_index.candidates_for(symbol);
-            if candidates.len() == 1 {
-                if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
-                    return Ok(json!(node));
+        if let Some(symbol_raw) = uri.strip_prefix("axiom://symbols/") {
+            let (symbol, expected_hash) = match symbol_raw.split_once('#').or_else(|| symbol_raw.split_once('@')) {
+                Some((s, h)) if !h.is_empty() => (s, Some(h)),
+                _ => (symbol_raw, None),
+            };
+            let node_opt = if let Some(node) = self.ast_index.get_symbol(symbol) {
+                Some(node)
+            } else {
+                let candidates = self.ast_index.candidates_for(symbol);
+                if candidates.len() == 1 {
+                    self.ast_index.get_symbol(&candidates[0])
+                } else if candidates.len() > 1 {
+                    return Err(format!(
+                        "Symbol '{symbol}' is ambiguous; matches: {:?}",
+                        candidates
+                    ));
+                } else {
+                    None
                 }
-            }
-            if candidates.len() > 1 {
-                return Err(format!(
-                    "Symbol '{symbol}' is ambiguous; matches: {:?}",
-                    candidates
-                ));
+            };
+
+            if let Some(node) = node_opt {
+                if let Some(exp) = expected_hash {
+                    if node.hash != exp {
+                        return Err(format!(
+                            "CAS reference hash mismatch (stale pointer) for '{symbol}': expected {exp}, current is {}",
+                            node.hash
+                        ));
+                    }
+                }
+                return Ok(json!(node));
             }
             return Err(format!("Symbol '{symbol}' not found in AST index"));
         }
@@ -1389,19 +1421,49 @@ impl AxiomMcpServer {
         }
 
         if let Some(symbol_query) = uri.strip_prefix("axiom://slice/") {
-            let (symbol, query) = symbol_query.split_once('?').unwrap_or((symbol_query, ""));
+            let (symbol_and_hash, query) = symbol_query.split_once('?').unwrap_or((symbol_query, ""));
+            let (symbol, expected_hash) = match symbol_and_hash.split_once('#').or_else(|| symbol_and_hash.split_once('@')) {
+                Some((s, h)) if !h.is_empty() => (s, Some(h)),
+                _ => (symbol_and_hash, None),
+            };
             let budget = query
                 .split('&')
                 .find_map(|p| p.strip_prefix("budget="))
                 .and_then(|b| b.parse::<usize>().ok());
-            if let Some(slice) = self.ast_index.get_symbol_slice(symbol, budget) {
-                return Ok(json!(slice));
-            }
-            let candidates = self.ast_index.candidates_for(symbol);
-            if candidates.len() == 1 {
-                if let Some(slice) = self.ast_index.get_symbol_slice(&candidates[0], budget) {
-                    return Ok(json!(slice));
+
+            let (resolved_sym, node) = if let Some(node) = self.ast_index.get_symbol(symbol) {
+                (node.symbol_path.clone(), node)
+            } else {
+                let candidates = self.ast_index.candidates_for(symbol);
+                if candidates.len() == 1 {
+                    if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
+                        (candidates[0].clone(), node)
+                    } else {
+                        return Err(format!("Context slice could not be computed for '{symbol}'"));
+                    }
+                } else if candidates.len() > 1 {
+                    return Err(format!(
+                        "Symbol '{symbol}' is ambiguous; matches: {:?}",
+                        candidates
+                    ));
+                } else {
+                    return Err(format!(
+                        "Context slice could not be computed for '{symbol}'"
+                    ));
                 }
+            };
+
+            if let Some(exp) = expected_hash {
+                if node.hash != exp {
+                    return Err(format!(
+                        "CAS reference hash mismatch (stale pointer) for '{symbol}': expected {exp}, current is {}",
+                        node.hash
+                    ));
+                }
+            }
+
+            if let Some(slice) = self.ast_index.get_symbol_slice(&resolved_sym, budget) {
+                return Ok(json!(slice));
             }
             return Err(format!(
                 "Context slice could not be computed for '{symbol}'"
@@ -1657,7 +1719,7 @@ impl AxiomMcpServer {
     async fn execute_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
         match tool_name {
             "axiom_query_symbol" => {
-                let symbol = match required_str(&args, "symbol_path") {
+                let raw_symbol = match required_str(&args, "symbol_path") {
                     Ok(s) => s,
                     Err(e) => return Ok(json!({ "error": e })),
                 };
@@ -1669,53 +1731,56 @@ impl AxiomMcpServer {
                     },
                 };
 
-                if let Some(node) = self.ast_index.get_symbol(symbol) {
-                    let supertypes = self.ast_index.get_supertypes(symbol);
-                    let implementors = self.ast_index.get_implementors(symbol);
-                    let mut val = serde_json::to_value(node)?;
+                let (symbol, expected_hash) = match raw_symbol.split_once('#').or_else(|| raw_symbol.rsplit_once('@')) {
+                    Some((s, h)) if !h.is_empty() => (s, Some(h)),
+                    _ => (raw_symbol, None),
+                };
+
+                let resolved_node = if let Some(node) = self.ast_index.get_symbol(symbol) {
+                    Some(node)
+                } else {
+                    let candidates = self.ast_index.candidates_for(symbol);
+                    if candidates.len() == 1 {
+                        self.ast_index.get_symbol(&candidates[0])
+                    } else if candidates.len() > 1 {
+                        return Ok(json!({
+                            "error": format!("{:?} matches {} symbols; name one of them", symbol, candidates.len()),
+                            "candidates": candidates.iter().take(10).collect::<Vec<_>>()
+                        }));
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(node) = resolved_node {
+                    if let Some(exp) = expected_hash {
+                        if node.hash != exp {
+                            return Ok(json!({
+                                "error": format!("CAS reference hash mismatch (stale pointer) for '{symbol}'"),
+                                "symbol": symbol,
+                                "expected_hash": exp,
+                                "current_hash": node.hash
+                            }));
+                        }
+                    }
+
+                    let canonical = node.symbol_path.clone();
+                    let supertypes = self.ast_index.get_supertypes(&canonical);
+                    let implementors = self.ast_index.get_implementors(&canonical);
+                    let mut val = serde_json::to_value(&node)?;
+                    val["cas_ref"] = json!(node.cas_ref());
+                    val["cas_uri"] = json!(node.cas_slice_uri());
                     if !supertypes.is_empty() {
                         val["supertypes"] = json!(supertypes);
                     }
                     if !implementors.is_empty() {
                         val["implementors"] = json!(implementors);
                     }
-                    if let Some(slice) = self.ast_index.get_symbol_slice(symbol, token_budget) {
+                    if let Some(slice) = self.ast_index.get_symbol_slice(&canonical, token_budget) {
                         val["context_slice"] = json!(slice);
                     }
-                    self.attach_source_text(&mut val, symbol);
+                    self.attach_source_text(&mut val, &canonical);
                     return Ok(val);
-                }
-
-                // Resolve unique short-name candidate
-                let candidates = self.ast_index.candidates_for(symbol);
-                if candidates.len() == 1 {
-                    let resolved = &candidates[0];
-                    if let Some(node) = self.ast_index.get_symbol(resolved) {
-                        let supertypes = self.ast_index.get_supertypes(resolved);
-                        let implementors = self.ast_index.get_implementors(resolved);
-                        let mut val = serde_json::to_value(node)?;
-                        if !supertypes.is_empty() {
-                            val["supertypes"] = json!(supertypes);
-                        }
-                        if !implementors.is_empty() {
-                            val["implementors"] = json!(implementors);
-                        }
-                        if let Some(slice) = self.ast_index.get_symbol_slice(resolved, token_budget)
-                        {
-                            val["context_slice"] = json!(slice);
-                        }
-                        self.attach_source_text(&mut val, resolved);
-                        return Ok(val);
-                    }
-                }
-
-                // An ambiguous name is not a miss. Saying so beats picking one of
-                // the candidates and presenting it as the answer.
-                if candidates.len() > 1 {
-                    return Ok(json!({
-                        "error": format!("{:?} matches {} symbols; name one of them", symbol, candidates.len()),
-                        "candidates": candidates.iter().take(10).collect::<Vec<_>>()
-                    }));
                 }
 
                 Ok(json!({
