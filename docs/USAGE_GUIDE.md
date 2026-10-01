@@ -170,11 +170,11 @@ mentions in comment-stripped source, attributed to the function they sit in
 rather than to the file. Attribution by line is wrong for a nested function; the
 error it makes is charging a sibling rather than charging every test in the file.
 
-Measured on this repository on 2026-09-26 with
-`.github/scripts/blast_radius_stats.py`, 557 non-test symbols against 351 tests at
-depth 1: 314 symbols reach at least one test, and those select a mean of 14.5 and
-a median of 8, pruning a mean of 95.9% and a median of 97.9%. Mean pairwise
-Jaccard overlap between two symbols' answers is 0.03. The 243 symbols that reach
+Measured on this repository on 2026-10-01 with
+`.github/scripts/blast_radius_stats.py`, 586 non-test symbols against 365 tests at
+depth 1: 332 symbols reach at least one test, and those select a mean of 14.0 and
+a median of 7, pruning a mean of 96.2% and a median of 98.1%. Mean pairwise
+Jaccard overlap between two symbols' answers is 0.02. The 254 symbols that reach
 no test are the honest answer for a helper nothing exercises directly, not a
 claim that changing one is safe.
 

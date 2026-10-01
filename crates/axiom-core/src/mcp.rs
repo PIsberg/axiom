@@ -440,29 +440,87 @@ pub fn crdt_op_log_path() -> PathBuf {
     find_axiom_dir().join("crdt_ops.json")
 }
 
-/// Every operation recorded so far. A missing log is an empty one.
+/// Where the binary Tree-CRDT operation log lives, beside the index it describes.
+pub fn crdt_op_log_binary_path() -> PathBuf {
+    find_axiom_dir().join("crdt_ops.bin")
+}
+
+/// Load binary operations from length-prefixed stream.
+pub fn load_crdt_ops_binary(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let mut offset = 0;
+    let mut ops = Vec::new();
+    while offset + 4 <= bytes.len() {
+        let len = u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + len > bytes.len() {
+            break;
+        }
+        if let Ok(op) = axiom_crdt::TreeOp::decode_binary(&bytes[offset..offset + len]) {
+            ops.push(op);
+        }
+        offset += len;
+    }
+    ops
+}
+
+/// Every operation recorded so far. Checks binary op log first, falling back to JSON.
 pub fn load_crdt_ops(path: &std::path::Path) -> Vec<axiom_crdt::TreeOp> {
+    let bin_path = path.with_extension("bin");
+    if bin_path.exists() {
+        let bin_ops = load_crdt_ops_binary(&bin_path);
+        if !bin_ops.is_empty() {
+            return bin_ops;
+        }
+    }
     load_records(path).unwrap_or_default()
 }
 
-/// Append one operation.
-///
-/// Without this the CRDT never leaves the process that produced it. Each server
-/// started with an empty tree and saw only its own operations, so two agents
-/// working the same workspace reported different Merkle roots and neither could
-/// see the other's nodes. There were no merge conflicts because there was no
-/// merge: the convergence the type provides was only ever exercised by the
-/// in-process swarm simulation.
-///
-/// The operations are commutative, so replaying them in whatever order the file
-/// happens to hold converges to the same tree. That is the property the CRDT was
-/// chosen for, and it is what makes appending to a shared file enough.
+fn append_crdt_op_binary_unlocked(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let bin = op.encode_binary();
+    file.write_all(&(bin.len() as u32).to_le_bytes())?;
+    file.write_all(&bin)?;
+    file.flush()?;
+    Ok(())
+}
+
+/// Append one operation to the binary op log.
+pub fn append_crdt_op_binary(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _lock = axiom_ast::IndexLock::acquire(path)?;
+    append_crdt_op_binary_unlocked(path, op)
+}
+
+/// Append one operation. Writes both JSON and high-speed binary wire logs.
 pub fn append_crdt_op(path: &std::path::Path, op: &axiom_crdt::TreeOp) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _lock = axiom_ast::IndexLock::acquire(path)?;
     append_record(path, op)?;
+    let bin_path = path.with_extension("bin");
+    let _ = append_crdt_op_binary_unlocked(&bin_path, op);
     Ok(())
 }
 
@@ -818,14 +876,30 @@ impl AxiomMcpServer {
         }
     }
 
-    /// Resolve a symbol candidate (exact match or single unambiguous prefix match)
+    /// Resolve a symbol candidate (exact match or single unambiguous prefix match, with optional CAS hash verification)
     pub fn resolve_symbol_candidate(&self, symbol: &str) -> Option<String> {
-        if let Some(node) = self.ast_index.get_symbol(symbol) {
+        let (sym, exp_hash) = match symbol.split_once('#').or_else(|| symbol.rsplit_once('@')) {
+            Some((s, h)) if !h.is_empty() => (s, Some(h)),
+            _ => (symbol, None),
+        };
+        if let Some(node) = self.ast_index.get_symbol(sym) {
+            if let Some(exp) = exp_hash {
+                if node.hash != exp {
+                    return None;
+                }
+            }
             return Some(node.symbol_path);
         }
-        let candidates = self.ast_index.candidates_for(symbol);
+        let candidates = self.ast_index.candidates_for(sym);
         if candidates.len() == 1 {
-            return Some(candidates[0].clone());
+            if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
+                if let Some(exp) = exp_hash {
+                    if node.hash != exp {
+                        return None;
+                    }
+                }
+                return Some(candidates[0].clone());
+            }
         }
         None
     }
@@ -1337,21 +1411,40 @@ impl AxiomMcpServer {
             }));
         }
 
-        if let Some(symbol) = uri.strip_prefix("axiom://symbols/") {
-            if let Some(node) = self.ast_index.get_symbol(symbol) {
-                return Ok(json!(node));
-            }
-            let candidates = self.ast_index.candidates_for(symbol);
-            if candidates.len() == 1 {
-                if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
-                    return Ok(json!(node));
+        if let Some(symbol_raw) = uri.strip_prefix("axiom://symbols/") {
+            let (symbol, expected_hash) = match symbol_raw
+                .split_once('#')
+                .or_else(|| symbol_raw.split_once('@'))
+            {
+                Some((s, h)) if !h.is_empty() => (s, Some(h)),
+                _ => (symbol_raw, None),
+            };
+            let node_opt = if let Some(node) = self.ast_index.get_symbol(symbol) {
+                Some(node)
+            } else {
+                let candidates = self.ast_index.candidates_for(symbol);
+                if candidates.len() == 1 {
+                    self.ast_index.get_symbol(&candidates[0])
+                } else if candidates.len() > 1 {
+                    return Err(format!(
+                        "Symbol '{symbol}' is ambiguous; matches: {:?}",
+                        candidates
+                    ));
+                } else {
+                    None
                 }
-            }
-            if candidates.len() > 1 {
-                return Err(format!(
-                    "Symbol '{symbol}' is ambiguous; matches: {:?}",
-                    candidates
-                ));
+            };
+
+            if let Some(node) = node_opt {
+                if let Some(exp) = expected_hash {
+                    if node.hash != exp {
+                        return Err(format!(
+                            "CAS reference hash mismatch (stale pointer) for '{symbol}': expected {exp}, current is {}",
+                            node.hash
+                        ));
+                    }
+                }
+                return Ok(json!(node));
             }
             return Err(format!("Symbol '{symbol}' not found in AST index"));
         }
@@ -1389,19 +1482,55 @@ impl AxiomMcpServer {
         }
 
         if let Some(symbol_query) = uri.strip_prefix("axiom://slice/") {
-            let (symbol, query) = symbol_query.split_once('?').unwrap_or((symbol_query, ""));
+            let (symbol_and_hash, query) =
+                symbol_query.split_once('?').unwrap_or((symbol_query, ""));
+            let (symbol, expected_hash) = match symbol_and_hash
+                .split_once('#')
+                .or_else(|| symbol_and_hash.split_once('@'))
+            {
+                Some((s, h)) if !h.is_empty() => (s, Some(h)),
+                _ => (symbol_and_hash, None),
+            };
             let budget = query
                 .split('&')
                 .find_map(|p| p.strip_prefix("budget="))
                 .and_then(|b| b.parse::<usize>().ok());
-            if let Some(slice) = self.ast_index.get_symbol_slice(symbol, budget) {
-                return Ok(json!(slice));
-            }
-            let candidates = self.ast_index.candidates_for(symbol);
-            if candidates.len() == 1 {
-                if let Some(slice) = self.ast_index.get_symbol_slice(&candidates[0], budget) {
-                    return Ok(json!(slice));
+
+            let (resolved_sym, node) = if let Some(node) = self.ast_index.get_symbol(symbol) {
+                (node.symbol_path.clone(), node)
+            } else {
+                let candidates = self.ast_index.candidates_for(symbol);
+                if candidates.len() == 1 {
+                    if let Some(node) = self.ast_index.get_symbol(&candidates[0]) {
+                        (candidates[0].clone(), node)
+                    } else {
+                        return Err(format!(
+                            "Context slice could not be computed for '{symbol}'"
+                        ));
+                    }
+                } else if candidates.len() > 1 {
+                    return Err(format!(
+                        "Symbol '{symbol}' is ambiguous; matches: {:?}",
+                        candidates
+                    ));
+                } else {
+                    return Err(format!(
+                        "Context slice could not be computed for '{symbol}'"
+                    ));
                 }
+            };
+
+            if let Some(exp) = expected_hash {
+                if node.hash != exp {
+                    return Err(format!(
+                        "CAS reference hash mismatch (stale pointer) for '{symbol}': expected {exp}, current is {}",
+                        node.hash
+                    ));
+                }
+            }
+
+            if let Some(slice) = self.ast_index.get_symbol_slice(&resolved_sym, budget) {
+                return Ok(json!(slice));
             }
             return Err(format!(
                 "Context slice could not be computed for '{symbol}'"
@@ -1534,37 +1663,38 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let resolved_sym = self
+                    .resolve_symbol_candidate(symbol_path)
+                    .unwrap_or_else(|| symbol_path.to_string());
                 let mut prompt_text = format!(
-                    "Please review changes affecting symbol '{}'. Query its AST signature and blast radius to verify impacted tests and sandbox safety before attesting.",
-                    symbol_path
+                    "ACTION: REVIEW_PATCH | SYM: {} | VERIFY: AST_SIG,BLAST_RADIUS,SANDBOX",
+                    resolved_sym
                 );
-                if let Some(resolved) = self.resolve_symbol_candidate(symbol_path) {
-                    if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
-                        let br = self.ast_index.compute_blast_radius(&resolved, 2);
-                        let impacted_tests = br
-                            .as_ref()
-                            .map(|b| b.impacted_tests.clone())
-                            .unwrap_or_default();
-                        let causal_lines: Vec<String> = br
-                            .as_ref()
-                            .map(|b| {
-                                b.causal_paths
-                                    .iter()
-                                    .take(5)
-                                    .map(|(t, p)| format!("- {} -> {}", t, p.join(" -> ")))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let causal_summary = if causal_lines.is_empty() {
-                            "None detected".to_string()
-                        } else {
-                            causal_lines.join("\n")
-                        };
-                        prompt_text.push_str(&format!(
-                            "\n\n### Pre-Computed Sub-Graph Context for '{}':\n{}\n\n### Impacted Tests ({}):\n{:?}\n\n### Causal Propagation Paths:\n{}",
-                            resolved, slice.rendered_slice, impacted_tests.len(), impacted_tests, causal_summary
-                        ));
-                    }
+                if let Some(slice) = self.ast_index.get_symbol_slice(&resolved_sym, Some(600)) {
+                    let br = self.ast_index.compute_blast_radius(&resolved_sym, 2);
+                    let impacted_tests = br
+                        .as_ref()
+                        .map(|b| b.impacted_tests.clone())
+                        .unwrap_or_default();
+                    let causal_lines: Vec<String> = br
+                        .as_ref()
+                        .map(|b| {
+                            b.causal_paths
+                                .iter()
+                                .take(5)
+                                .map(|(t, p)| format!("- {} -> {}", t, p.join(" -> ")))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let causal_summary = if causal_lines.is_empty() {
+                        "None detected".to_string()
+                    } else {
+                        causal_lines.join("\n")
+                    };
+                    prompt_text.push_str(&format!(
+                        "\n\n### Pre-Computed Sub-Graph Context for '{}':\n{}\n\n### Impacted Tests ({}):\n{:?}\n\n### Causal Propagation Paths:\n{}",
+                        resolved_sym, slice.rendered_slice, impacted_tests.len(), impacted_tests, causal_summary
+                    ));
                 }
                 Ok(json!({
                     "description": "Review a proposed code patch against AST blast radius and security rules",
@@ -1586,22 +1716,23 @@ impl AxiomMcpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let goal = args.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+                let resolved_sym = self
+                    .resolve_symbol_candidate(target_symbol)
+                    .unwrap_or_else(|| target_symbol.to_string());
                 let mut prompt_text = format!(
-                    "Refactor symbol '{}' to accomplish: {}.\nStep 1: axiom_query_symbol\nStep 2: axiom_get_blast_radius\nStep 3: axiom_apply_mutation\nStep 4: axiom_eval_patch / axiom_run_tests\nStep 5: axiom_attest_commit",
-                    target_symbol, goal
+                    "ACTION: TARGETED_REFACTOR | TARGET: {} | GOAL: {}\nSTEPS: axiom_query_symbol -> axiom_get_blast_radius -> axiom_apply_mutation -> axiom_eval_patch/axiom_run_tests -> axiom_attest_commit",
+                    resolved_sym, goal
                 );
-                if let Some(resolved) = self.resolve_symbol_candidate(target_symbol) {
-                    if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
-                        let br = self.ast_index.compute_blast_radius(&resolved, 2);
-                        let impacted = br
-                            .as_ref()
-                            .map(|b| b.impacted_tests.clone())
-                            .unwrap_or_default();
-                        prompt_text.push_str(&format!(
-                            "\n\n### Pre-Computed Context for Target '{}':\n{}\n\n### Impacted Test Targets To Keep Green:\n{:?}\n\n### Refactoring Directives:\n- Targeted Symbol: {}\n- Context Budget: ~{} tokens\n- Downstream Impact: {} test suites",
-                            resolved, slice.rendered_slice, impacted, resolved, slice.estimated_tokens, impacted.len()
-                        ));
-                    }
+                if let Some(slice) = self.ast_index.get_symbol_slice(&resolved_sym, Some(600)) {
+                    let br = self.ast_index.compute_blast_radius(&resolved_sym, 2);
+                    let impacted = br
+                        .as_ref()
+                        .map(|b| b.impacted_tests.clone())
+                        .unwrap_or_default();
+                    prompt_text.push_str(&format!(
+                        "\n\n### Pre-Computed Context for Target '{}':\n{}\n\n### Impacted Test Targets To Keep Green:\n{:?}\n\n### Refactoring Directives:\n- Targeted Symbol: {}\n- Context Budget: ~{} tokens\n- Downstream Impact: {} test suites",
+                        resolved_sym, slice.rendered_slice, impacted, resolved_sym, slice.estimated_tokens, impacted.len()
+                    ));
                 }
                 Ok(json!({
                     "description": "Safely refactor a code symbol using blast radius test selection and atomic mutations",
@@ -1623,18 +1754,19 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let resolved_sym = self
+                    .resolve_symbol_candidate(symbol_path)
+                    .unwrap_or_else(|| symbol_path.to_string());
                 let mut prompt_text = format!(
-                    "Attest task completion for prompt '{}' on symbol '{}'. Ensure execution verification passes.",
-                    prompt, symbol_path
+                    "ACTION: ATTEST_TASK | TASK: {} | SYM: {} | REQ: VERIFICATION_PASSED",
+                    prompt, resolved_sym
                 );
-                if let Some(resolved) = self.resolve_symbol_candidate(symbol_path) {
-                    if let Some(node) = self.ast_index.get_symbol(&resolved) {
-                        let root = self.ast_index.compute_merkle_root();
-                        prompt_text.push_str(&format!(
-                            "\n\n### Task Attestation Context:\n- Symbol: {} [{}]\n- Current AST Hash: {}\n- Merkle Commit Root: {}\n- Next: Supply passing ctop_task_id from axiom_eval_patch or axiom_run_tests to axiom_attest_commit.",
-                            resolved, node.kind, node.hash, root
-                        ));
-                    }
+                if let Some(node) = self.ast_index.get_symbol(&resolved_sym) {
+                    let root = self.ast_index.compute_merkle_root();
+                    prompt_text.push_str(&format!(
+                        "\n\n### Task Attestation Context:\n- Symbol: {} [{}]\n- Current AST Hash: {}\n- Merkle Commit Root: {}\n- Next: Supply passing ctop_task_id from axiom_eval_patch or axiom_run_tests to axiom_attest_commit.",
+                        resolved_sym, node.kind, node.hash, root
+                    ));
                 }
                 Ok(json!({
                     "description": "Attest a task completion with cryptographic Merkle proof",
@@ -1657,7 +1789,7 @@ impl AxiomMcpServer {
     async fn execute_tool(&self, tool_name: &str, args: Value) -> Result<Value> {
         match tool_name {
             "axiom_query_symbol" => {
-                let symbol = match required_str(&args, "symbol_path") {
+                let raw_symbol = match required_str(&args, "symbol_path") {
                     Ok(s) => s,
                     Err(e) => return Ok(json!({ "error": e })),
                 };
@@ -1669,53 +1801,59 @@ impl AxiomMcpServer {
                     },
                 };
 
-                if let Some(node) = self.ast_index.get_symbol(symbol) {
-                    let supertypes = self.ast_index.get_supertypes(symbol);
-                    let implementors = self.ast_index.get_implementors(symbol);
-                    let mut val = serde_json::to_value(node)?;
+                let (symbol, expected_hash) = match raw_symbol
+                    .split_once('#')
+                    .or_else(|| raw_symbol.rsplit_once('@'))
+                {
+                    Some((s, h)) if !h.is_empty() => (s, Some(h)),
+                    _ => (raw_symbol, None),
+                };
+
+                let resolved_node = if let Some(node) = self.ast_index.get_symbol(symbol) {
+                    Some(node)
+                } else {
+                    let candidates = self.ast_index.candidates_for(symbol);
+                    if candidates.len() == 1 {
+                        self.ast_index.get_symbol(&candidates[0])
+                    } else if candidates.len() > 1 {
+                        return Ok(json!({
+                            "error": format!("{:?} matches {} symbols; name one of them", symbol, candidates.len()),
+                            "candidates": candidates.iter().take(10).collect::<Vec<_>>()
+                        }));
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(node) = resolved_node {
+                    if let Some(exp) = expected_hash {
+                        if node.hash != exp {
+                            return Ok(json!({
+                                "error": format!("CAS reference hash mismatch (stale pointer) for '{symbol}'"),
+                                "symbol": symbol,
+                                "expected_hash": exp,
+                                "current_hash": node.hash
+                            }));
+                        }
+                    }
+
+                    let canonical = node.symbol_path.clone();
+                    let supertypes = self.ast_index.get_supertypes(&canonical);
+                    let implementors = self.ast_index.get_implementors(&canonical);
+                    let mut val = serde_json::to_value(&node)?;
+                    val["cas_ref"] = json!(node.cas_ref());
+                    val["cas_uri"] = json!(node.cas_slice_uri());
                     if !supertypes.is_empty() {
                         val["supertypes"] = json!(supertypes);
                     }
                     if !implementors.is_empty() {
                         val["implementors"] = json!(implementors);
                     }
-                    if let Some(slice) = self.ast_index.get_symbol_slice(symbol, token_budget) {
+                    if let Some(slice) = self.ast_index.get_symbol_slice(&canonical, token_budget) {
                         val["context_slice"] = json!(slice);
                     }
-                    self.attach_source_text(&mut val, symbol);
+                    self.attach_source_text(&mut val, &canonical);
                     return Ok(val);
-                }
-
-                // Resolve unique short-name candidate
-                let candidates = self.ast_index.candidates_for(symbol);
-                if candidates.len() == 1 {
-                    let resolved = &candidates[0];
-                    if let Some(node) = self.ast_index.get_symbol(resolved) {
-                        let supertypes = self.ast_index.get_supertypes(resolved);
-                        let implementors = self.ast_index.get_implementors(resolved);
-                        let mut val = serde_json::to_value(node)?;
-                        if !supertypes.is_empty() {
-                            val["supertypes"] = json!(supertypes);
-                        }
-                        if !implementors.is_empty() {
-                            val["implementors"] = json!(implementors);
-                        }
-                        if let Some(slice) = self.ast_index.get_symbol_slice(resolved, token_budget)
-                        {
-                            val["context_slice"] = json!(slice);
-                        }
-                        self.attach_source_text(&mut val, resolved);
-                        return Ok(val);
-                    }
-                }
-
-                // An ambiguous name is not a miss. Saying so beats picking one of
-                // the candidates and presenting it as the answer.
-                if candidates.len() > 1 {
-                    return Ok(json!({
-                        "error": format!("{:?} matches {} symbols; name one of them", symbol, candidates.len()),
-                        "candidates": candidates.iter().take(10).collect::<Vec<_>>()
-                    }));
                 }
 
                 Ok(json!({
