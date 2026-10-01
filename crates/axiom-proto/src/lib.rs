@@ -202,6 +202,80 @@ impl CasSymbolRef {
     }
 }
 
+/// Typed operation an agent requests or executes
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AgentIntentOp {
+    Refactor,
+    FixBug,
+    AddFeature,
+    VerifyPatch,
+    AttestMutation,
+}
+
+/// Typed inter-agent handoff message: formal machine protocol replacing unstructured English prompts
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHandoff {
+    pub handoff_id: String,
+    pub sender_agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_agent: Option<String>,
+    pub intent_op: AgentIntentOp,
+    pub target_symbol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cas_hash: Option<String>,
+    pub pre_merkle_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_merkle_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blast_tests: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctop_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_payload: Option<String>,
+    pub timestamp: String,
+}
+
+impl AgentHandoff {
+    /// Compute deterministic BLAKE3 digest of the structured handoff
+    pub fn compute_digest(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(self.handoff_id.as_bytes());
+        hasher.update(self.sender_agent.as_bytes());
+        hasher.update(format!("{:?}", self.intent_op).as_bytes());
+        hasher.update(self.target_symbol.as_bytes());
+        if let Some(h) = &self.target_cas_hash {
+            hasher.update(h.as_bytes());
+        }
+        hasher.update(self.pre_merkle_root.as_bytes());
+        if let Some(r) = &self.post_merkle_root {
+            hasher.update(r.as_bytes());
+        }
+        for t in &self.blast_tests {
+            hasher.update(t.as_bytes());
+        }
+        if let Some(c) = &self.ctop_hash {
+            hasher.update(c.as_bytes());
+        }
+        format!("blake3_handoff_{}", hasher.finalize().to_hex())
+    }
+
+    /// Render dense canonical wire representation for agent context and attestation prompts
+    pub fn to_dense_wire(&self) -> String {
+        format!(
+            "HANDOFF: {} | FROM: {} | OP: {:?} | SYM: {} | PRE: {} | TESTS: {} | CTOP: {}",
+            self.handoff_id,
+            self.sender_agent,
+            self.intent_op,
+            self.target_symbol,
+            &self.pre_merkle_root[..self.pre_merkle_root.len().min(12)],
+            self.blast_tests.len(),
+            self.ctop_hash.as_deref().unwrap_or("NONE")
+        )
+    }
+}
+
+
 
 /// Evaluation request payload for instant sandboxes
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,6 +506,36 @@ impl ProvenanceAttestation {
     /// Re-derive the seal from this attestation's own stored fields plus the
     /// symbol and prompt being claimed, and compare. A caller that supplies a
     /// different prompt, or asks about a different symbol, gets false.
+    /// Generate a tamper-evident provenance record directly from a typed `AgentHandoff`
+    pub fn generate_from_handoff(
+        handoff: &AgentHandoff,
+        ctop_task_id: &str,
+        verified_by: &str,
+        verification_detail: &str,
+        previous_seal: &str,
+    ) -> Self {
+        let dense_intent = handoff.to_dense_wire();
+        Self::generate(NewAttestation {
+            parent_merkle_root: &handoff.pre_merkle_root,
+            commit_merkle_root: handoff
+                .post_merkle_root
+                .as_deref()
+                .unwrap_or(&handoff.pre_merkle_root),
+            agent_identity: &handoff.sender_agent,
+            prompt: &dense_intent,
+            symbol_path: &handoff.target_symbol,
+            ctop_task_id,
+            verified_by,
+            verification_detail,
+            previous_seal,
+        })
+    }
+
+    /// Verify this attestation against a typed `AgentHandoff`
+    pub fn verify_against_handoff(&self, handoff: &AgentHandoff) -> bool {
+        self.verify(&handoff.target_symbol, &handoff.to_dense_wire())
+    }
+
     /// Sign this record with a key, binding the signature to the symbol and
     /// prompt so it cannot be lifted onto a different record.
     pub fn sign_with(
