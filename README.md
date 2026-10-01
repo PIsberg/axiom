@@ -359,9 +359,9 @@ for the other.
 
 ## Running Tests
 
-The suite is 349 test functions across 66 integration test files. 43 of those
+The suite is 363 test functions across 71 integration test files. 43 of those
 are the end-to-end integration tests in `crates/axiom-cli/tests/e2e_test.rs`.
-Windows runs 346 of the 349: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
+Windows runs 360 of the 363: `crates/axiom-vmm/tests/spawn_retry.rs` pins a Linux
 `execve` race that has no Windows equivalent, so it compiles to nothing there.
 The counted figure is the one `docs_quote_the_real_numbers` pins, because it is
 the same on every machine:
