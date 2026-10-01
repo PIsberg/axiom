@@ -1596,37 +1596,38 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let resolved_sym = self
+                    .resolve_symbol_candidate(symbol_path)
+                    .unwrap_or_else(|| symbol_path.to_string());
                 let mut prompt_text = format!(
-                    "Please review changes affecting symbol '{}'. Query its AST signature and blast radius to verify impacted tests and sandbox safety before attesting.",
-                    symbol_path
+                    "ACTION: REVIEW_PATCH | SYM: {} | VERIFY: AST_SIG,BLAST_RADIUS,SANDBOX",
+                    resolved_sym
                 );
-                if let Some(resolved) = self.resolve_symbol_candidate(symbol_path) {
-                    if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
-                        let br = self.ast_index.compute_blast_radius(&resolved, 2);
-                        let impacted_tests = br
-                            .as_ref()
-                            .map(|b| b.impacted_tests.clone())
-                            .unwrap_or_default();
-                        let causal_lines: Vec<String> = br
-                            .as_ref()
-                            .map(|b| {
-                                b.causal_paths
-                                    .iter()
-                                    .take(5)
-                                    .map(|(t, p)| format!("- {} -> {}", t, p.join(" -> ")))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let causal_summary = if causal_lines.is_empty() {
-                            "None detected".to_string()
-                        } else {
-                            causal_lines.join("\n")
-                        };
-                        prompt_text.push_str(&format!(
-                            "\n\n### Pre-Computed Sub-Graph Context for '{}':\n{}\n\n### Impacted Tests ({}):\n{:?}\n\n### Causal Propagation Paths:\n{}",
-                            resolved, slice.rendered_slice, impacted_tests.len(), impacted_tests, causal_summary
-                        ));
-                    }
+                if let Some(slice) = self.ast_index.get_symbol_slice(&resolved_sym, Some(600)) {
+                    let br = self.ast_index.compute_blast_radius(&resolved_sym, 2);
+                    let impacted_tests = br
+                        .as_ref()
+                        .map(|b| b.impacted_tests.clone())
+                        .unwrap_or_default();
+                    let causal_lines: Vec<String> = br
+                        .as_ref()
+                        .map(|b| {
+                            b.causal_paths
+                                .iter()
+                                .take(5)
+                                .map(|(t, p)| format!("- {} -> {}", t, p.join(" -> ")))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let causal_summary = if causal_lines.is_empty() {
+                        "None detected".to_string()
+                    } else {
+                        causal_lines.join("\n")
+                    };
+                    prompt_text.push_str(&format!(
+                        "\n\n### Pre-Computed Sub-Graph Context for '{}':\n{}\n\n### Impacted Tests ({}):\n{:?}\n\n### Causal Propagation Paths:\n{}",
+                        resolved_sym, slice.rendered_slice, impacted_tests.len(), impacted_tests, causal_summary
+                    ));
                 }
                 Ok(json!({
                     "description": "Review a proposed code patch against AST blast radius and security rules",
@@ -1648,22 +1649,23 @@ impl AxiomMcpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let goal = args.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+                let resolved_sym = self
+                    .resolve_symbol_candidate(target_symbol)
+                    .unwrap_or_else(|| target_symbol.to_string());
                 let mut prompt_text = format!(
-                    "Refactor symbol '{}' to accomplish: {}.\nStep 1: axiom_query_symbol\nStep 2: axiom_get_blast_radius\nStep 3: axiom_apply_mutation\nStep 4: axiom_eval_patch / axiom_run_tests\nStep 5: axiom_attest_commit",
-                    target_symbol, goal
+                    "ACTION: TARGETED_REFACTOR | TARGET: {} | GOAL: {}\nSTEPS: axiom_query_symbol -> axiom_get_blast_radius -> axiom_apply_mutation -> axiom_eval_patch/axiom_run_tests -> axiom_attest_commit",
+                    resolved_sym, goal
                 );
-                if let Some(resolved) = self.resolve_symbol_candidate(target_symbol) {
-                    if let Some(slice) = self.ast_index.get_symbol_slice(&resolved, Some(600)) {
-                        let br = self.ast_index.compute_blast_radius(&resolved, 2);
-                        let impacted = br
-                            .as_ref()
-                            .map(|b| b.impacted_tests.clone())
-                            .unwrap_or_default();
-                        prompt_text.push_str(&format!(
-                            "\n\n### Pre-Computed Context for Target '{}':\n{}\n\n### Impacted Test Targets To Keep Green:\n{:?}\n\n### Refactoring Directives:\n- Targeted Symbol: {}\n- Context Budget: ~{} tokens\n- Downstream Impact: {} test suites",
-                            resolved, slice.rendered_slice, impacted, resolved, slice.estimated_tokens, impacted.len()
-                        ));
-                    }
+                if let Some(slice) = self.ast_index.get_symbol_slice(&resolved_sym, Some(600)) {
+                    let br = self.ast_index.compute_blast_radius(&resolved_sym, 2);
+                    let impacted = br
+                        .as_ref()
+                        .map(|b| b.impacted_tests.clone())
+                        .unwrap_or_default();
+                    prompt_text.push_str(&format!(
+                        "\n\n### Pre-Computed Context for Target '{}':\n{}\n\n### Impacted Test Targets To Keep Green:\n{:?}\n\n### Refactoring Directives:\n- Targeted Symbol: {}\n- Context Budget: ~{} tokens\n- Downstream Impact: {} test suites",
+                        resolved_sym, slice.rendered_slice, impacted, resolved_sym, slice.estimated_tokens, impacted.len()
+                    ));
                 }
                 Ok(json!({
                     "description": "Safely refactor a code symbol using blast radius test selection and atomic mutations",
@@ -1685,18 +1687,19 @@ impl AxiomMcpServer {
                     .get("symbol_path")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let resolved_sym = self
+                    .resolve_symbol_candidate(symbol_path)
+                    .unwrap_or_else(|| symbol_path.to_string());
                 let mut prompt_text = format!(
-                    "Attest task completion for prompt '{}' on symbol '{}'. Ensure execution verification passes.",
-                    prompt, symbol_path
+                    "ACTION: ATTEST_TASK | TASK: {} | SYM: {} | REQ: VERIFICATION_PASSED",
+                    prompt, resolved_sym
                 );
-                if let Some(resolved) = self.resolve_symbol_candidate(symbol_path) {
-                    if let Some(node) = self.ast_index.get_symbol(&resolved) {
-                        let root = self.ast_index.compute_merkle_root();
-                        prompt_text.push_str(&format!(
-                            "\n\n### Task Attestation Context:\n- Symbol: {} [{}]\n- Current AST Hash: {}\n- Merkle Commit Root: {}\n- Next: Supply passing ctop_task_id from axiom_eval_patch or axiom_run_tests to axiom_attest_commit.",
-                            resolved, node.kind, node.hash, root
-                        ));
-                    }
+                if let Some(node) = self.ast_index.get_symbol(&resolved_sym) {
+                    let root = self.ast_index.compute_merkle_root();
+                    prompt_text.push_str(&format!(
+                        "\n\n### Task Attestation Context:\n- Symbol: {} [{}]\n- Current AST Hash: {}\n- Merkle Commit Root: {}\n- Next: Supply passing ctop_task_id from axiom_eval_patch or axiom_run_tests to axiom_attest_commit.",
+                        resolved_sym, node.kind, node.hash, root
+                    ));
                 }
                 Ok(json!({
                     "description": "Attest a task completion with cryptographic Merkle proof",
