@@ -62,7 +62,7 @@ jobs:
       # TypeScript one reached main unrun (#9). Both are JDK-based and the JDK
       # is already on the runners.
       - name: Install a Kotlin toolchain
-        uses: fwilhe2/setup-kotlin@1e029b0e8d55c4695f73196b78dbf3dbd846e71c # main
+        uses: fwilhe2/setup-kotlin@81b4e7b60a3616a22f1c9d9f1a50e7c3b03787d6 # main
 
       - name: Install a Scala toolchain
         uses: coursier/setup-action@9b7939bf01fd1185ce2babe16135168361bf2c62 # v3.0.2
